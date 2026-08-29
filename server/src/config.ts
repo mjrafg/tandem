@@ -23,6 +23,12 @@ export const config = {
 
 export const shotsDir = path.join(dataDir, 'shots');
 
+/** base URL that sibling processes (MCP tools) use to reach this app */
+export function internalBase(): string {
+  const host = config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host;
+  return `http://${host}:${config.port}/api/internal`;
+}
+
 fs.mkdirSync(config.dataDir, { recursive: true });
 fs.mkdirSync(config.projectsDir, { recursive: true });
 fs.mkdirSync(path.join(config.dataDir, 'tmp'), { recursive: true });

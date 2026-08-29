@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AiUsage, Effort } from '../../../shared/types';
-import { config, shotsDir } from '../config';
+import { config, internalBase, shotsDir } from '../config';
 import { addEvent, updateEvent } from '../events';
 import { spawnStreaming } from './procs';
 import type { RunHandle } from './run';
@@ -123,7 +123,7 @@ export async function runCodexReview(h: RunHandle, opts: {
       OPENAI_API_KEY: '',
       NO_COLOR: '1',
       // inherited by the tandem_browser MCP stdio server
-      TANDEM_INTERNAL_URL: `http://127.0.0.1:${config.port}/api/internal`,
+      TANDEM_INTERNAL_URL: internalBase(),
       TANDEM_CHAT_ID: h.chat.id,
       TANDEM_INTERNAL_TOKEN: config.internalToken,
       TANDEM_SHOTS_DIR: shotsDir,

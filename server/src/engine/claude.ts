@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AiUsage, ChangedFile, ChatEvent, Effort } from '../../../shared/types';
-import { config, shotsDir } from '../config';
+import { config, internalBase, shotsDir } from '../config';
 import {
   addEvent, appendAssistantText, beginAssistantMessage, finishAssistantMessage, updateEvent,
 } from '../events';
@@ -209,7 +209,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       ANTHROPIC_AUTH_TOKEN: '',
       ...(EFFORT_THINKING[opts.effort] ? { MAX_THINKING_TOKENS: EFFORT_THINKING[opts.effort] } : {}),
       // inherited by the tandem MCP stdio servers (workdir + browser)
-      TANDEM_INTERNAL_URL: `http://127.0.0.1:${config.port}/api/internal`,
+      TANDEM_INTERNAL_URL: internalBase(),
       TANDEM_CHAT_ID: h.chat.id,
       TANDEM_INTERNAL_TOKEN: config.internalToken,
       TANDEM_SHOTS_DIR: shotsDir,
@@ -298,6 +298,7 @@ function mapToolUse(h: RunHandle, cwd: string, name: string, input: any): { even
     case 'TodoWrite':
     case 'ExitPlanMode':
     case 'EnterPlanMode':
+    case 'ToolSearch': // CLI-internal plumbing for loading deferred tools
       return null;
     default:
       // tandem MCP tools (workdir, browser) record their own effects via the

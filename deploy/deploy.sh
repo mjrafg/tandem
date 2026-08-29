@@ -32,11 +32,10 @@ ssh -o BatchMode=yes "$HOST" "
   chown -R aiaccounting:aiaccounting /srv/tandem
   cd /srv/tandem/app/server
   sudo -u aiaccounting env PATH=/opt/node22/bin:/usr/bin:/bin npm install --omit=dev --no-audit --no-fund --loglevel=error
-  # headless Chromium for the internal browser tool (no-op when present)
-  if ! sudo -u aiaccounting bash -c 'ls ~/.cache/ms-playwright 2>/dev/null | grep -q chromium'; then
-    env PATH=/opt/node22/bin:/usr/bin:/bin npx --prefix /srv/tandem/app/server playwright install-deps chromium >/dev/null 2>&1 || true
-    sudo -u aiaccounting env PATH=/opt/node22/bin:/usr/bin:/bin bash -c 'cd /srv/tandem/app/server && npx playwright install chromium' 2>&1 | tail -2
-  fi
+  # headless Chromium for the internal browser tool (idempotent: no-op when the
+  # exact browser build playwright wants is already present)
+  sudo -u aiaccounting env PATH=/opt/node22/bin:/usr/bin:/bin bash -c 'cd /srv/tandem/app/server && npx playwright install chromium' 2>&1 | tail -2
+  env PATH=/opt/node22/bin:/usr/bin:/bin bash -c 'cd /srv/tandem/app/server && npx playwright install-deps chromium' >/dev/null 2>&1 || true
   chown -R aiaccounting:aiaccounting /srv/tandem
   systemctl daemon-reload
   systemctl enable --now tandem

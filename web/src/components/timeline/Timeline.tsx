@@ -1,6 +1,7 @@
 import { memo } from 'react';
-import type { ChatEvent } from '@shared/types';
-import { fmtTime } from '../../lib/format';
+import type { AttachmentMeta, ChatEvent } from '@shared/types';
+import { fmtBytes, fmtTime } from '../../lib/format';
+import { attachmentIcon } from '../Composer';
 import { Markdown } from '../Markdown';
 import {
   AiCallRow, ChangeGroupRow, CommandGroupRow, CompactionRow, ErrorRow, FindingsRow, ReadGroupRow, RunMarker, SearchGroupRow, StatusLine,
@@ -66,11 +67,26 @@ export const Timeline = memo(function Timeline({ events }: { events: ChatEvent[]
 });
 
 function UserMessage({ ev }: { ev: ChatEvent }) {
-  const text = (ev.payload as any).text as string;
+  const p = ev.payload as { text: string; attachments?: AttachmentMeta[] };
   return (
     <div className="fade-up group flex justify-end pb-3 pt-6 first:pt-2">
       <div className="relative max-w-[85%] rounded-2xl rounded-br-md border border-[#2a3550]/60 bg-[#1a2233] px-4 py-2.5">
-        <div className="whitespace-pre-wrap text-[14px] leading-relaxed text-[#dee5f2]">{text}</div>
+        {p.text && <div className="whitespace-pre-wrap text-[14px] leading-relaxed text-[#dee5f2]">{p.text}</div>}
+        {p.attachments && p.attachments.length > 0 && (
+          <div className={`flex flex-wrap gap-1.5 ${p.text ? 'mt-2' : ''}`}>
+            {p.attachments.map((a) => (
+              <span
+                key={a.id}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#31406a]/70 bg-[#141b2b] px-2 py-1 text-[12px] text-[#c3cee6]"
+                title={a.path}
+              >
+                <span className="text-[#8ea2d0]">{attachmentIcon(a.name)}</span>
+                <span className="max-w-[240px] truncate">{a.name}</span>
+                <span className="text-[10.5px] text-[#6d7ea6]">{fmtBytes(a.size)}</span>
+              </span>
+            ))}
+          </div>
+        )}
         <span className="pointer-events-none absolute -bottom-4 right-1 text-[10.5px] tabular-nums text-dim opacity-0 transition-opacity group-hover:opacity-100">
           {fmtTime(ev.ts)}
         </span>

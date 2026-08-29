@@ -170,9 +170,10 @@ function EmptyChat({ project, onSuggest }: { project: Project; onSuggest: (text:
     <div className="flex flex-col items-center gap-4 pb-8 pt-[16vh] text-center">
       <div className="text-[16px] font-semibold">{project.name}</div>
       <p className="mono max-w-full truncate text-[12px] text-dim">{project.rootPath}</p>
-      <p className="max-w-[430px] text-[13px] leading-relaxed text-mut">
-        Ask anything about this project — the Builder decides for itself whether to
-        answer, investigate, run commands, or change code.
+      <p className="max-w-[460px] text-[13px] leading-relaxed text-mut">
+        Ask anything — the Builder decides for itself whether to answer, investigate,
+        run commands, or change code. Paste a repository URL to clone it here, or
+        attach a ZIP to open it as the project.
       </p>
       <div className="mt-1 flex max-w-[520px] flex-wrap justify-center gap-2">
         {suggestions.map((s) => (

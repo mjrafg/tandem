@@ -54,10 +54,14 @@ export function Toggle({ checked, onChange, label }: { checked: boolean; onChang
       aria-checked={checked}
       aria-label={label}
       onClick={() => onChange(!checked)}
-      className={`relative h-[20px] w-[36px] rounded-full transition-colors ${checked ? 'bg-accent' : 'bg-bg3 border border-line'}`}
+      className={`relative box-content h-[20px] w-[36px] shrink-0 cursor-pointer overflow-hidden rounded-full transition-colors duration-150 ${
+        checked ? 'bg-accent hover:brightness-110' : 'bg-bg3 ring-1 ring-inset ring-line hover:ring-[#333b48]'
+      }`}
     >
       <span
-        className={`absolute top-[2px] h-[16px] w-[16px] rounded-full bg-white transition-transform ${checked ? 'translate-x-[18px]' : 'translate-x-[2px]'}`}
+        className={`absolute left-[2px] top-[2px] h-[16px] w-[16px] rounded-full shadow-sm transition-all duration-150 ${
+          checked ? 'translate-x-[16px] bg-[#0b1428]' : 'translate-x-0 bg-[#9aa3af]'
+        }`}
       />
     </button>
   );

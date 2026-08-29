@@ -29,7 +29,7 @@ interface State {
   logout: () => Promise<void>;
   refreshAll: () => Promise<void>;
   loadChat: (id: string) => Promise<void>;
-  send: (id: string, text: string) => Promise<void>;
+  send: (id: string, text: string, attachmentIds?: string[]) => Promise<void>;
   stop: (id: string) => Promise<void>;
   loadSettings: () => Promise<void>;
   toast: (text: string, kind?: 'info' | 'error') => void;
@@ -105,9 +105,9 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  send: async (id, text) => {
+  send: async (id, text, attachmentIds) => {
     try {
-      await api.send(id, text);
+      await api.send(id, text, attachmentIds);
     } catch (err) {
       get().toast(err instanceof Error ? err.message : 'Failed to send', 'error');
       throw err;
@@ -193,17 +193,35 @@ function applyMsg(msg: ServerMsg): void {
 
 function connectStream(): void {
   if (source) return;
+  openStream();
+}
+
+function openStream(): void {
   source = new EventSource('/api/stream');
   source.onmessage = (e) => {
     try {
       applyMsg(JSON.parse(e.data) as ServerMsg);
     } catch { /* malformed frame */ }
   };
-  source.onerror = () => {
-    // EventSource reconnects automatically; refresh state once it returns
-  };
   source.onopen = () => {
-    void useStore.getState().refreshAll();
+    // catch up on anything missed while disconnected
+    const s = useStore.getState();
+    void s.refreshAll();
+    for (const [chatId, isLoaded] of Object.entries(s.loaded)) {
+      if (isLoaded) void s.loadChat(chatId);
+    }
+  };
+  source.onerror = () => {
+    // EventSource retries transient failures itself, but a non-stream response
+    // (e.g. a proxy error page during a server restart) closes it for good —
+    // supervise and reopen so live updates always come back.
+    if (source && source.readyState === EventSource.CLOSED) {
+      source.close();
+      source = null;
+      setTimeout(() => {
+        if (!source && useStore.getState().email) openStream();
+      }, 2500);
+    }
   };
 }
 

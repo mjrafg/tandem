@@ -1,9 +1,6 @@
-import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { promisify } from 'node:util';
-import AdmZip from 'adm-zip';
+import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { DirListing, Project } from '../../shared/types';
 import { config } from './config';
@@ -11,40 +8,75 @@ import { db, getProject, rowToProject } from './db';
 import { broadcast } from './sse';
 import { getGitStatus } from './git';
 
-const execFileP = promisify(execFile);
+const FORBIDDEN_PREFIXES = ['/proc', '/sys', '/dev', '/etc', '/boot', '/run'];
 
-const MAX_ZIP_BYTES = 400 * 1024 * 1024;
-const MAX_ZIP_ENTRIES = 40_000;
-
-function insertProject(name: string, rootPath: string, source: Project['source']): Project {
+export function findOrCreateProject(rootPath: string, source: Project['source']): Project {
+  const resolved = path.resolve(rootPath);
+  const existing = db.prepare('SELECT * FROM projects WHERE root_path = ?').get(resolved);
+  if (existing) {
+    db.prepare('UPDATE projects SET last_opened_at = ? WHERE id = ?').run(Date.now(), (existing as any).id);
+    const project = rowToProject({ ...(existing as any), last_opened_at: Date.now() });
+    broadcast({ type: 'project', project });
+    return project;
+  }
   const now = Date.now();
-  const project: Project = { id: randomUUID(), name, rootPath, source, createdAt: now, lastOpenedAt: now };
+  const project: Project = {
+    id: randomUUID(), name: path.basename(resolved) || resolved, rootPath: resolved,
+    source, createdAt: now, lastOpenedAt: now,
+  };
   db.prepare('INSERT INTO projects (id, name, root_path, source, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(project.id, name, rootPath, source, now, now);
+    .run(project.id, project.name, project.rootPath, source, now, now);
   broadcast({ type: 'project', project });
   return project;
 }
 
-/** unique directory under the managed projects root */
-function managedTarget(baseName: string): string {
-  const safe = baseName.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^[.-]+/, '').slice(0, 60) || 'project';
-  let target = path.join(config.projectsDir, safe);
-  let i = 2;
-  while (fs.existsSync(target)) target = path.join(config.projectsDir, `${safe}-${i++}`);
-  return target;
-}
-
 function validDirectory(p: string): string | null {
-  if (!path.isAbsolute(p)) return 'Path must be absolute.';
+  if (!p || !path.isAbsolute(p)) return 'Path must be absolute.';
   const resolved = path.resolve(p);
-  if (resolved === '/' ) return 'The filesystem root cannot be a project.';
-  for (const forbidden of ['/proc', '/sys', '/dev', '/etc', '/boot', '/run']) {
-    if (resolved === forbidden || resolved.startsWith(forbidden + '/')) return `Directories under ${forbidden} cannot be projects.`;
+  if (resolved === '/') return 'The filesystem root cannot be a project.';
+  for (const forbidden of FORBIDDEN_PREFIXES) {
+    if (resolved === forbidden || resolved.startsWith(forbidden + '/')) return `Directories under ${forbidden} cannot be used.`;
   }
   let st: fs.Stats;
   try { st = fs.statSync(resolved); } catch { return 'Directory does not exist or is not readable.'; }
   if (!st.isDirectory()) return 'Path is not a directory.';
   return null;
+}
+
+/** Guard for mutating operations (mkdir target parent excluded — see mkdir). */
+function guardMutablePath(p: string): string | null {
+  const base = validDirectory(p);
+  if (base) return base;
+  const resolved = path.resolve(p);
+  if (resolved.split('/').filter(Boolean).length < 2) {
+    return 'Top-level system directories cannot be modified here.';
+  }
+  const protectedPaths = [config.dataDir, config.projectsDir, process.cwd()];
+  for (const prot of protectedPaths.map((x) => path.resolve(x))) {
+    if (resolved === prot) return 'This directory is managed by Tandem and cannot be modified.';
+    if (prot.startsWith(resolved + '/')) return 'This directory contains Tandem\'s own data and cannot be modified.';
+  }
+  return null;
+}
+
+function validFolderName(name: string): string | null {
+  const clean = (name ?? '').trim();
+  if (!clean) return 'Enter a folder name.';
+  if (clean === '.' || clean === '..') return 'That name is not allowed.';
+  if (clean.length > 80) return 'Folder names are limited to 80 characters.';
+  if (/[/\0]/.test(clean)) return 'Folder names cannot contain slashes.';
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f]/.test(clean)) return 'Folder names cannot contain control characters.';
+  return null;
+}
+
+function isWritable(p: string): boolean {
+  try {
+    fs.accessSync(p, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function registerProjectRoutes(app: FastifyInstance): void {
@@ -61,19 +93,13 @@ export function registerProjectRoutes(app: FastifyInstance): void {
     return { ok: true };
   });
 
-  // -------------------------------------------------- existing directory
+  // -------------------------------------------------- choose working directory
 
   app.post('/api/projects/directory', async (req, reply) => {
     const { dirPath } = req.body as { dirPath: string };
     const problem = validDirectory(dirPath ?? '');
     if (problem) return reply.code(400).send({ error: problem });
-    const resolved = path.resolve(dirPath);
-    const existing = db.prepare('SELECT * FROM projects WHERE root_path = ?').get(resolved);
-    if (existing) {
-      db.prepare('UPDATE projects SET last_opened_at = ? WHERE id = ?').run(Date.now(), (existing as any).id);
-      return rowToProject(existing);
-    }
-    return insertProject(path.basename(resolved), resolved, 'directory');
+    return findOrCreateProject(dirPath, 'directory');
   });
 
   // -------------------------------------------------- directory browser
@@ -97,6 +123,7 @@ export function registerProjectRoutes(app: FastifyInstance): void {
       path: resolved,
       parent: resolved === '/' ? null : path.dirname(resolved),
       dirs,
+      writable: isWritable(resolved),
       quickLinks: [
         { name: 'projects', path: config.projectsDir },
         { name: 'srv', path: '/srv' },
@@ -107,76 +134,77 @@ export function registerProjectRoutes(app: FastifyInstance): void {
     return listing;
   });
 
-  // -------------------------------------------------- zip import
-
-  app.post('/api/projects/zip', async (req, reply) => {
-    const file = await (req as any).file({ limits: { fileSize: MAX_ZIP_BYTES } });
-    if (!file) return reply.code(400).send({ error: 'No file uploaded.' });
-    const buf = await file.toBuffer();
-    const baseName = (file.filename || 'project.zip').replace(/\.zip$/i, '');
-
-    let zip: AdmZip;
-    try { zip = new AdmZip(buf); } catch { return reply.code(400).send({ error: 'Not a valid ZIP archive.' }); }
-    const entries = zip.getEntries();
-    if (entries.length === 0) return reply.code(400).send({ error: 'The archive is empty.' });
-    if (entries.length > MAX_ZIP_ENTRIES) return reply.code(400).send({ error: `Too many entries (${entries.length} > ${MAX_ZIP_ENTRIES}).` });
-
-    // single top-level folder collapses into the project root
-    const roots = new Set(entries.map((e) => e.entryName.split('/')[0]));
-    const collapse = roots.size === 1 && entries.every((e) => e.entryName.includes('/')) ? `${[...roots][0]}/` : '';
-
-    const target = managedTarget(collapse ? [...roots][0] : baseName);
-    fs.mkdirSync(target, { recursive: true });
-
-    let total = 0;
-    for (const entry of entries) {
-      const rel = collapse && entry.entryName.startsWith(collapse) ? entry.entryName.slice(collapse.length) : entry.entryName;
-      if (!rel) continue;
-      const dest = path.resolve(target, rel);
-      if (!dest.startsWith(target + path.sep) && dest !== target) {
-        fs.rmSync(target, { recursive: true, force: true });
-        return reply.code(400).send({ error: `Unsafe path in archive: ${entry.entryName}` });
-      }
-      if (entry.isDirectory) {
-        fs.mkdirSync(dest, { recursive: true });
-        continue;
-      }
-      const data = entry.getData();
-      total += data.length;
-      if (total > MAX_ZIP_BYTES) {
-        fs.rmSync(target, { recursive: true, force: true });
-        return reply.code(400).send({ error: 'Archive expands beyond the 400 MB limit.' });
-      }
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, data);
+  app.post('/api/fs/mkdir', async (req, reply) => {
+    const { parent, name } = (req.body ?? {}) as { parent?: string; name?: string };
+    const parentProblem = validDirectory(parent ?? '');
+    if (parentProblem) return reply.code(400).send({ error: parentProblem });
+    const nameProblem = validFolderName(name ?? '');
+    if (nameProblem) return reply.code(400).send({ error: nameProblem });
+    const target = path.join(path.resolve(parent!), name!.trim());
+    if (fs.existsSync(target)) return reply.code(409).send({ error: `"${name!.trim()}" already exists here.` });
+    if (!isWritable(path.resolve(parent!))) return reply.code(403).send({ error: 'This directory is not writable.' });
+    try {
+      fs.mkdirSync(target);
+    } catch (err: any) {
+      return reply.code(500).send({ error: `Could not create the folder: ${err?.code ?? err}` });
     }
-    const project = insertProject(path.basename(target), target, 'zip');
-    return { ...project, imported: { files: entries.filter((e) => !e.isDirectory).length, bytes: total } };
+    return { name: name!.trim(), path: target };
   });
 
-  // -------------------------------------------------- git clone
-
-  app.post('/api/projects/git', async (req, reply) => {
-    const { url } = req.body as { url: string };
-    const clean = (url ?? '').trim();
-    if (!/^(https?:\/\/|git@|ssh:\/\/)[^\s]+$/.test(clean)) {
-      return reply.code(400).send({ error: 'That does not look like a git URL (https://…, git@…, or ssh://…).' });
-    }
-    const baseName = clean.split('/').pop()?.replace(/\.git$/, '') || 'repository';
-    const target = managedTarget(baseName);
+  app.post('/api/fs/rename', async (req, reply) => {
+    const { dirPath, name } = (req.body ?? {}) as { dirPath?: string; name?: string };
+    const problem = guardMutablePath(dirPath ?? '');
+    if (problem) return reply.code(400).send({ error: problem });
+    const nameProblem = validFolderName(name ?? '');
+    if (nameProblem) return reply.code(400).send({ error: nameProblem });
+    const src = path.resolve(dirPath!);
+    const dest = path.join(path.dirname(src), name!.trim());
+    if (dest === src) return { path: src };
+    if (fs.existsSync(dest)) return reply.code(409).send({ error: `"${name!.trim()}" already exists here.` });
+    if (!isWritable(path.dirname(src))) return reply.code(403).send({ error: 'The parent directory is not writable.' });
     try {
-      const { stdout, stderr } = await execFileP('git', ['clone', '--progress', clean, target], {
-        timeout: 5 * 60_000,
-        maxBuffer: 8 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-      });
-      const project = insertProject(path.basename(target), target, 'git');
-      return { ...project, cloneOutput: tail(stderr || stdout, 30) };
+      fs.renameSync(src, dest);
     } catch (err: any) {
-      fs.rmSync(target, { recursive: true, force: true });
-      const output = tail(String(err?.stderr || err?.message || err), 30);
-      return reply.code(502).send({ error: 'git clone failed', output });
+      return reply.code(500).send({ error: `Rename failed: ${err?.code ?? err}` });
     }
+    // keep projects pointing at the moved directory (exact match and descendants)
+    const affected = db.prepare("SELECT * FROM projects WHERE root_path = ? OR root_path LIKE ? ESCAPE '\\'")
+      .all(src, `${src.replace(/[%_\\]/g, (m) => `\\${m}`)}/%`) as any[];
+    for (const row of affected) {
+      const newRoot = row.root_path === src ? dest : dest + row.root_path.slice(src.length);
+      const newName = row.root_path === src ? path.basename(dest) : row.name;
+      db.prepare('UPDATE projects SET root_path = ?, name = ? WHERE id = ?').run(newRoot, newName, row.id);
+      broadcast({ type: 'project', project: rowToProject({ ...row, root_path: newRoot, name: newName }) });
+    }
+    return { path: dest, updatedProjects: affected.length };
+  });
+
+  app.post('/api/fs/delete', async (req, reply) => {
+    const { dirPath, force } = (req.body ?? {}) as { dirPath?: string; force?: boolean };
+    const problem = guardMutablePath(dirPath ?? '');
+    if (problem) return reply.code(400).send({ error: problem });
+    const resolved = path.resolve(dirPath!);
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(resolved);
+    } catch (err: any) {
+      return reply.code(500).send({ error: `Cannot read the folder: ${err?.code ?? err}` });
+    }
+    if (entries.length > 0 && !force) {
+      return reply.code(409).send({
+        error: 'Folder is not empty',
+        requiresConfirm: true,
+        entries: entries.length,
+        name: path.basename(resolved),
+      });
+    }
+    if (!isWritable(path.dirname(resolved))) return reply.code(403).send({ error: 'The parent directory is not writable.' });
+    try {
+      fs.rmSync(resolved, { recursive: true, force: true });
+    } catch (err: any) {
+      return reply.code(500).send({ error: `Delete failed: ${err?.code ?? err}` });
+    }
+    return { ok: true, deleted: resolved, wasEmpty: entries.length === 0 };
   });
 
   // -------------------------------------------------- git status
@@ -186,9 +214,4 @@ export function registerProjectRoutes(app: FastifyInstance): void {
     if (!project) return reply.code(404).send({ error: 'Project not found' });
     return getGitStatus(project.rootPath);
   });
-}
-
-function tail(s: string, lines: number): string {
-  const all = s.split('\n').filter((l) => l.trim().length > 0);
-  return all.slice(-lines).join('\n');
 }

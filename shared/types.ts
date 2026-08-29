@@ -78,7 +78,15 @@ export type EventKind =
 
 export type StepStatus = 'running' | 'done' | 'failed' | 'stopped';
 
-export interface UserMessagePayload { text: string }
+export interface AttachmentMeta {
+  id: string;
+  name: string;
+  size: number;
+  /** server-side location, shown in AI-call transparency */
+  path?: string;
+}
+
+export interface UserMessagePayload { text: string; attachments?: AttachmentMeta[] }
 
 export interface AssistantMessagePayload { text: string; streaming?: boolean }
 
@@ -229,6 +237,8 @@ export interface DirListing {
   parent: string | null;
   dirs: DirEntry[];
   quickLinks: DirEntry[];
+  /** whether the current directory allows creating folders */
+  writable: boolean;
 }
 
 // ---------------------------------------------------------------- SSE

@@ -14,6 +14,7 @@ export interface ExportBundle {
 
 const fmtTime = (ts: number) => new Date(ts).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 const fmtDur = (ms?: number) => (ms == null ? '' : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
+const fmtSize = (n: number) => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
 
 // ---------------------------------------------------------------- markdown
 
@@ -37,8 +38,14 @@ export function toMarkdown(b: ExportBundle): string {
 function eventToMarkdown(e: ChatEvent): string[] {
   const t = fmtTime(e.ts);
   switch (e.kind) {
-    case 'user_message':
-      return [`---`, ``, `### 🧑 User · ${t}`, ``, (e.payload as any).text];
+    case 'user_message': {
+      const p = e.payload as any;
+      const lines = [`---`, ``, `### 🧑 User · ${t}`, ``, p.text || ''];
+      if (p.attachments?.length) {
+        lines.push('', ...p.attachments.map((a: any) => `> 📎 **${a.name}** (${fmtSize(a.size)})${a.path ? ` — \`${a.path}\`` : ''}`));
+      }
+      return lines;
+    }
     case 'assistant_message':
       return [`### 🤖 Assistant · ${t}`, ``, (e.payload as any).text];
     case 'status':
@@ -190,8 +197,13 @@ function diffToHtml(diff: string): string {
 function eventToHtml(e: ChatEvent): string {
   const t = fmtTime(e.ts);
   switch (e.kind) {
-    case 'user_message':
-      return `<div class="ev user"><div class="who">User · ${t}</div>${mdLite((e.payload as any).text)}</div>`;
+    case 'user_message': {
+      const p = e.payload as any;
+      const atts = p.attachments?.length
+        ? `<div class="kv" style="margin-top:6px">${p.attachments.map((a: any) => `📎 <b>${escapeHtml(a.name)}</b> (${fmtSize(a.size)})${a.path ? ` — <code>${escapeHtml(a.path)}</code>` : ''}`).join('<br>')}</div>`
+        : '';
+      return `<div class="ev user"><div class="who">User · ${t}</div>${mdLite(p.text || '')}${atts}</div>`;
+    }
     case 'assistant_message':
       return `<div class="ev assistant"><div class="who">Assistant · ${t}</div>${mdLite((e.payload as any).text)}</div>`;
     case 'status':

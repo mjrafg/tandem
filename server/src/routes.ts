@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { AppSettings, CompactPreview, RoleName } from '../../shared/types';
+import type { AppSettings, AttachmentMeta, CompactPreview, RoleName } from '../../shared/types';
 import {
   createSession, destroySession, getUser, loginAllowed, recordLoginAttempt,
   setPassword, setSessionCookie, verifyPassword,
@@ -107,14 +109,57 @@ export function registerRoutes(app: FastifyInstance): void {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
     if (isRunning(chat.id)) return reply.code(409).send({ error: 'An agent run is already in progress for this chat.' });
-    const { text } = (req.body ?? {}) as { text?: string };
+    const { text, attachmentIds } = (req.body ?? {}) as { text?: string; attachmentIds?: string[] };
     const clean = (text ?? '').trim();
-    if (!clean) return reply.code(400).send({ error: 'Empty message.' });
+    const attachments = resolveAttachments(attachmentIds ?? []);
+    if (!clean && attachments.length === 0) return reply.code(400).send({ error: 'Empty message.' });
 
     const isFirst = !db.prepare("SELECT id FROM events WHERE chat_id = ? AND kind = 'user_message' LIMIT 1").get(chat.id);
-    addEvent(chat.id, 'user_message', { text: clean });
-    if (isFirst || chat.title === 'New chat') setChatTitle(chat.id, deriveTitle(clean));
-    void startRun(chat.id, clean);
+    addEvent(chat.id, 'user_message', attachments.length > 0 ? { text: clean, attachments } : { text: clean });
+    if (isFirst || chat.title === 'New chat') {
+      setChatTitle(chat.id, deriveTitle(clean || attachments[0]?.name || 'New chat'));
+    }
+    void startRun(chat.id, clean, attachments);
+    return { ok: true };
+  });
+
+  // ---------------------------------------------------------------- attachments
+
+  const attachmentsDir = path.join(config.dataDir, 'attachments');
+
+  function resolveAttachments(ids: string[]): AttachmentMeta[] {
+    const out: AttachmentMeta[] = [];
+    for (const id of ids.slice(0, 8)) {
+      if (!/^[0-9a-f-]{36}$/.test(id)) continue;
+      const dir = path.join(attachmentsDir, id);
+      try {
+        const [name] = fs.readdirSync(dir);
+        if (!name) continue;
+        const full = path.join(dir, name);
+        out.push({ id, name, size: fs.statSync(full).size, path: full });
+      } catch { /* attachment was removed */ }
+    }
+    return out;
+  }
+
+  app.post('/api/chats/:id/attachments', async (req, reply) => {
+    const chat = getChat((req.params as any).id);
+    if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
+    const file = await (req as any).file({ limits: { fileSize: 200 * 1024 * 1024 } });
+    if (!file) return reply.code(400).send({ error: 'No file received.' });
+    const name = path.basename(file.filename || 'attachment').replace(/[\0/]/g, '_').slice(0, 120) || 'attachment';
+    const id = randomUUID();
+    const dir = path.join(attachmentsDir, id);
+    fs.mkdirSync(dir, { recursive: true });
+    const buf = await file.toBuffer();
+    fs.writeFileSync(path.join(dir, name), buf);
+    return { id, name, size: buf.length } satisfies AttachmentMeta;
+  });
+
+  app.delete('/api/attachments/:id', async (req, reply) => {
+    const id = (req.params as any).id as string;
+    if (!/^[0-9a-f-]{36}$/.test(id)) return reply.code(400).send({ error: 'Bad attachment id.' });
+    fs.rmSync(path.join(attachmentsDir, id), { recursive: true, force: true });
     return { ok: true };
   });
 

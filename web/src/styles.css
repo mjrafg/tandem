@@ -111,6 +111,10 @@ body {
   outline-offset: 1px;
   border-radius: 6px;
 }
+/* elements whose container already shows the focus state */
+.no-ring:focus-visible {
+  outline: none;
+}
 
 /* ---------------------------------------------------------------- markdown */
 

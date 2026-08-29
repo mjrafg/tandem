@@ -127,8 +127,8 @@ export function SettingsView() {
             <Field label="Target size after compaction" hint="tokens"><Num value={draft.context.autoTargetTokens} onChange={(v) => set((d) => { d.context.autoTargetTokens = v; })} /></Field>
             <Field label="Recent context kept verbatim" hint="tokens"><Num value={draft.context.preserveRecentTokens} onChange={(v) => set((d) => { d.context.preserveRecentTokens = v; })} /></Field>
           </div>
-          <div className="flex items-center justify-between border-t border-linesoft pt-3.5">
-            <div>
+          <div className="flex items-center justify-between gap-4 border-t border-linesoft pt-3.5">
+            <div className="min-w-0">
               <div className="text-[13px] font-medium">Automatic compaction</div>
               <p className="text-[12px] text-dim">Compact on its own once the prominent threshold is crossed. Off by default — you stay in control.</p>
             </div>
@@ -198,11 +198,17 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
   return (
     <div className="card px-4 py-3.5">
       <div className="mb-1 flex items-center gap-2">
-        <span className={`h-[8px] w-[8px] rounded-full ${info.dot}`} />
-        <span className="text-[13.5px] font-semibold">{info.title}</span>
+        <span className={`h-[8px] w-[8px] shrink-0 rounded-full ${info.dot}`} />
+        <span className="min-w-0 truncate text-[13.5px] font-semibold">{info.title}</span>
         {role === 'reviewer' && (
-          <span className="ml-auto flex items-center gap-2 text-[12px] text-dim">
-            Review code changes
+          <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-3">
+            <button
+              type="button"
+              className="cursor-pointer select-none whitespace-nowrap text-[12px] text-dim transition-colors hover:text-mut"
+              onClick={() => onChange({ enabled: cfg.enabled === false })}
+            >
+              Review code changes
+            </button>
             <Toggle checked={cfg.enabled !== false} onChange={(v) => onChange({ enabled: v })} label="Reviewer enabled" />
           </span>
         )}

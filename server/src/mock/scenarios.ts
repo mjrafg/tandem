@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ChangedFile, Finding, SearchMatch } from '../../../shared/types';
+import type { AttachmentMeta, ChangedFile, Finding, SearchMatch } from '../../../shared/types';
 import { BASE_PROMPTS } from '../settings';
+import { getGitStatus } from '../git';
+import { countFiles, extractZipInternal, hasUnzipBinary, scanZip, uniquePath } from './archive';
 import type { Run } from './engine';
 
 /*
@@ -28,8 +30,12 @@ const FALLBACK_FILES = [
   'src/lib/format.ts', 'src/styles.css', 'package.json', 'README.md',
 ];
 
-/** Real file names from the project when available, plausible ones otherwise. */
-export function sampleFiles(rootPath: string): string[] {
+/**
+ * Real file names from the project when available; plausible ones otherwise.
+ * Pass `fallback: false` for flows that report REAL actions (clone/extract) —
+ * those must never invent files.
+ */
+export function sampleFiles(rootPath: string, opts: { fallback?: boolean } = {}): string[] {
   const found: string[] = [];
   const walk = (dir: string, depth: number) => {
     if (depth > 3 || found.length > 60) return;
@@ -46,7 +52,9 @@ export function sampleFiles(rootPath: string): string[] {
   };
   walk(rootPath, 0);
   const source = found.filter((f) => !/^(package(-lock)?\.json|README)/.test(f));
-  return source.length >= 4 ? source : found.length >= 4 ? found : FALLBACK_FILES;
+  if (source.length >= 4) return source;
+  if (found.length > 0) return found;
+  return opts.fallback === false ? [] : FALLBACK_FILES;
 }
 
 function keywords(text: string): string[] {
@@ -67,9 +75,18 @@ function composePrompt(h: Run, role: 'builder' | 'reviewer' | 'final_repair', re
   if (h.settings.sharedInstructions.trim()) parts.push(h.settings.sharedInstructions.trim());
   if (extra.trim()) parts.push(extra.trim());
   parts.push(`Project: ${h.project.name}\nWorking directory: ${h.project.rootPath}`);
+  if (h.attachments.length > 0) {
+    parts.push(`Attached files:\n${h.attachments.map((a) => `- ${a.path ?? a.name} (${fmtBytes(a.size)})`).join('\n')}`);
+  }
   parts.push(`[active conversation context · ~${Math.round(h.usageNow() / 1000)}k tokens]`);
   parts.push(request);
   return parts.join('\n\n');
+}
+
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
 }
 
 function mkDiff(file: string, hunks: { at: number; context: string[]; remove: string[]; add: string[] }[]): string {
@@ -144,13 +161,236 @@ function grepMatches(files: string[], term: string): SearchMatch[] {
 
 // ---------------------------------------------------------------- flows
 
-export async function buildScenario(h: Run, userText: string): Promise<void> {
+export async function buildScenario(h: Run, userText: string, attachments: AttachmentMeta[] = []): Promise<void> {
+  // Real project-acquisition actions first: an attached archive, or a repo URL.
+  const zip = attachments.find((a) => a.path && a.name.toLowerCase().endsWith('.zip'));
+  if (zip) return zipFlow(h, userText, zip);
+
+  const url = extractGitUrl(userText);
+  const cloneVerb = /\b(clone|check ?out|download|fetch|get|grab|pull|open|use)\b/i.test(userText);
+  if (url && (cloneVerb || /\.git$/i.test(url))) return cloneFlow(h, userText, url);
+  if (!url && /\b(clone|check ?out)\b/i.test(userText) && /\b(repo|repository|github|gitlab|bitbucket|project)\b/i.test(userText)) {
+    return askRepoUrlFlow(h, userText);
+  }
+
   const files = sampleFiles(h.project.rootPath);
   const changeVerb = /\b(fix|add|implement|refactor|redesign|rework|make|create|build|update|change|remove|delete|improve|support|translate|migrate|rename|extract|convert)\b/i.test(userText);
   const commandish = /\b(run|execute|npm|pnpm|yarn|pytest|vitest|jest)\b.*\b(test|tests|build|lint|check)\b|^run\b|\brun the\b/i.test(userText);
   if (commandish && !changeVerb) return commandFlow(h, userText, files);
   if (changeVerb) return changeFlow(h, userText, files);
   return investigateFlow(h, userText, files);
+}
+
+function extractGitUrl(text: string): string | null {
+  const m = text.match(/(git@[\w.-]+:[\w./~-]+|https?:\/\/[\w.-]+\/[^\s'"<>]+|ssh:\/\/[^\s'"<>]+)/i);
+  if (!m) return null;
+  const url = m[0].replace(/[),.;!?]+$/, '');
+  if (/\.git$/i.test(url)) return url;
+  if (/^git@|^ssh:/i.test(url)) return url;
+  if (/(github\.com|gitlab\.com|bitbucket\.org|codeberg\.org|git\.)/i.test(url)) return url;
+  return null;
+}
+
+// --- clone a repository through chat (REAL git, real output) ---------------
+
+async function cloneFlow(h: Run, userText: string, url: string): Promise<void> {
+  h.status('Cloning repository…');
+  await h.sleep(rnd(300, 600));
+
+  const repoName = (url.split('/').pop() || 'repository').replace(/\.git$/i, '').replace(/[^\w.-]/g, '-') || 'repository';
+  const root = h.project.rootPath;
+  let rootEntries: string[] = [];
+  try { rootEntries = fs.readdirSync(root).filter((n) => !n.startsWith('.')); } catch { /* treat as non-empty */ rootEntries = ['?']; }
+  const intoCurrent = rootEntries.length === 0;
+  const target = intoCurrent ? root : uniquePath(path.join(root, repoName));
+
+  const res = await h.realCommand('git', intoCurrent
+    ? ['clone', '--progress', url, '.']
+    : ['clone', '--progress', url, target], { cwd: root, timeoutMs: 5 * 60_000 });
+  if (h.stopped) return;
+
+  if (res.exitCode !== 0) {
+    const tail = (res.stderr || res.stdout).trim().split('\n').slice(-4).join('\n');
+    h.error({ message: 'git clone failed', detail: tail, source: 'builder', retryable: true });
+    const failText = [
+      `The clone of \`${url}\` failed. The actual git error:`,
+      '',
+      '```',
+      tail || `exit code ${res.exitCode}`,
+      '```',
+      '',
+      /auth|username|permission|denied|403|401/i.test(tail)
+        ? 'This looks like an authentication problem — the server\'s git credentials don\'t have access to this repository. For private repos, make sure the server\'s SSH key or token is authorized, or give me an HTTPS URL that works with the stored credentials.'
+        : 'Check that the URL is correct and reachable from the server, then ask me to try again.',
+    ].join('\n');
+    await h.aiCall({
+      role: 'builder',
+      prompt: composePrompt(h, 'builder', `Request:\n${userText}`),
+      responseText: failText,
+      durationMs: rnd(1400, 2400),
+      usage: { inputTokens: h.usageNow() + 800, outputTokens: Math.ceil(failText.length / 4) + rnd(150, 350) },
+    });
+    await h.assistant(failText);
+    return;
+  }
+
+  if (!intoCurrent) h.switchWorkingDir(target, 'git');
+  const dir = h.project.rootPath;
+  const git = await getGitStatus(dir);
+  const fileCount = countFiles(dir);
+  const files = sampleFiles(dir, { fallback: false });
+  for (const f of pickN(files, Math.min(2, files.length))) {
+    h.read(f, fileLines(dir, f));
+    await h.sleep(rnd(150, 350));
+  }
+
+  const answer = [
+    `Cloned **${repoName}** and opened it${intoCurrent ? ' in this directory' : ''}:`,
+    '',
+    `- Location: \`${dir}\``,
+    `- Branch: \`${git.branch ?? 'unknown'}\` · ${fileCount}${fileCount >= 5000 ? '+' : ''} file${fileCount === 1 ? '' : 's'}`,
+    files.length > 0 ? `- First look: \`${files.slice(0, 3).join('`, `')}\`${files.length > 3 ? ' …' : ''}` : null,
+    '',
+    'Nothing has been modified. Tell me what you\'d like to do with it — explain it, run its tests, fix something, or anything else.',
+  ].filter((l): l is string => l !== null).join('\n');
+
+  await h.aiCall({
+    role: 'builder',
+    prompt: composePrompt(h, 'builder', `Request:\n${userText}`),
+    responseText: answer,
+    durationMs: rnd(2000, 3400),
+    usage: { inputTokens: h.usageNow() + 1600, outputTokens: Math.ceil(answer.length / 4) + rnd(200, 500) },
+  });
+  await h.assistant(answer);
+}
+
+async function askRepoUrlFlow(h: Run, userText: string): Promise<void> {
+  h.status('Looking at the request…');
+  await h.sleep(rnd(400, 800));
+  const answer = [
+    'Happy to clone it — I just need the repository URL.',
+    '',
+    'Paste it in any common form:',
+    '- `https://github.com/user/repository.git`',
+    '- `git@github.com:user/repository.git`',
+    '',
+    'Private repositories work too: the clone runs with the server\'s existing git credentials. I\'ll clone it into the current working directory and open it.',
+  ].join('\n');
+  await h.aiCall({
+    role: 'builder',
+    prompt: composePrompt(h, 'builder', `Request:\n${userText}`),
+    responseText: answer,
+    durationMs: rnd(1200, 2200),
+    usage: { inputTokens: h.usageNow() + 700, outputTokens: Math.ceil(answer.length / 4) + rnd(100, 250) },
+  });
+  await h.assistant(answer);
+}
+
+// --- open an attached ZIP through chat (REAL extraction) --------------------
+
+async function zipFlow(h: Run, userText: string, zip: AttachmentMeta): Promise<void> {
+  h.status(`Inspecting ${zip.name}…`);
+  await h.sleep(rnd(300, 700));
+
+  const scan = scanZip(zip.path!);
+  if (!scan.ok) {
+    h.error({ message: `Cannot open ${zip.name}`, detail: scan.error, source: 'builder' });
+    const failText = `I couldn't open **${zip.name}**: ${scan.error} If you have another export of the project, attach that instead.`;
+    await h.assistant(failText);
+    return;
+  }
+
+  const base = zip.name.replace(/\.zip$/i, '').replace(/[^\w.-]/g, '-') || 'project';
+  const root = h.project.rootPath;
+  let rootEntries: string[] = [];
+  try { rootEntries = fs.readdirSync(root).filter((n) => !n.startsWith('.')); } catch { rootEntries = ['?']; }
+  const intoCurrent = rootEntries.length === 0;
+
+  // extract into a staging directory, then place the content cleanly (a zip
+  // whose only top-level entry is a folder becomes that folder directly).
+  const staging = uniquePath(path.join(root, '.tandem-extract'));
+  if (hasUnzipBinary()) {
+    fs.mkdirSync(staging, { recursive: true });
+    const res = await h.realCommand('unzip', ['-q', '-o', zip.path!, '-d', staging], { cwd: root, timeoutMs: 3 * 60_000 });
+    if (h.stopped) {
+      fs.rmSync(staging, { recursive: true, force: true });
+      return;
+    }
+    if (res.exitCode !== 0) {
+      fs.rmSync(staging, { recursive: true, force: true });
+      const tail = (res.stderr || res.stdout).trim().split('\n').slice(-3).join('\n');
+      h.error({ message: `Extraction of ${zip.name} failed`, detail: tail, source: 'builder' });
+      await h.assistant(`Extraction failed:\n\n\`\`\`\n${tail}\n\`\`\`\n\nThe archive may be corrupted — try re-exporting it.`);
+      return;
+    }
+  } else {
+    try {
+      extractZipInternal(zip.path!, staging);
+      h.status(`Extracted ${scan.entries} entries with the built-in extractor`);
+    } catch (err) {
+      fs.rmSync(staging, { recursive: true, force: true });
+      h.error({ message: `Extraction of ${zip.name} failed`, detail: String(err), source: 'builder' });
+      await h.assistant(`Extraction failed: ${String(err)}`);
+      return;
+    }
+  }
+
+  let projectDir: string;
+  try {
+    const top = fs.readdirSync(staging).filter((n) => !n.startsWith('.'));
+    const singleRoot = top.length === 1 && fs.statSync(path.join(staging, top[0])).isDirectory() ? top[0] : null;
+    if (intoCurrent) {
+      const contentRoot = singleRoot ? path.join(staging, singleRoot) : staging;
+      for (const entry of fs.readdirSync(contentRoot)) {
+        fs.renameSync(path.join(contentRoot, entry), path.join(root, entry));
+      }
+      fs.rmSync(staging, { recursive: true, force: true });
+      projectDir = root;
+    } else if (singleRoot) {
+      projectDir = uniquePath(path.join(root, singleRoot));
+      fs.renameSync(path.join(staging, singleRoot), projectDir);
+      fs.rmSync(staging, { recursive: true, force: true });
+    } else {
+      projectDir = uniquePath(path.join(root, base));
+      fs.renameSync(staging, projectDir);
+    }
+  } catch (err) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    h.error({ message: `Could not place the extracted files`, detail: String(err), source: 'builder' });
+    await h.assistant(`Extraction succeeded but placing the files failed: ${String(err)}`);
+    return;
+  }
+  if (projectDir !== h.project.rootPath) h.switchWorkingDir(projectDir, 'zip');
+
+  const dir = h.project.rootPath;
+  const files = sampleFiles(dir, { fallback: false });
+  for (const f of pickN(files, Math.min(3, files.length))) {
+    h.read(f, fileLines(dir, f));
+    await h.sleep(rnd(150, 350));
+  }
+  const fileCount = countFiles(dir);
+  const hasPkg = fs.existsSync(path.join(dir, 'package.json'));
+
+  const answer = [
+    `Opened **${zip.name}** (${fmtBytes(zip.size)}, ${scan.entries} entries):`,
+    '',
+    `- Extracted to \`${dir}\``,
+    `- ${fileCount}${fileCount >= 5000 ? '+' : ''} file${fileCount === 1 ? '' : 's'}${hasPkg ? ' · has a `package.json`, so `npm install && npm test` are likely entry points' : ''}`,
+    files.length > 0 ? `- First look: \`${files.slice(0, 3).join('`, `')}\`${files.length > 3 ? ' …' : ''}` : '',
+    '',
+    userText.trim()
+      ? 'That covers the setup — now to your actual request: tell me to continue and I\'ll get into it, or refine what you want me to focus on.'
+      : 'Nothing has been modified. Tell me what to do with it — explain the structure, run the tests, fix a bug, anything.',
+  ].filter(Boolean).join('\n');
+
+  await h.aiCall({
+    role: 'builder',
+    prompt: composePrompt(h, 'builder', `Request:\n${userText || `(no text — attached ${zip.name})`}`),
+    responseText: answer,
+    durationMs: rnd(2200, 3800),
+    usage: { inputTokens: h.usageNow() + 1800, outputTokens: Math.ceil(answer.length / 4) + rnd(250, 550) },
+  });
+  await h.assistant(answer);
 }
 
 // --- investigation: read-only, no reviewer ---------------------------------

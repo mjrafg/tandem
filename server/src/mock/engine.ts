@@ -1,8 +1,10 @@
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type {
-  AiUsage, Chat, ChatEvent, ChangedFile, Effort, FindingsPayload, Project, Provider, RoleName, SearchMatch,
+  AiUsage, AttachmentMeta, Chat, ChatEvent, ChangedFile, Effort, ErrorPayload, FindingsPayload, Project, Provider, RoleName, SearchMatch,
 } from '../../../shared/types';
 import { db, getChat, getProject } from '../db';
+import { findOrCreateProject } from '../projectRoutes';
 import {
   addEvent, appendAssistantText, beginAssistantMessage, broadcastChat, finishAssistantMessage,
   setChatCompaction, setChatRunning, updateEvent,
@@ -17,6 +19,7 @@ interface RunCtx {
   runId: string;
   stopped: boolean;
   wake?: () => void;
+  child?: ChildProcess;
 }
 
 const active = new Map<string, RunCtx>();
@@ -29,6 +32,7 @@ export function stopRun(chatId: string): boolean {
   const ctx = active.get(chatId);
   if (!ctx) return false;
   ctx.stopped = true;
+  try { ctx.child?.kill('SIGTERM'); } catch { /* already gone */ }
   ctx.wake?.();
   return true;
 }
@@ -37,7 +41,8 @@ export function stopRun(chatId: string): boolean {
 export class Run {
   readonly ctx: RunCtx;
   readonly chat: Chat;
-  readonly project: Project;
+  project: Project;
+  attachments: AttachmentMeta[] = [];
   readonly settings = getSettings();
 
   constructor(ctx: RunCtx, chat: Chat, project: Project) {
@@ -104,6 +109,11 @@ export class Run {
     addEvent(this.chat.id, 'findings', payload, { runId: this.ctx.runId });
   }
 
+  error(payload: ErrorPayload): void {
+    if (this.stopped) return;
+    addEvent(this.chat.id, 'error', payload, { runId: this.ctx.runId });
+  }
+
   async aiCall(opts: {
     role: RoleName | 'final_repair';
     prompt: string;
@@ -164,9 +174,63 @@ export class Run {
     const chat = getChat(this.chat.id);
     return chat ? computeUsage(chat).usedTokens : 0;
   }
+
+  /**
+   * Run a REAL command (used for factual actions like `git clone` / `unzip`).
+   * The command event carries the actual output, exit code, and duration.
+   */
+  realCommand(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+    const cwd = opts.cwd ?? this.project.rootPath;
+    const shown = `${bin} ${args.join(' ')}`;
+    const ev = addEvent(this.chat.id, 'command', {
+      command: shown, cwd, stdout: '', stderr: '', exitCode: null, durationMs: 0, status: 'running',
+    }, { runId: this.ctx.runId });
+    const started = Date.now();
+
+    return new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const child = spawn(bin, args, { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+      this.ctx.child = child;
+      const cap = (s: string) => (s.length > 60_000 ? `${s.slice(0, 30_000)}\n… [truncated] …\n${s.slice(-20_000)}` : s);
+      child.stdout?.on('data', (c) => (stdout += c));
+      child.stderr?.on('data', (c) => (stderr += c));
+      const timer = setTimeout(() => {
+        try { child.kill('SIGTERM'); } catch { /* gone */ }
+      }, opts.timeoutMs ?? 5 * 60_000);
+      const finish = (exitCode: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.ctx.child = undefined;
+        const durationMs = Date.now() - started;
+        updateEvent(ev.id, {
+          stdout: cap(stdout.trim()), stderr: cap(stderr.trim()), exitCode, durationMs,
+          status: this.ctx.stopped ? 'stopped' : exitCode === 0 ? 'done' : 'failed',
+        });
+        resolve({ exitCode, stdout, stderr });
+      };
+      child.on('error', (err) => {
+        stderr += `\n${String(err)}`;
+        finish(127);
+      });
+      child.on('close', (code) => finish(code));
+    });
+  }
+
+  /** Re-point this chat's working directory; the UI reflects the new path. */
+  switchWorkingDir(newPath: string, source: Project['source']): void {
+    if (this.stopped) return;
+    const project = findOrCreateProject(newPath, source);
+    db.prepare('UPDATE chats SET project_id = ?, updated_at = ? WHERE id = ?').run(project.id, Date.now(), this.chat.id);
+    this.project = project;
+    broadcastChat(this.chat.id);
+    addEvent(this.chat.id, 'status', { text: `Working directory is now ${project.rootPath}` }, { runId: this.ctx.runId });
+  }
 }
 
-export async function startRun(chatId: string, userText: string): Promise<void> {
+export async function startRun(chatId: string, userText: string, attachments: AttachmentMeta[] = []): Promise<void> {
   const chat = getChat(chatId);
   if (!chat || active.has(chatId)) return;
   const project = getProject(chat.projectId);
@@ -178,8 +242,9 @@ export async function startRun(chatId: string, userText: string): Promise<void> 
   addEvent(chatId, 'run', { phase: 'started' }, { runId: ctx.runId });
 
   const run = new Run(ctx, chat, project);
+  run.attachments = attachments;
   try {
-    await buildScenario(run, userText);
+    await buildScenario(run, userText, attachments);
     addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
   } catch (err) {
     addEvent(chatId, 'error', { message: 'Agent run failed', detail: String(err), source: 'engine' }, { runId: ctx.runId });

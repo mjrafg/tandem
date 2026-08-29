@@ -1,14 +1,14 @@
 import type {
-  AppSettings, Chat, ChatEvent, CompactPreview, ContextUsage, DirListing, GitStatus, Project,
+  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactPreview, ContextUsage, DirListing, GitStatus, Project,
 } from '@shared/types';
 
 export class ApiError extends Error {
   status: number;
-  output?: string;
-  constructor(status: number, message: string, output?: string) {
+  data?: Record<string, unknown>;
+  constructor(status: number, message: string, data?: Record<string, unknown>) {
     super(message);
     this.status = status;
-    this.output = output;
+    this.data = data;
   }
 }
 
@@ -20,13 +20,13 @@ async function j<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
-    let output: string | undefined;
+    let data: Record<string, unknown> | undefined;
     try {
       const body = await res.json();
       if (body?.error) message = body.error;
-      if (body?.output) output = body.output;
+      data = body;
     } catch { /* non-JSON error */ }
-    throw new ApiError(res.status, message, output);
+    throw new ApiError(res.status, message, data);
   }
   return res.json() as Promise<T>;
 }
@@ -44,14 +44,21 @@ export const api = {
   projects: () => j<Project[]>('/api/projects'),
   openProject: (id: string) => j<{ ok: true }>('/api/projects/open', { method: 'POST', body: JSON.stringify({ id }) }),
   addDirectory: (dirPath: string) => j<Project>('/api/projects/directory', { method: 'POST', body: JSON.stringify({ dirPath }) }),
+  gitStatus: (projectId: string) => j<GitStatus>(`/api/projects/${projectId}/git`),
+
+  // filesystem (New chat browser)
   listDir: (path: string) => j<DirListing>(`/api/fs/list?path=${encodeURIComponent(path)}`),
-  importZip: (file: File) => {
+  mkdir: (parent: string, name: string) => j<{ name: string; path: string }>('/api/fs/mkdir', { method: 'POST', body: JSON.stringify({ parent, name }) }),
+  renameDir: (dirPath: string, name: string) => j<{ path: string }>('/api/fs/rename', { method: 'POST', body: JSON.stringify({ dirPath, name }) }),
+  deleteDir: (dirPath: string, force = false) => j<{ ok: true; wasEmpty: boolean }>('/api/fs/delete', { method: 'POST', body: JSON.stringify({ dirPath, force }) }),
+
+  // attachments
+  uploadAttachment: (chatId: string, file: File) => {
     const form = new FormData();
     form.append('file', file);
-    return j<Project & { imported: { files: number; bytes: number } }>('/api/projects/zip', { method: 'POST', body: form });
+    return j<AttachmentMeta>(`/api/chats/${chatId}/attachments`, { method: 'POST', body: form });
   },
-  gitClone: (url: string) => j<Project & { cloneOutput: string }>('/api/projects/git', { method: 'POST', body: JSON.stringify({ url }) }),
-  gitStatus: (projectId: string) => j<GitStatus>(`/api/projects/${projectId}/git`),
+  deleteAttachment: (id: string) => j<{ ok: true }>(`/api/attachments/${id}`, { method: 'DELETE' }),
 
   // chats
   chats: () => j<Chat[]>('/api/chats'),
@@ -59,7 +66,8 @@ export const api = {
   renameChat: (id: string, title: string) => j<Chat>(`/api/chats/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
   deleteChat: (id: string) => j<{ ok: true }>(`/api/chats/${id}`, { method: 'DELETE' }),
   chatEvents: (id: string) => j<{ chat: Chat; events: ChatEvent[]; usage: ContextUsage }>(`/api/chats/${id}/events`),
-  send: (id: string, text: string) => j<{ ok: true }>(`/api/chats/${id}/messages`, { method: 'POST', body: JSON.stringify({ text }) }),
+  send: (id: string, text: string, attachmentIds?: string[]) =>
+    j<{ ok: true }>(`/api/chats/${id}/messages`, { method: 'POST', body: JSON.stringify({ text, attachmentIds }) }),
   stop: (id: string) => j<{ ok: true; stopped: boolean }>(`/api/chats/${id}/stop`, { method: 'POST' }),
 
   // context

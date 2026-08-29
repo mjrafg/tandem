@@ -1,10 +1,28 @@
-import { X } from 'lucide-react';
+import { PanelLeft, X } from 'lucide-react';
 import { useEffect, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useStore } from '../store';
 
 export function Spinner({ size = 14 }: { size?: number }) {
   return <span className="spinner" style={{ width: size, height: size }} aria-label="Loading" />;
+}
+
+/** opens the sidebar drawer — rendered only below the md breakpoint */
+export function MenuButton() {
+  const setSidebarOpen = useStore((s) => s.setSidebarOpen);
+  // the md:hidden lives on a plain wrapper: the unlayered .btn-ghost display
+  // rules would otherwise out-cascade the layered utility on the button itself
+  return (
+    <span className="shrink-0 md:hidden">
+      <button
+        className="btn-ghost px-1.5 py-1.5"
+        onClick={() => setSidebarOpen(true)}
+        aria-label="Open menu"
+      >
+        <PanelLeft size={17} />
+      </button>
+    </span>
+  );
 }
 
 export function Modal({

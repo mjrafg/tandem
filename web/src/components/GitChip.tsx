@@ -39,7 +39,7 @@ export function GitChip({ projectId, gitState }: { projectId: string; gitState?:
     <div className="relative" ref={ref}>
       <button className="chip cursor-pointer rounded-lg py-1 transition-colors hover:bg-bg3" onClick={() => setOpen((o) => !o)}>
         <GitBranch size={12.5} />
-        <span className="max-w-[140px] truncate">{status.branch}</span>
+        <span className="max-w-[80px] truncate sm:max-w-[140px]">{status.branch}</span>
         {dirty && (
           <span className="tabular-nums">
             <span className="text-ok">+{status.additions}</span>{' '}
@@ -48,7 +48,7 @@ export function GitChip({ projectId, gitState }: { projectId: string; gitState?:
         )}
       </button>
       {open && (
-        <div className="card absolute right-0 top-[34px] z-40 w-[300px] p-3 shadow-2xl shadow-black/50 fade-up">
+        <div className="card fade-up fixed left-3 right-3 top-[54px] z-40 p-3 shadow-2xl shadow-black/50 sm:absolute sm:left-auto sm:right-0 sm:top-[34px] sm:w-[300px]">
           <div className="mb-1.5 flex items-center justify-between text-[12.5px]">
             <span className="inline-flex items-center gap-1.5 font-medium"><GitBranch size={13} /> {status.branch}</span>
             <span className="text-dim">{dirty ? `${status.changedFiles} changed` : 'clean'}</span>

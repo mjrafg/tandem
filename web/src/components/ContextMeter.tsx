@@ -67,7 +67,7 @@ export function ContextMeter({ usage, onCompact }: { usage: ContextUsage | undef
       </button>
 
       {open && (
-        <div className="card absolute right-0 top-[34px] z-40 w-[300px] p-3.5 shadow-2xl shadow-black/50 fade-up">
+        <div className="card fade-up absolute right-0 top-[34px] z-40 w-[300px] max-w-[calc(100vw-24px)] p-3.5 shadow-2xl shadow-black/50">
           <div className="mb-1 flex items-baseline justify-between">
             <span className="text-[13px] font-medium">Context</span>
             {usage.pct != null && <span className="text-[12px] tabular-nums" style={{ color }}>{usage.pct}%</span>}

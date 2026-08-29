@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import type { AppSettings, Effort, Provider, RoleConfig, RoleName } from '@shared/types';
 import { api } from '../../api';
 import { useStore } from '../../store';
-import { Field, Modal, SelectBox, Spinner, Toggle } from '../ui';
+import { Field, MenuButton, Modal, SelectBox, Spinner, Toggle } from '../ui';
 import { PromptsSection } from './PromptsSection';
 import { ToolsSection } from './ToolsSection';
 
@@ -65,8 +65,9 @@ export function SettingsView() {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-[780px] px-6 pb-28 pt-5">
+      <div className="mx-auto w-full max-w-[780px] px-4 pb-28 pt-5 sm:px-6">
         <div className="mb-6 flex items-center gap-3">
+          <MenuButton />
           <Link to="/" className="btn-ghost -ml-2 px-2"><ArrowLeft size={16} /></Link>
           <div>
             <h1 className="text-[17px] font-semibold">Admin</h1>
@@ -126,7 +127,7 @@ export function SettingsView() {
         {/* ------------------------------------------------ context */}
         <SectionTitle>Context</SectionTitle>
         <div className="card space-y-4 px-4 py-4">
-          <div className="grid grid-cols-2 gap-x-5 gap-y-3.5">
+          <div className="grid grid-cols-1 gap-x-5 gap-y-3.5 sm:grid-cols-2">
             <Field label="Warning threshold" hint="% of provider window"><Num value={draft.context.warnPct} onChange={(v) => set((d) => { d.context.warnPct = v; })} /></Field>
             <Field label="Auto compact at" hint="% of provider window"><Num value={draft.context.compactPct} onChange={(v) => set((d) => { d.context.compactPct = v; })} /></Field>
             <Field label="Critical threshold" hint="% of provider window"><Num value={draft.context.critPct} onChange={(v) => set((d) => { d.context.critPct = v; })} /></Field>
@@ -221,7 +222,7 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
         )}
       </div>
       <p className="mb-3 text-[12px] leading-relaxed text-dim">{info.blurb}</p>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Field label="Provider / CLI">
           <SelectBox
             ariaLabel={`${info.title} provider`}
@@ -307,7 +308,7 @@ function AccountCard() {
   return (
     <div className="card px-4 py-4">
       <div className="mb-3 text-[12.5px] text-mut">Signed in as <b className="text-ink">{email}</b> · single-user workspace</div>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Field label="Current password"><input type="password" autoComplete="current-password" className="input" value={current} onChange={(e) => setCurrent(e.target.value)} /></Field>
         <Field label="New password" hint="min 8 chars"><input type="password" autoComplete="new-password" className="input" value={next} onChange={(e) => setNext(e.target.value)} /></Field>
         <Field label="Repeat new password"><input type="password" autoComplete="new-password" className="input" value={confirm} onChange={(e) => setConfirm(e.target.value)} /></Field>

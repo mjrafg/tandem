@@ -206,7 +206,7 @@ function DirBrowser({ onOpen, busy }: { onOpen: (path: string) => void; busy: bo
 
       {listing && (
         <div className="mt-2.5 overflow-hidden rounded-lg border border-linesoft" ref={listRef}>
-          <div className="flex items-center gap-1 border-b border-linesoft bg-bg0 px-2 py-1.5">
+          <div className="flex flex-wrap items-center gap-1 border-b border-linesoft bg-bg0 px-2 py-1.5">
             {listing.quickLinks.map((q) => (
               <button
                 key={q.path}

@@ -103,7 +103,7 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
   }
 
   return (
-    <div className="mx-auto w-full max-w-[820px] px-5 pb-4">
+    <div className="mx-auto w-full max-w-[820px] px-3 pb-[max(12px,env(safe-area-inset-bottom))] sm:px-5 sm:pb-4">
       <div
         className={`rounded-2xl border bg-bg1 shadow-lg shadow-black/25 transition-colors ${
           dragOver ? 'border-accent bg-accent/[0.04]' : 'border-line focus-within:border-[#39414e]'
@@ -198,7 +198,7 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
               {reviewOn ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
               Reviewer {reviewOn ? 'On' : 'Off'}
             </button>
-            <span className="px-1 text-[11px] text-dim">
+            <span className="hidden px-1 text-[11px] text-dim sm:inline">
               {chat.running
                 ? 'Run in progress'
                 : uploading

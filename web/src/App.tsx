@@ -1,12 +1,12 @@
 import { useEffect } from 'react';
-import { Navigate, Outlet, Route, Routes, useNavigate } from 'react-router-dom';
+import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from './store';
 import { Login } from './components/Login';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { SettingsView } from './components/settings/SettingsView';
 import { NewProjectDialog } from './components/NewProjectDialog';
-import { Logo, Spinner, ToastHost } from './components/ui';
+import { Logo, MenuButton, Spinner, ToastHost } from './components/ui';
 import { FolderOpen } from 'lucide-react';
 
 export default function App() {
@@ -44,9 +44,31 @@ export default function App() {
 }
 
 function Shell() {
+  const sidebarOpen = useStore((s) => s.sidebarOpen);
+  const setSidebarOpen = useStore((s) => s.setSidebarOpen);
+  const location = useLocation();
+
+  // navigating (picking a chat, opening settings) dismisses the mobile drawer
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname, setSidebarOpen]);
+
   return (
     <div className="flex h-full">
-      <Sidebar />
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+          aria-hidden
+        />
+      )}
+      <div
+        className={`fixed inset-y-0 left-0 z-50 flex transition-transform duration-200 md:static md:z-auto md:translate-x-0 md:transition-none ${
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <Sidebar />
+      </div>
       <main className="flex min-w-0 flex-1 flex-col">
         <Outlet />
       </main>
@@ -70,7 +92,8 @@ function Home() {
   if (chats.length > 0) return null;
 
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-5 px-6 text-center">
+    <div className="relative flex flex-1 flex-col items-center justify-center gap-5 px-6 text-center">
+      <div className="absolute left-3 top-3"><MenuButton /></div>
       <Logo size={40} withWord={false} />
       <div>
         <h1 className="text-[19px] font-semibold">Welcome to Tandem</h1>

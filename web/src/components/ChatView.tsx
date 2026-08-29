@@ -9,7 +9,7 @@ import { ContextBanner, ContextMeter } from './ContextMeter';
 import { ExportMenu } from './ExportMenu';
 import { GitChip } from './GitChip';
 import { Timeline } from './timeline/Timeline';
-import { Spinner } from './ui';
+import { MenuButton, Spinner } from './ui';
 
 export function ChatView() {
   const { chatId } = useParams<{ chatId: string }>();
@@ -84,7 +84,7 @@ export function ChatView() {
       <ContextBanner usage={usage} onCompact={() => setCompactOpen(true)} />
 
       <div ref={scrollRef} onScroll={onScroll} className="relative min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-[820px] px-5 pb-6 pt-4">
+        <div className="mx-auto w-full max-w-[820px] px-3 pb-6 pt-4 sm:px-5">
           {events && events.length > 0 ? (
             <Timeline events={events} />
           ) : (
@@ -119,11 +119,12 @@ function TopBar({ chat, project, onCompact }: { chat: Chat; project: Project; on
   const usage = useStore((s) => s.usage[chat.id]);
   const [copied, setCopied] = useState(false);
   return (
-    <header className="flex h-[50px] shrink-0 items-center justify-between gap-3 border-b border-linesoft px-4">
-      <div className="flex min-w-0 items-center gap-2.5">
-        <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13.5px] font-medium">
-          <FolderOpen size={14} className="text-dim" />
-          {project.name}
+    <header className="flex h-[50px] shrink-0 items-center justify-between gap-2 border-b border-linesoft px-2 sm:gap-3 sm:px-4">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-2.5">
+        <MenuButton />
+        <span className="inline-flex max-w-[45vw] shrink-0 items-center gap-1.5 text-[13.5px] font-medium">
+          <FolderOpen size={14} className="shrink-0 text-dim" />
+          <span className="truncate">{project.name}</span>
         </span>
         <button
           className="group hidden min-w-0 items-center gap-1 sm:flex"

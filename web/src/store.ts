@@ -22,8 +22,11 @@ interface State {
   settings: AppSettings | null;
   toasts: Toast[];
   newProjectOpen: boolean;
+  /** mobile drawer state; ignored by the static desktop sidebar */
+  sidebarOpen: boolean;
 
   setNewProjectOpen: (open: boolean) => void;
+  setSidebarOpen: (open: boolean) => void;
   init: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -51,8 +54,11 @@ export const useStore = create<State>((set, get) => ({
   settings: null,
   toasts: [],
   newProjectOpen: false,
+  sidebarOpen: false,
 
-  setNewProjectOpen: (open) => set({ newProjectOpen: open }),
+  // opening the project dialog dismisses the mobile drawer beneath it
+  setNewProjectOpen: (open) => set(open ? { newProjectOpen: open, sidebarOpen: false } : { newProjectOpen: open }),
+  setSidebarOpen: (open) => set({ sidebarOpen: open }),
 
   init: async () => {
     try {

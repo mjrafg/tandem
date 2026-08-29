@@ -24,7 +24,7 @@ export function Sidebar() {
     });
 
   return (
-    <aside className="flex w-[264px] shrink-0 flex-col border-r border-linesoft bg-bg1">
+    <aside className="flex h-full w-[264px] shrink-0 flex-col border-r border-linesoft bg-bg1">
       <div className="flex items-center justify-between px-4 pb-2 pt-4">
         <Link to="/" className="opacity-95 transition-opacity hover:opacity-100">
           <Logo size={20} />
@@ -217,7 +217,7 @@ function SidebarFooter() {
   const email = useStore((s) => s.email);
   const logout = useStore((s) => s.logout);
   return (
-    <div className="border-t border-linesoft px-3 py-2.5">
+    <div className="border-t border-linesoft px-3 pt-2.5 pb-[max(10px,env(safe-area-inset-bottom))]">
       <div className="flex items-center justify-between">
         <span className="truncate text-[12px] text-dim" title={email ?? ''}>{email}</span>
         <div className="flex items-center">

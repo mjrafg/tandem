@@ -34,6 +34,17 @@ body {
   @apply bg-bg0 text-ink font-sans antialiased;
   font-size: 14px;
   overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* iOS Safari zooms the page when focusing any input under 16px — keep form
+   controls at 16px on phones so focusing the composer doesn't zoom the UI */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
 }
 
 ::selection {

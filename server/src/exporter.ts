@@ -91,6 +91,10 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       if (p.response?.usage) lines.push(`- Usage: ${p.response.usage.inputTokens.toLocaleString()} in / ${p.response.usage.outputTokens.toLocaleString()} out tokens`);
       lines.push('', '**Request:**', '', '```', p.request.prompt, '```');
       if (p.response) lines.push('', '**Response:**', '', '```', p.response.text, '```');
+      if (p.tools?.length) {
+        lines.push('', `**Tandem tools available (${p.tools.length}):**`, '');
+        for (const t of p.tools) lines.push(`- \`${t.name}\` — ${t.description}`);
+      }
       if (p.error) lines.push('', `**Error:** ${p.error}`);
       lines.push('', '</details>');
       return lines;
@@ -252,6 +256,7 @@ function eventToHtml(e: ChatEvent, chatId: string): string {
 ${p.cli ? `<div class="kv">cli <code>${escapeHtml(p.cli.command)}</code> · cwd <code>${escapeHtml(p.cli.cwd)}</code> · exit ${p.cli.exitCode ?? '—'}</div>` : ''}
 <h4>Request</h4><pre>${escapeHtml(p.request.prompt)}</pre>
 ${p.response ? `<h4>Response</h4><pre>${escapeHtml(p.response.text)}</pre>` : ''}
+${p.tools?.length ? `<details><summary>Tandem tools available · ${p.tools.length}</summary><ul>${p.tools.map((t) => `<li><code>${escapeHtml(t.name)}</code> — ${escapeHtml(t.description)}</li>`).join('')}</ul></details>` : ''}
 ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
 </div></details></div>`;
     }

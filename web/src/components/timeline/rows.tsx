@@ -3,6 +3,7 @@ import {
   Keyboard, ListTree, MousePointerClick, MoveVertical, OctagonX, Scan, Search as SearchIcon, Sparkles,
   SquareTerminal, Terminal,
 } from 'lucide-react';
+import { useState } from 'react';
 import type {
   AiCallPayload, BrowserActionPayload, ChatEvent, CommandPayload, CompactionPayload, ErrorPayload, FileChangePayload,
   FileReadPayload, FindingsPayload, RunPayload, SearchPayload, StatusPayload,
@@ -198,11 +199,42 @@ export function AiCallRow({ ev }: { ev: ChatEvent }) {
         </div>
         <PromptBlock title="Request" text={p.request.prompt} />
         {p.response && <PromptBlock title="Response" text={p.response.text} />}
+        {p.tools && p.tools.length > 0 && <ToolsAvailable tools={p.tools} />}
         {p.error && (
           <div className="rounded-lg border border-err/30 bg-err/10 px-3 py-2 text-[12.5px] text-[#ffb3ae]">{p.error}</div>
         )}
       </div>
     </ActivityRow>
+  );
+}
+
+function ToolsAvailable({ tools }: { tools: { name: string; description: string }[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="overflow-hidden rounded-lg border border-linesoft bg-bg1">
+      <button
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11.5px] font-medium uppercase tracking-wide text-dim transition-colors hover:bg-bg2"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className={`inline-block transition-transform duration-150 ${open ? 'rotate-90' : ''}`}>›</span>
+        Tandem tools available · {tools.length}
+        {!open && (
+          <span className="mono min-w-0 flex-1 truncate text-[11px] normal-case tracking-normal text-dim">
+            {tools.map((t) => t.name).join(' · ')}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="space-y-2 border-t border-linesoft px-3 py-2">
+          {tools.map((t) => (
+            <div key={t.name}>
+              <div className="mono text-[12px] text-ink">{t.name}</div>
+              <p className="text-[12px] leading-relaxed text-mut">{t.description}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

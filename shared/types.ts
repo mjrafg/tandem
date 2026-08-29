@@ -142,6 +142,8 @@ export interface AiCallPayload {
   /** true while the engine is a simulation (milestone 1) */
   simulated?: boolean;
   error?: string;
+  /** Tandem-owned tools served to this invocation (name + description as served) */
+  tools?: { name: string; description: string }[];
 }
 
 export interface Finding {
@@ -290,6 +292,29 @@ export interface PromptEntry {
   default: string;
   value: string;
   customized: boolean;
+}
+
+// ---------------------------------------------------------------- AI tools
+
+export interface ToolParamInfo {
+  name: string;
+  type: string;
+  required: boolean;
+  enumValues?: string[];
+  defaultDescription: string;
+  description: string;
+  customized: boolean;
+}
+
+export interface ToolInfo {
+  server: string;
+  serverLabel: string;
+  name: string;
+  roles: string[];
+  defaultDescription: string;
+  description: string;
+  customized: boolean;
+  params: ToolParamInfo[];
 }
 
 // ---------------------------------------------------------------- SSE

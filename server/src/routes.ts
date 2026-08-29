@@ -20,6 +20,7 @@ import { applyWorkdirChange, isRunning, startRun, stopRun } from './engine/workf
 import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings } from './settings';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
+import { listTools, resetToolText, setToolText } from './toolText';
 
 export function registerRoutes(app: FastifyInstance): void {
   // ---------------------------------------------------------------- health / auth
@@ -309,6 +310,31 @@ export function registerRoutes(app: FastifyInstance): void {
       return reply.code(404).send({ error: 'Unknown prompt key.' });
     }
     return listPrompts().find((p) => p.key === key);
+  });
+
+  // ---------------------------------------------------------------- AI tools
+
+  app.get('/api/tools', async () => listTools());
+
+  app.put('/api/tools/:server/:tool', async (req, reply) => {
+    const { server, tool } = req.params as { server: string; tool: string };
+    const { description, params } = (req.body ?? {}) as { description?: string; params?: Record<string, string> };
+    try {
+      await setToolText(server, tool, { description, params });
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : 'Invalid tool edit.' });
+    }
+    return (await listTools()).find((t) => t.server === server && t.name === tool);
+  });
+
+  app.delete('/api/tools/:server/:tool', async (req, reply) => {
+    const { server, tool } = req.params as { server: string; tool: string };
+    try {
+      await resetToolText(server, tool);
+    } catch (err) {
+      return reply.code(404).send({ error: err instanceof Error ? err.message : 'Unknown tool.' });
+    }
+    return (await listTools()).find((t) => t.server === server && t.name === tool);
   });
 
   app.delete('/api/prompts/:key', async (req, reply) => {

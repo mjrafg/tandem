@@ -1,5 +1,5 @@
 import type {
-  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactPreview, ContextUsage, DirListing, GitStatus, Project, PromptEntry,
+  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactPreview, ContextUsage, DirListing, GitStatus, Project, PromptEntry, ToolInfo,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -84,6 +84,13 @@ export const api = {
   savePrompt: (key: string, value: string) =>
     j<PromptEntry>(`/api/prompts/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   resetPrompt: (key: string) => j<PromptEntry>(`/api/prompts/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+
+  // AI tools
+  tools: () => j<ToolInfo[]>('/api/tools'),
+  saveTool: (server: string, tool: string, patch: { description?: string; params?: Record<string, string> }) =>
+    j<ToolInfo>(`/api/tools/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  resetTool: (server: string, tool: string) =>
+    j<ToolInfo>(`/api/tools/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`, { method: 'DELETE' }),
 
   // settings
   settings: () => j<AppSettings>('/api/settings'),

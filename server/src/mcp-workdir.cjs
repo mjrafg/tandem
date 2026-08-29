@@ -30,6 +30,21 @@ const TOOL = {
   },
 };
 
+// Admin-edited AI-facing text (descriptions only) — see Admin → AI Tools.
+try {
+  const ov = JSON.parse(process.env.TANDEM_TOOL_TEXT || '{}')[`tandem.${TOOL.name}`];
+  if (ov) {
+    if (typeof ov.description === 'string' && ov.description.trim()) TOOL.description = ov.description;
+    if (ov.params) {
+      for (const [param, desc] of Object.entries(ov.params)) {
+        if (TOOL.inputSchema.properties[param] && typeof desc === 'string' && desc.trim()) {
+          TOOL.inputSchema.properties[param].description = desc;
+        }
+      }
+    }
+  }
+} catch { /* factory text stands */ }
+
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + '\n');
 }

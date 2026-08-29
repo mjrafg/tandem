@@ -6,6 +6,7 @@ import { api } from '../../api';
 import { useStore } from '../../store';
 import { Field, Modal, SelectBox, Spinner, Toggle } from '../ui';
 import { PromptsSection } from './PromptsSection';
+import { ToolsSection } from './ToolsSection';
 
 const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
   'claude-code': ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
@@ -119,6 +120,10 @@ export function SettingsView() {
         <SectionTitle>AI Prompts</SectionTitle>
         <PromptsSection />
 
+        {/* ------------------------------------------------ AI tools */}
+        <SectionTitle>AI Tools</SectionTitle>
+        <ToolsSection />
+
         {/* ------------------------------------------------ context */}
         <SectionTitle>Context</SectionTitle>
         <div className="card space-y-4 px-4 py-4">
@@ -152,11 +157,11 @@ export function SettingsView() {
         {/* ------------------------------------------------ about */}
         <SectionTitle>About</SectionTitle>
         <div className="card px-4 py-3.5 text-[12.5px] leading-relaxed text-mut">
-          <p><b className="text-ink">Tandem</b> v0.1 — milestone 1.</p>
+          <p><b className="text-ink">Tandem</b> v0.2 — real engine.</p>
           <p className="mt-1">
-            The interface, storage, streaming, projects, context accounting and export are real. Agent runs are currently{' '}
-            <b className="text-ink">simulated</b> so the product experience can be evaluated; the Claude Code and Codex CLI
-            adapters land in milestone 2 and every AI call is marked <i>simulated</i> until then.
+            Builder runs on the authenticated Claude Code CLI with full agency; the Reviewer runs on the Codex CLI in a
+            read-only-filesystem, network-enabled sandbox; compaction is a real Compactor call. Every prompt and tool
+            description Tandem sends is editable above, and every actual request is recorded in the chat timeline.
           </p>
         </div>
       </div>

@@ -206,6 +206,25 @@ const TOOLS = [
   },
 ];
 
+// Admin-edited AI-facing text (descriptions only; names/types/required/enums
+// and behavior are code). Served from the next invocation on — one source of
+// truth with Admin → AI Tools.
+try {
+  const overrides = JSON.parse(process.env.TANDEM_TOOL_TEXT || '{}');
+  for (const tool of TOOLS) {
+    const ov = overrides[`tandem_browser.${tool.name}`];
+    if (!ov) continue;
+    if (typeof ov.description === 'string' && ov.description.trim()) tool.description = ov.description;
+    if (ov.params && tool.inputSchema && tool.inputSchema.properties) {
+      for (const [param, desc] of Object.entries(ov.params)) {
+        if (tool.inputSchema.properties[param] && typeof desc === 'string' && desc.trim()) {
+          tool.inputSchema.properties[param].description = desc;
+        }
+      }
+    }
+  }
+} catch { /* factory text stands */ }
+
 const handlers = {
   async browser_navigate(args) {
     await ensurePage();

@@ -5,6 +5,7 @@ import type { AiUsage, Effort } from '../../../shared/types';
 import { config, internalBase, shotsDir } from '../config';
 import { addEvent, updateEvent } from '../events';
 import { spawnStreaming } from './procs';
+import { servedToolRecord, toolTextEnv } from '../toolText';
 import type { RunHandle } from './run';
 
 export interface CodexResult {
@@ -95,6 +96,7 @@ export async function runCodexReview(h: RunHandle, opts: {
 
   const cliShown = `${config.codexBin} ${args.join(' ')}`;
   const startedAt = Date.now();
+  const servedTools = fs.existsSync(browserScript) ? await servedToolRecord(['tandem_browser']) : [];
   const aiCall = addEvent(h.chat.id, 'ai_call', {
     role: 'reviewer',
     provider: 'codex',
@@ -104,6 +106,7 @@ export async function runCodexReview(h: RunHandle, opts: {
     request: { prompt: opts.prompt },
     cli: { command: cliShown, cwd: opts.cwd, exitCode: null },
     startedAt,
+    ...(servedTools.length > 0 ? { tools: servedTools } : {}),
   }, { runId: h.ctx.runId });
 
   const pendingCommands = new Map<string, { eventId: string; startedAt: number }>();
@@ -174,6 +177,7 @@ export async function runCodexReview(h: RunHandle, opts: {
       TANDEM_INTERNAL_TOKEN: config.internalToken,
       TANDEM_SHOTS_DIR: shotsDir,
       TANDEM_BROWSER_ROLE: 'reviewer',
+      TANDEM_TOOL_TEXT: toolTextEnv(),
     },
     stdinData: opts.prompt,
     timeoutMs: opts.timeoutMs,

@@ -7,6 +7,7 @@ import {
   addEvent, appendAssistantText, beginAssistantMessage, finishAssistantMessage, updateEvent,
 } from '../events';
 import { spawnStreaming } from './procs';
+import { servedToolRecord, toolTextEnv } from '../toolText';
 import type { RunHandle } from './run';
 
 export interface ClaudeTurnResult {
@@ -79,6 +80,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
 
   const cliShown = `${config.claudeBin} ${args.map((a) => (a.length > 60 ? `${a.slice(0, 57)}…` : a)).join(' ')}`;
   const startedAt = Date.now();
+  const servedTools = opts.withTandemTools ? await servedToolRecord(['tandem', 'tandem_browser']) : [];
   const aiCall = addEvent(h.chat.id, 'ai_call', {
     role: opts.role === 'compactor' ? 'compactor' : opts.role,
     provider: 'claude-code',
@@ -88,6 +90,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     request: { prompt: `[system additions]\n${opts.systemAppendix}\n\n[message]\n${opts.message}`, system: undefined },
     cli: { command: cliShown, cwd: opts.cwd, exitCode: null },
     startedAt,
+    ...(servedTools.length > 0 ? { tools: servedTools } : {}),
   }, { runId: h.ctx.runId });
 
   // --- stream state
@@ -214,6 +217,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       TANDEM_INTERNAL_TOKEN: config.internalToken,
       TANDEM_SHOTS_DIR: shotsDir,
       TANDEM_BROWSER_ROLE: opts.role,
+      TANDEM_TOOL_TEXT: toolTextEnv(),
     },
     stdinData: opts.message,
     timeoutMs: opts.timeoutMs,

@@ -14,8 +14,8 @@ import {
   addEvent, broadcastChat, deriveTitle, getEvents, listChats, setChatCompaction, setChatTitle,
 } from './events';
 import { toHtml, toMarkdown, type ExportBundle } from './exporter';
-import { generateCompactionSummary } from './mock/compact';
-import { isRunning, startRun, stopRun } from './mock/engine';
+import { applyCompaction, runCompaction, type CompactionCall } from './engine/compactor';
+import { applyWorkdirChange, isRunning, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
 import { composeEffectivePrompt, getSettings, putSettings } from './settings';
 
@@ -178,31 +178,26 @@ export function registerRoutes(app: FastifyInstance): void {
     return computeUsage(chat);
   });
 
-  const previews = new Map<string, CompactPreview & { chatId: string }>();
+  const previews = new Map<string, { chatId: string; call: CompactionCall }>();
 
   app.post('/api/chats/:id/compact/preview', async (req, reply) => {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
     if (isRunning(chat.id)) return reply.code(409).send({ error: 'Wait for the current run to finish before compacting.' });
-    const settings = getSettings();
-    const usage = computeUsage(chat);
-    const { summary, preserved } = generateCompactionSummary(chat.id, settings);
-    const afterTokens = Math.min(
-      settings.context.autoTargetTokens,
-      Math.max(4_000, Math.round(usage.usedTokens * 0.3)),
-    );
-    const preview: CompactPreview & { chatId: string } = {
-      previewId: randomUUID(),
-      chatId: chat.id,
-      beforeTokens: usage.usedTokens,
-      afterTokens,
-      provider: settings.roles.compactor.provider,
-      model: settings.roles.compactor.model,
-      summary,
-      preserved,
+    const call = await runCompaction(chat); // the real Compactor CLI call
+    if (!call.ok) return reply.code(502).send({ error: call.error ?? 'Compaction failed.' });
+    const previewId = randomUUID();
+    previews.set(previewId, { chatId: chat.id, call });
+    setTimeout(() => previews.delete(previewId), 30 * 60_000).unref?.();
+    const preview: CompactPreview = {
+      previewId,
+      beforeTokens: call.beforeTokens,
+      afterTokens: call.afterTokens,
+      provider: call.provider,
+      model: call.model,
+      summary: call.summary,
+      preserved: call.preserved,
     };
-    previews.set(preview.previewId, preview);
-    setTimeout(() => previews.delete(preview.previewId), 15 * 60_000).unref?.();
     return preview;
   });
 
@@ -210,23 +205,22 @@ export function registerRoutes(app: FastifyInstance): void {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
     const { previewId } = (req.body ?? {}) as { previewId?: string };
-    const preview = previewId ? previews.get(previewId) : undefined;
-    if (!preview || preview.chatId !== chat.id) {
+    const stored = previewId ? previews.get(previewId) : undefined;
+    if (!stored || stored.chatId !== chat.id) {
       return reply.code(400).send({ error: 'Preview expired — generate a new one.' });
     }
-    previews.delete(preview.previewId);
-    const ev = addEvent(chat.id, 'compaction', {
-      beforeTokens: preview.beforeTokens,
-      afterTokens: preview.afterTokens,
-      provider: preview.provider,
-      model: preview.model,
-      summary: preview.summary,
-      preserved: preview.preserved,
-      durationMs: 5_200,
-      simulated: true,
-    });
-    setChatCompaction(chat.id, ev.id);
-    return { ok: true, eventId: ev.id };
+    previews.delete(previewId!);
+    const eventId = applyCompaction(chat, stored.call);
+    return { ok: true, eventId };
+  });
+
+  // ------------------------------------------------- internal (localhost MCP)
+
+  app.post('/api/internal/workdir', async (req, reply) => {
+    const { chatId, path: dirPath, token } = (req.body ?? {}) as { chatId?: string; path?: string; token?: string };
+    if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const result = applyWorkdirChange(chatId ?? '', dirPath ?? '');
+    return result.ok ? result : reply.code(400).send(result);
   });
 
   // ---------------------------------------------------------------- settings

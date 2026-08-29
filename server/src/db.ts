@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_chat ON events(chat_id, seq);
 `);
 
+// additive migrations
+try { db.exec('ALTER TABLE chats ADD COLUMN builder_session_id TEXT'); } catch { /* exists */ }
+
+export function getBuilderSession(chatId: string): string | null {
+  const row = db.prepare('SELECT builder_session_id AS s FROM chats WHERE id = ?').get(chatId) as any;
+  return row?.s ?? null;
+}
+
+export function setBuilderSession(chatId: string, sessionId: string | null): void {
+  db.prepare('UPDATE chats SET builder_session_id = ? WHERE id = ?').run(sessionId, chatId);
+}
+
 // ---------------------------------------------------------------- kv
 
 export function kvGet<T>(key: string): T | null {

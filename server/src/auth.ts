@@ -98,6 +98,8 @@ export function authHook(req: FastifyRequest, reply: FastifyReply, done: () => v
   const url = req.url;
   if (!url.startsWith('/api/')) return done();
   if (url.startsWith('/api/login') || url.startsWith('/api/health')) return done();
+  // localhost-internal endpoints authenticate with the per-boot token instead
+  if (url.startsWith('/api/internal/')) return done();
   const token = (req.cookies as Record<string, string | undefined>)?.tandem_sid;
   if (!validSession(token)) {
     reply.code(401).send({ error: 'unauthorized' });

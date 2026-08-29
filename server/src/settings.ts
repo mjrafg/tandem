@@ -103,10 +103,10 @@ export function composeEffectivePrompt(role: RoleName | 'final_repair', settings
     parts.push(`# Additional ${role.replace('_', ' ')} instructions (Admin)\n${extra.trim()}`);
   }
   parts.push(
-    '# At call time, the application appends\n' +
-    '- the project name and working directory\n' +
-    '- the active conversation context (or its compacted form)\n' +
-    '- the current request (user message, reviewer findings to repair, or content to compact)',
+    '# At call time, the application adds\n' +
+    '- the working directory (the CLI runs inside the chat\'s active project)\n' +
+    '- for the Builder: the Tandem runtime note (working-directory tool, no commit/push/deploy unless asked) and, on a fresh session, the compacted context plus recent conversation\n' +
+    '- the current request (user message with any attachment paths, reviewer findings to repair, or the conversation digest to compact)',
   );
   return parts.join('\n\n');
 }

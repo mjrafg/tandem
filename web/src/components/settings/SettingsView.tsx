@@ -8,7 +8,7 @@ import { Field, Modal, SelectBox, Spinner, Toggle } from '../ui';
 
 const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
   'claude-code': ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
-  codex: ['gpt-5-codex', 'gpt-5', 'gpt-5-mini'],
+  codex: ['gpt-5.6-sol'],
 };
 
 const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }> = {

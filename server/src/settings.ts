@@ -11,7 +11,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     },
     reviewer: {
       provider: 'codex',
-      model: 'gpt-5-codex',
+      model: 'gpt-5.6-sol',
       effort: 'high',
       instructions: '',
       enabled: true,

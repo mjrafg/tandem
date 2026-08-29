@@ -8,6 +8,7 @@ import { authHook, ensureUser, setPassword } from './auth';
 import { config } from './config';
 import { registerRoutes } from './routes';
 import { registerProjectRoutes } from './projectRoutes';
+import { recoverInterruptedRuns } from './engine/run';
 import { seedIfEmpty } from './mock/seed';
 
 // ---------------------------------------------------------------- CLI mode
@@ -32,6 +33,7 @@ if (process.argv[2] === 'set-password') {
 async function main(): Promise<void> {
   ensureUser();
   seedIfEmpty();
+  recoverInterruptedRuns();
 
   const app = Fastify({
     logger: { level: config.production ? 'warn' : 'info' },

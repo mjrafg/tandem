@@ -51,6 +51,27 @@ export function killChild(ctx: RunCtx): void {
   }, 8_000);
 }
 
+/**
+ * Boot recovery: if the service died or restarted while runs were active, the
+ * agent processes are gone but chats stay flagged running=1 forever, and the
+ * UI shows an eternal "Working…". Make the interruption honest and visible.
+ */
+export function recoverInterruptedRuns(): void {
+  const rows = db.prepare('SELECT id FROM chats WHERE running = 1').all() as { id: string }[];
+  for (const { id } of rows) {
+    const dangling = db.prepare(`SELECT id FROM events WHERE chat_id = ? AND payload LIKE '%"status":"running"%'`).all(id) as { id: string }[];
+    for (const ev of dangling) updateEvent(ev.id, { status: 'stopped' }, { silent: true });
+    addEvent(id, 'error', {
+      message: 'Run interrupted — Tandem restarted while the agent was working',
+      detail: 'The agent process did not survive the restart. Send a follow-up message to continue; the Builder resumes its session with the prior context.',
+      source: 'engine',
+    }, { silent: true });
+    addEvent(id, 'run', { phase: 'stopped' }, { silent: true });
+    db.prepare('UPDATE chats SET running = 0 WHERE id = ?').run(id);
+  }
+  if (rows.length > 0) console.log(`[tandem] recovered ${rows.length} run(s) interrupted by the previous shutdown`);
+}
+
 /** Anything left in status:running after a run ends is marked stopped. */
 export function markDanglingStopped(chatId: string, runId: string): void {
   const rows = db.prepare('SELECT id, payload FROM events WHERE chat_id = ? AND run_id = ?').all(chatId, runId) as any[];

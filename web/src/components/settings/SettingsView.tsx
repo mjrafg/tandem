@@ -18,7 +18,7 @@ const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
 
 const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }> = {
   builder: { title: 'Builder', blurb: 'Understands each request and does the actual work — investigates, edits, runs, verifies.', dot: 'bg-builder' },
-  reviewer: { title: 'Reviewer', blurb: 'Independently evaluates the result against your request. Read-only; max two rounds.', dot: 'bg-reviewer' },
+  reviewer: { title: 'Reviewer', blurb: 'Independently evaluates each result against your request — changed files when there are any, otherwise the answer itself. Read-only; max two rounds.', dot: 'bg-reviewer' },
 };
 
 export function SettingsView() {
@@ -230,7 +230,7 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
               className="cursor-pointer select-none whitespace-nowrap text-[12px] text-dim transition-colors hover:text-mut"
               onClick={() => onChange({ enabled: cfg.enabled === false })}
             >
-              Review code changes
+              Review results
             </button>
             <Toggle checked={cfg.enabled !== false} onChange={(v) => onChange({ enabled: v })} label="Reviewer enabled" />
           </span>

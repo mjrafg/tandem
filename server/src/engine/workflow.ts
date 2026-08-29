@@ -25,6 +25,28 @@ const MAX_REVIEW_ROUNDS = 2;
 /** wording for the changed-files note comes from the prompt registry */
 interface ReviewDelta { files: string[]; note: string }
 
+/**
+ * What a review round examines. Files that actually changed are the strongest
+ * evidence; when a run changed nothing on disk (an investigation, an answer,
+ * tool use), the Builder's own response is reviewed instead.
+ */
+type ReviewSubject =
+  | { kind: 'changes'; files: string[]; note: string }
+  | { kind: 'answer'; answer: string };
+
+/** how much of the Builder's reply is handed to the Reviewer */
+const ANSWER_CAP = 24_000;
+
+function subjectFor(delta: ReviewDelta | null, answer: string): ReviewSubject | null {
+  if (delta) return { kind: 'changes', files: delta.files, note: delta.note };
+  const text = (answer ?? '').trim();
+  return text ? { kind: 'answer', answer: text } : null;
+}
+
+function capText(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max)}\n… [truncated ${s.length - max} characters]`;
+}
+
 function noteFor(kind: DeltaNoteKind): string {
   return getPrompt(kind === 'git' ? 'reviewer.note_git' : kind === 'git_state' ? 'reviewer.note_git_state' : 'reviewer.note_nongit');
 }
@@ -107,21 +129,26 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     return false;
   }
 
-  // ---- objective review gate: what actually changed on disk?
+  // ---- what did the run actually change on disk? (objective, not predicted)
   h.refresh();
   const endDir = h.project.rootPath;
   const delta = reviewGate(before, startDir, endDir, h);
-  if (!delta) return true; // nothing to review (or no baseline — already noted)
+
+  // The user's per-request choice decides WHETHER a review happens; the disk
+  // delta only decides what the Reviewer is shown. With the Reviewer on, a run
+  // that changed no files still gets reviewed — on its response.
   if (!runOpts.review) {
-    // the user turned the Reviewer off for this request — an orchestration
-    // choice, recorded honestly (this is not a failure or unavailability)
-    h.status('Reviewer skipped by user for this request.');
+    // an orchestration choice, recorded honestly (not a failure or unavailability)
+    if (delta) h.status('Reviewer skipped by user for this request.');
     return true;
   }
   if (h.settings.roles.reviewer.enabled === false) return true;
 
+  const subject = subjectFor(delta, first.resultText);
+  if (!subject) return true; // the run produced neither changes nor a response
+
   // ---- round 1
-  const round1 = await review(h, userText, delta, 1);
+  const round1 = await review(h, userText, subject, 1);
   if (h.stopped) return false;
   if (!round1 || round1.verdict === 'pass') return true;
 
@@ -131,7 +158,10 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     model: builderCfg.model,
     effort: builderCfg.effort,
     systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined),
-    message: renderPrompt('repair.findings_message', { findings: findingsAsText(round1.items) }),
+    message: renderPrompt(
+      subject.kind === 'answer' ? 'repair.answer_findings_message' : 'repair.findings_message',
+      { findings: findingsAsText(round1.items) },
+    ),
     cwd: endDir,
     resumeSessionId: getBuilderSession(h.chat.id),
     withTandemTools: true,
@@ -144,9 +174,14 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     return false;
   }
 
-  // ---- round 2 (the last review)
+  // ---- round 2 (the last review) — the repair may have produced files, so
+  // re-check the disk before deciding what this round reviews
   h.refresh();
-  const round2 = await review(h, userText, currentDelta(h), 2);
+  const delta2 = reviewGate(before, startDir, h.project.rootPath, h, true);
+  const subject2 = delta2
+    ? ({ kind: 'changes', ...currentDelta(h) } as ReviewSubject)
+    : subjectFor(null, repair.resultText) ?? subject;
+  const round2 = await review(h, userText, subject2, 2);
   if (h.stopped) return false;
   if (!round2 || round2.verdict === 'pass') return true;
 
@@ -156,7 +191,10 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     model: builderCfg.model,
     effort: builderCfg.effort,
     systemAppendix: builderSystemText(h.settings, 'final_repair', h.gitFlow ? summaryText(h.gitFlow) : undefined),
-    message: renderPrompt('repair.final_message', { findings: findingsAsText(round2.items) }),
+    message: renderPrompt(
+      subject2.kind === 'answer' ? 'repair.answer_final_message' : 'repair.final_message',
+      { findings: findingsAsText(round2.items) },
+    ),
     cwd: h.project.rootPath,
     resumeSessionId: getBuilderSession(h.chat.id),
     withTandemTools: true,
@@ -176,8 +214,14 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
 
 // ---------------------------------------------------------------- review gate
 
-/** Decide from RESULTING STATE whether review applies; null = no review. */
-function reviewGate(before: ReturnType<typeof captureWorktree>, startDir: string, endDir: string, h: RunHandle): ReviewDelta | null {
+/** Objective file-level evidence from the RESULTING STATE; null = nothing changed. */
+function reviewGate(
+  before: ReturnType<typeof captureWorktree>,
+  startDir: string,
+  endDir: string,
+  h: RunHandle,
+  quiet = false,
+): ReviewDelta | null {
   if (endDir === startDir) {
     const delta = diffWorktrees(before, captureWorktree(endDir));
     return delta.changed ? { files: delta.files, note: noteFor(delta.noteKind) } : null;
@@ -191,7 +235,9 @@ function reviewGate(before: ReturnType<typeof captureWorktree>, startDir: string
       note: renderPrompt('reviewer.note_switched', { new_dir: endDir }),
     };
   }
-  h.status('Review skipped: the working directory changed mid-run and the new directory has no baseline to diff against.');
+  if (!quiet) {
+    h.status('The working directory changed mid-run and the new directory has no baseline to diff against — no file-level evidence for this review.');
+  }
   return null;
 }
 
@@ -208,16 +254,19 @@ function currentDelta(h: RunHandle): ReviewDelta {
 
 // ---------------------------------------------------------------- reviewer
 
-async function review(h: RunHandle, userText: string, delta: ReviewDelta, round: number):
+async function review(h: RunHandle, userText: string, subject: ReviewSubject, round: number):
   Promise<{ verdict: 'pass' | 'findings'; items: Finding[]; eventId: string } | null> {
   h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is checking the repaired result…');
   const cfg = h.settings.roles.reviewer;
+  const evidence = subject.kind === 'changes'
+    ? renderPrompt('reviewer.changed_section', {
+      changed_files_note: subject.note,
+      changed_files: subject.files.map((f) => `- ${f}`).join('\n') || getPrompt('reviewer.changed_empty'),
+    })
+    : renderPrompt('reviewer.answer_section', { builder_answer: capText(subject.answer, ANSWER_CAP) });
   const prompt = [
     renderPrompt('reviewer.request_section', { original_request: userText }),
-    renderPrompt('reviewer.changed_section', {
-      changed_files_note: delta.note,
-      changed_files: delta.files.map((f) => `- ${f}`).join('\n') || getPrompt('reviewer.changed_empty'),
-    }),
+    evidence,
     renderPrompt('reviewer.round_section', { review_round: round, max_review_rounds: MAX_REVIEW_ROUNDS }),
     getPrompt('reviewer.output_format'),
   ].join('\n\n');

@@ -1,0 +1,26 @@
+[Unit]
+Description=Tandem — AI coding chat (ai.agent24.io)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aiaccounting
+Group=aiaccounting
+WorkingDirectory=/srv/tandem/app/server
+Environment=NODE_ENV=production
+Environment=PORT=7810
+Environment=HOST=172.17.0.1
+Environment=DATA_DIR=/srv/tandem/data
+Environment=PROJECTS_DIR=/srv/tandem/projects
+Environment=WEB_DIST=/srv/tandem/app/web/dist
+Environment=TANDEM_EMAIL=mjrafg2@gmail.com
+ExecStart=/opt/node22/bin/node /srv/tandem/app/server/dist/index.js
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+StandardOutput=append:/srv/tandem/data/tandem.log
+StandardError=append:/srv/tandem/data/tandem.log
+
+[Install]
+WantedBy=multi-user.target

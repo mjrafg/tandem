@@ -112,7 +112,7 @@ export function registerRoutes(app: FastifyInstance): void {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
     if (isRunning(chat.id)) return reply.code(409).send({ error: 'An agent run is already in progress for this chat.' });
-    const { text, attachmentIds } = (req.body ?? {}) as { text?: string; attachmentIds?: string[] };
+    const { text, attachmentIds, review } = (req.body ?? {}) as { text?: string; attachmentIds?: string[]; review?: boolean };
     const clean = (text ?? '').trim();
     const attachments = resolveAttachments(attachmentIds ?? []);
     if (!clean && attachments.length === 0) return reply.code(400).send({ error: 'Empty message.' });
@@ -122,7 +122,7 @@ export function registerRoutes(app: FastifyInstance): void {
     if (isFirst || chat.title === 'New chat') {
       setChatTitle(chat.id, deriveTitle(clean || attachments[0]?.name || 'New chat'));
     }
-    void startRun(chat.id, clean, attachments);
+    void startRun(chat.id, clean, attachments, { review: review !== false });
     return { ok: true };
   });
 

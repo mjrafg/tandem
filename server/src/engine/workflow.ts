@@ -33,7 +33,12 @@ function noteFor(kind: DeltaNoteKind): string {
  * facts: did files actually change (worktree snapshots), the capped review
  * loop, timeouts, and honest bookkeeping. No intent detection anywhere.
  */
-export async function startRun(chatId: string, userText: string, attachments: AttachmentMeta[] = []): Promise<void> {
+export async function startRun(
+  chatId: string,
+  userText: string,
+  attachments: AttachmentMeta[] = [],
+  runOpts: { review: boolean } = { review: true },
+): Promise<void> {
   const chat = getChat(chatId);
   if (!chat || isRunning(chatId)) return;
   const project = getProject(chat.projectId);
@@ -42,11 +47,13 @@ export async function startRun(chatId: string, userText: string, attachments: At
   const ctx: RunCtx = { chatId, runId: randomUUID(), stopped: false };
   registerCtx(ctx);
   setChatRunning(chatId, true);
-  addEvent(chatId, 'run', { phase: 'started' }, { runId: ctx.runId });
+  // the per-request Reviewer choice is captured here, once, with the run —
+  // later composer changes affect only future requests
+  addEvent(chatId, 'run', { phase: 'started', review: runOpts.review }, { runId: ctx.runId });
 
   const h = new RunHandle(ctx, chat, project, attachments);
   try {
-    await runWorkflow(h, userText);
+    await runWorkflow(h, userText, runOpts);
     addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
   } catch (err) {
     h.error({ message: 'The run failed unexpectedly', detail: String(err), source: 'engine' });
@@ -59,7 +66,7 @@ export async function startRun(chatId: string, userText: string, attachments: At
   }
 }
 
-async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
+async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean }): Promise<void> {
   const builderCfg = h.settings.roles.builder;
   const startDir = h.project.rootPath;
   const before = captureWorktree(startDir);
@@ -89,6 +96,12 @@ async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
   const endDir = h.project.rootPath;
   const delta = reviewGate(before, startDir, endDir, h);
   if (!delta) return; // nothing to review (or no baseline — already noted)
+  if (!runOpts.review) {
+    // the user turned the Reviewer off for this request — an orchestration
+    // choice, recorded honestly (this is not a failure or unavailability)
+    h.status('Reviewer skipped by user for this request.');
+    return;
+  }
   if (h.settings.roles.reviewer.enabled === false) return;
 
   // ---- round 1

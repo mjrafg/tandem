@@ -176,6 +176,8 @@ export interface CompactionPayload {
 export interface RunPayload {
   phase: 'started' | 'finished' | 'stopped' | 'failed';
   label?: string;
+  /** the user's per-request Reviewer choice, captured at send time (immutable for the run) */
+  review?: boolean;
 }
 
 export interface ErrorPayload {

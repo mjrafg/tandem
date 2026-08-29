@@ -55,7 +55,10 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       return [`> _${(e.payload as any).text}_`];
     case 'run': {
       const p = e.payload as any;
-      return [`> **Run ${p.phase}** · ${t}`];
+      const review = p.phase === 'started' && p.review !== undefined
+        ? ` · Reviewer: ${p.review ? 'on' : 'skipped by user'}`
+        : '';
+      return [`> **Run ${p.phase}**${review} · ${t}`];
     }
     case 'command': {
       const p = e.payload as CommandPayload;
@@ -225,8 +228,11 @@ function eventToHtml(e: ChatEvent, chatId: string): string {
       return `<div class="ev assistant"><div class="who">Assistant · ${t}</div>${mdLite((e.payload as any).text)}</div>`;
     case 'status':
       return `<div class="ev status">${escapeHtml((e.payload as any).text)}</div>`;
-    case 'run':
-      return `<div class="ev status">run ${escapeHtml((e.payload as any).phase)} · ${t}</div>`;
+    case 'run': {
+      const p = e.payload as any;
+      const review = p.phase === 'started' && p.review !== undefined ? ` · Reviewer: ${p.review ? 'on' : 'skipped by user'}` : '';
+      return `<div class="ev status">run ${escapeHtml(p.phase)}${escapeHtml(review)} · ${t}</div>`;
+    }
     case 'command': {
       const p = e.payload as CommandPayload;
       const cls = (p.exitCode ?? 0) === 0 ? '' : ' <span class="err">exit ' + p.exitCode + '</span>';

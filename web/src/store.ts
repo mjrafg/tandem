@@ -29,7 +29,7 @@ interface State {
   logout: () => Promise<void>;
   refreshAll: () => Promise<void>;
   loadChat: (id: string) => Promise<void>;
-  send: (id: string, text: string, attachmentIds?: string[]) => Promise<void>;
+  send: (id: string, text: string, attachmentIds?: string[], review?: boolean) => Promise<void>;
   stop: (id: string) => Promise<void>;
   loadSettings: () => Promise<void>;
   toast: (text: string, kind?: 'info' | 'error') => void;
@@ -105,9 +105,9 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  send: async (id, text, attachmentIds) => {
+  send: async (id, text, attachmentIds, review = true) => {
     try {
-      await api.send(id, text, attachmentIds);
+      await api.send(id, text, attachmentIds, review);
     } catch (err) {
       get().toast(err instanceof Error ? err.message : 'Failed to send', 'error');
       throw err;

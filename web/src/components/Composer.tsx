@@ -1,4 +1,4 @@
-import { ArrowUp, FileArchive, FileCode, FileText, Image as ImageIcon, Paperclip, Square, X } from 'lucide-react';
+import { ArrowUp, FileArchive, FileCode, FileText, Image as ImageIcon, Paperclip, ShieldCheck, ShieldOff, Square, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { Chat } from '@shared/types';
 import { api } from '../api';
@@ -30,8 +30,15 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
   const [text, setText] = useState('');
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  const [reviewOn, setReviewOn] = useState(true);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // each chat starts at the default (Reviewer on); the choice then sticks
+  // until changed and applies to whatever message is sent next
+  useEffect(() => {
+    setReviewOn(true);
+  }, [chat.id]);
 
   useEffect(() => {
     if (prefill) {
@@ -88,7 +95,7 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
     setText('');
     setPending([]);
     try {
-      await send(chat.id, clean, ids.length > 0 ? ids : undefined);
+      await send(chat.id, clean, ids.length > 0 ? ids : undefined, reviewOn);
     } catch {
       setText(clean);
       setPending(keep);
@@ -177,9 +184,23 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
                 e.currentTarget.value = '';
               }}
             />
+            <button
+              className={`btn gap-1.5 rounded-lg px-2 py-1 text-[11.5px] font-medium transition-colors ${
+                reviewOn
+                  ? 'bg-reviewer/10 text-reviewer hover:bg-reviewer/[0.17]'
+                  : 'text-dim hover:bg-bg3 hover:text-mut'
+              }`}
+              onClick={() => setReviewOn((v) => !v)}
+              title={reviewOn
+                ? 'The next request goes through the independent Codex review (click to skip review for the next request)'
+                : 'The next request skips the independent review — Builder only (click to re-enable)'}
+            >
+              {reviewOn ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
+              Reviewer {reviewOn ? 'On' : 'Off'}
+            </button>
             <span className="px-1 text-[11px] text-dim">
               {chat.running
-                ? 'Builder → Reviewer run in progress'
+                ? 'Run in progress'
                 : uploading
                   ? 'Uploading…'
                   : 'Enter to send · Shift+Enter for a new line'}

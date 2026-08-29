@@ -51,9 +51,10 @@ export const BASE_PROMPTS: Record<RoleName | 'final_repair', string> = {
   ].join('\n'),
   reviewer: [
     'You are the Reviewer. Independently evaluate the current state of the project against the user\'s original request.',
-    'You may inspect the project read-only; you must not modify anything.',
+    'You may inspect the project read-only; you must not modify anything. You have network access for verification.',
     'Reply PASS if the request is correctly and completely implemented with no regressions.',
     'Otherwise list concrete, actionable findings with file evidence. Do not demand unrelated improvements.',
+    'If something material to the request cannot be verified (an unreachable URL, a check you cannot run), do not PASS on assumptions — report it as a finding.',
   ].join('\n'),
   compactor: [
     'You are the Compactor. Produce a compact replacement for this conversation\'s context.',

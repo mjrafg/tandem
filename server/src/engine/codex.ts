@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { AiUsage, Effort } from '../../../shared/types';
 import { config, internalBase, shotsDir } from '../config';
@@ -16,9 +17,50 @@ export interface CodexResult {
 }
 
 /**
- * One real Codex CLI review call — strictly read-only (`--sandbox read-only`
- * is enforced by Codex at the OS level, which is the hard boundary the product
- * requires; the prompt merely restates it).
+ * The Reviewer's permission boundary, expressed in Codex's current
+ * permission-profile model (one consistent mechanism — no legacy
+ * `--sandbox`/`sandbox_mode` mixing):
+ *   - filesystem: read-only everywhere (OS-enforced; writes fail with EROFS)
+ *   - network: enabled through Codex's sandbox proxy — public internet, name
+ *     resolution, and local services (local/private addresses route through
+ *     the proxy when the client is told not to bypass it)
+ *   - approvals: never (read-only verification must not stall on prompts)
+ */
+const REVIEWER_PROFILE_NAME = 'tandem-reviewer';
+const REVIEWER_PROFILE = `# Written by Tandem (server/src/engine/codex.ts); regenerated before each review.
+# Reviewer boundary: filesystem read-only everywhere, network enabled.
+approval_policy = "never"
+default_permissions = "${REVIEWER_PROFILE_NAME}"
+
+[permissions.${REVIEWER_PROFILE_NAME}]
+filesystem."/" = "read"
+
+[permissions.${REVIEWER_PROFILE_NAME}.network]
+enabled = true
+mode = "full"
+domains."*" = "allow"
+allow_local_binding = true
+
+[features.network_proxy]
+enabled = true
+`;
+
+function ensureReviewerProfile(): boolean {
+  try {
+    const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const file = path.join(codexHome, `${REVIEWER_PROFILE_NAME}.config.toml`);
+    if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== REVIEWER_PROFILE) {
+      fs.writeFileSync(file, REVIEWER_PROFILE);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One real Codex CLI review call, sandboxed by the permission profile above.
  */
 export async function runCodexReview(h: RunHandle, opts: {
   model: string;
@@ -27,12 +69,16 @@ export async function runCodexReview(h: RunHandle, opts: {
   cwd: string;
   timeoutMs: number;
 }): Promise<CodexResult> {
+  const haveProfile = ensureReviewerProfile();
   const args = [
     'exec',
     '--json',
-    '--sandbox', 'read-only',
     '--skip-git-repo-check',
   ];
+  // permission profile (read-only FS + network); hard fallback to the legacy
+  // preset only if the profile file cannot be written at all
+  if (haveProfile) args.push('-p', REVIEWER_PROFILE_NAME);
+  else args.push('--sandbox', 'read-only');
   if (opts.model.trim()) args.push('-m', opts.model.trim());
   args.push('-c', `model_reasoning_effort="${opts.effort}"`);
   // the internal browser tool (MCP servers run outside the shell sandbox; the

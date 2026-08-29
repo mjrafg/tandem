@@ -188,7 +188,10 @@ async function review(h: RunHandle, userText: string, delta: WorktreeDelta, roun
   const systemParts = [BASE_PROMPTS.reviewer];
   if (h.settings.sharedInstructions.trim()) systemParts.push(h.settings.sharedInstructions.trim());
   if (cfg.instructions.trim()) systemParts.push(cfg.instructions.trim());
-  systemParts.push('A real internal browser (headless Chromium) is available through the browser_* tools — open URLs including localhost, interact with pages, resize the viewport, read the console, take screenshots you can see. Use it if inspecting the running application helps your judgment. Your project filesystem access remains read-only.');
+  systemParts.push([
+    'A real internal browser (headless Chromium) is available through the browser_* tools — open URLs including localhost, interact with pages, resize the viewport, read the console, take screenshots you can see. Use it if inspecting the running application helps your judgment. Your project filesystem access remains read-only.',
+    'Your shell has network access via the sandbox\'s HTTP(S) proxy: public URLs and name resolution work with normal tools (curl, wget). Local/private addresses (localhost, 127.0.0.1, 172.x, 10.x…) are excluded from the default proxy env, so for those force the proxy — e.g. `curl --noproxy \'\' http://127.0.0.1:PORT/…` — or use the internal browser, which reaches them directly.',
+  ].join('\n'));
 
   const result = await runCodexReview(h, {
     model: cfg.model,

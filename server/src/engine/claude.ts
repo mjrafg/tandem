@@ -7,6 +7,7 @@ import {
   addEvent, appendAssistantText, beginAssistantMessage, finishAssistantMessage, updateEvent,
 } from '../events';
 import { spawnStreaming } from './procs';
+import { recordModelWindow } from '../context';
 import { servedToolRecord, toolTextEnv } from '../toolText';
 import type { RunHandle } from './run';
 
@@ -202,7 +203,10 @@ export async function runClaudeTurn(h: RunHandle, opts: {
           if (mu && typeof mu === 'object') {
             const entry = (actualModel && mu[actualModel]) || Object.values(mu)[0];
             const win = (entry as any)?.contextWindow;
-            if (typeof win === 'number' && win > 0) usage.contextWindow = win;
+            if (typeof win === 'number' && win > 0) {
+              usage.contextWindow = win;
+              recordModelWindow('claude-code', actualModel ?? opts.model, win);
+            }
           }
         }
         if (ev.is_error || (ev.subtype && ev.subtype !== 'success')) {

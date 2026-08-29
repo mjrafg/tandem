@@ -45,6 +45,8 @@ export async function readNativeContext(provider: Provider, ref: SessionRef): Pr
     if (!res.ok) return { ok: false, error: res.error };
     const parsed = parseClaudeContext(res.resultText);
     if (!parsed) return { ok: false, error: 'Could not parse the /context report from Claude Code.' };
+    // note: /context's denominator can differ slightly from the canonical
+    // modelUsage.contextWindow (autocompact buffer) — real calls record windows
     return { ok: true, ...parsed };
   }
   return {

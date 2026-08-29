@@ -1,6 +1,46 @@
-import type { AiCallPayload, Chat, ChatEvent, CompactionPayload, ContextUsage } from '../../shared/types';
-import { db, getBuilderSession, rowToEvent } from './db';
+import type { AiCallPayload, Chat, ChatEvent, CompactionPayload, ContextUsage, Provider } from '../../shared/types';
+import { db, getBuilderSession, kvGet, kvSet, rowToEvent } from './db';
 import { getSettings } from './settings';
+
+// ------------------------------------------------- provider context windows
+//
+// The context window is a property of (provider, model) that providers report
+// with real calls (e.g. Claude Code's modelUsage.contextWindow). Remember every
+// observation so chats whose own events predate window capture still show the
+// provider's actual known capacity instead of "unknown". Nothing is invented:
+// only values a provider actually reported are ever stored or shown.
+
+type WindowMap = Record<string, number>;
+let windowCache: WindowMap | null = null;
+
+function windowMap(): WindowMap {
+  if (!windowCache) windowCache = kvGet<WindowMap>('model_windows') ?? {};
+  return windowCache;
+}
+
+export function recordModelWindow(provider: Provider, model: string | undefined, window: number): void {
+  if (!model || !(window > 0)) return;
+  const map = windowMap();
+  if (map[`${provider}:${model}`] === window) return;
+  map[`${provider}:${model}`] = window;
+  kvSet('model_windows', map);
+}
+
+export function knownModelWindow(provider: Provider, model: string | null): number | null {
+  return model ? windowMap()[`${provider}:${model}`] ?? null : null;
+}
+
+/** One-time seed from history so legacy chats get real windows right away. */
+export function backfillModelWindows(): void {
+  if (Object.keys(windowMap()).length > 0) return;
+  for (const row of db.prepare("SELECT payload FROM events WHERE kind = 'ai_call' ORDER BY ts").all() as any[]) {
+    try {
+      const p = JSON.parse(row.payload) as AiCallPayload;
+      const w = p.response?.usage?.contextWindow;
+      if (w) recordModelWindow(p.provider, p.model, w);
+    } catch { /* ignore malformed rows */ }
+  }
+}
 
 export function estimateTokens(s: string | undefined | null): number {
   return Math.ceil((s ?? '').length / 4);
@@ -116,6 +156,13 @@ export function computeUsage(chat: Chat): ContextUsage {
   let pendingTokens = 0;
   for (const e of events) {
     if (e.seq > anchorSeq && e.kind !== 'compaction') pendingTokens += estimateEventTokens(e);
+  }
+
+  // chats from before window capture: use the provider's known reported window
+  // for the same model (observed on real calls) rather than showing unknown
+  if (windowTokens == null) {
+    windowTokens = knownModelWindow(provider, model)
+      ?? knownModelWindow(provider, settings.roles.builder.model);
   }
 
   const total = usedTokens != null ? usedTokens + pendingTokens : null;

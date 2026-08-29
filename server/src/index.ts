@@ -9,6 +9,7 @@ import { config } from './config';
 import { registerRoutes } from './routes';
 import { registerProjectRoutes } from './projectRoutes';
 import { recoverInterruptedRuns } from './engine/run';
+import { backfillModelWindows } from './context';
 import { seedIfEmpty } from './mock/seed';
 
 // ---------------------------------------------------------------- CLI mode
@@ -34,6 +35,7 @@ async function main(): Promise<void> {
   ensureUser();
   seedIfEmpty();
   recoverInterruptedRuns();
+  backfillModelWindows();
 
   const app = Fastify({
     logger: { level: config.production ? 'warn' : 'info' },

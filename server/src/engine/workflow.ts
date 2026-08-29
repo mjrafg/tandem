@@ -9,11 +9,13 @@ import { runClaudeTurn } from './claude';
 import { runCodexReview } from './codex';
 import { applyCompaction, recentConversation, runCompaction } from './compactor';
 import {
-  RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, setChatRunning, stopRun,
+  RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, repoBusyBy, setChatRunning, stopRun,
 } from './run';
+import { adoptRepo, finishGitRun, summaryText } from './gitFlow';
 import { captureWorktree, diffWorktrees, type DeltaNoteKind } from './snapshot';
 
 export { isRunning, stopRun, applyWorkdirChange } from './run';
+export { setGitWorkflow } from './gitFlow';
 
 const BUILDER_TIMEOUT = 30 * 60_000;
 const REVIEW_TIMEOUT = 15 * 60_000;
@@ -44,7 +46,19 @@ export async function startRun(
   const project = getProject(chat.projectId);
   if (!project) return;
 
-  const ctx: RunCtx = { chatId, runId: randomUUID(), stopped: false };
+  // hard boundary: two chats switching branches in the same directory at the
+  // same time would destroy each other's state
+  const busy = repoBusyBy(project.rootPath, chatId);
+  if (busy) {
+    addEvent(chatId, 'error', {
+      message: 'Another chat is actively working in this directory',
+      detail: 'Concurrent runs in the same repository are blocked because each chat works on its own Git branch. Try again when the other run finishes.',
+      source: 'engine', retryable: true,
+    });
+    return;
+  }
+
+  const ctx: RunCtx = { chatId, runId: randomUUID(), stopped: false, rootPath: project.rootPath };
   registerCtx(ctx);
   setChatRunning(chatId, true);
   // the per-request Reviewer choice is captured here, once, with the run —
@@ -53,7 +67,9 @@ export async function startRun(
 
   const h = new RunHandle(ctx, chat, project, attachments);
   try {
-    await runWorkflow(h, userText, runOpts);
+    h.gitFlow = (await adoptRepo(h)) ?? undefined;
+    const ok = await runWorkflow(h, userText, runOpts);
+    if (ok && !ctx.stopped) await finishGitRun(h, userText);
     addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
   } catch (err) {
     h.error({ message: 'The run failed unexpectedly', detail: String(err), source: 'engine' });
@@ -66,7 +82,7 @@ export async function startRun(
   }
 }
 
-async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean }): Promise<void> {
+async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean }): Promise<boolean> {
   const builderCfg = h.settings.roles.builder;
   const startDir = h.project.rootPath;
   const before = captureWorktree(startDir);
@@ -77,7 +93,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     role: 'builder',
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystemText(h.settings, 'builder'),
+    systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined),
     message: builderMessage(h, userText, resume),
     cwd: startDir,
     resumeSessionId: resume,
@@ -85,35 +101,36 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     timeoutMs: BUILDER_TIMEOUT,
   });
   if (first.sessionId) setBuilderSession(h.chat.id, first.sessionId);
-  if (h.stopped) return;
+  if (h.stopped) return false;
   if (!first.ok) {
     h.error({ message: 'Builder call failed', detail: first.error, source: 'builder', retryable: true });
-    return;
+    return false;
   }
 
   // ---- objective review gate: what actually changed on disk?
   h.refresh();
   const endDir = h.project.rootPath;
   const delta = reviewGate(before, startDir, endDir, h);
-  if (!delta) return; // nothing to review (or no baseline — already noted)
+  if (!delta) return true; // nothing to review (or no baseline — already noted)
   if (!runOpts.review) {
     // the user turned the Reviewer off for this request — an orchestration
     // choice, recorded honestly (this is not a failure or unavailability)
     h.status('Reviewer skipped by user for this request.');
-    return;
+    return true;
   }
-  if (h.settings.roles.reviewer.enabled === false) return;
+  if (h.settings.roles.reviewer.enabled === false) return true;
 
   // ---- round 1
   const round1 = await review(h, userText, delta, 1);
-  if (!round1 || h.stopped || round1.verdict === 'pass') return;
+  if (h.stopped) return false;
+  if (!round1 || round1.verdict === 'pass') return true;
 
   // ---- repair
   const repair = await runClaudeTurn(h, {
     role: 'builder',
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystemText(h.settings, 'builder'),
+    systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined),
     message: renderPrompt('repair.findings_message', { findings: findingsAsText(round1.items) }),
     cwd: endDir,
     resumeSessionId: getBuilderSession(h.chat.id),
@@ -121,23 +138,24 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     timeoutMs: BUILDER_TIMEOUT,
   });
   if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId);
-  if (h.stopped) return;
+  if (h.stopped) return false;
   if (!repair.ok) {
     h.error({ message: 'Builder repair call failed', detail: repair.error, source: 'builder', retryable: true });
-    return;
+    return false;
   }
 
   // ---- round 2 (the last review)
   h.refresh();
   const round2 = await review(h, userText, currentDelta(h), 2);
-  if (!round2 || h.stopped || round2.verdict === 'pass') return;
+  if (h.stopped) return false;
+  if (!round2 || round2.verdict === 'pass') return true;
 
   // ---- final repair — hard cap: never re-reviewed
   const final = await runClaudeTurn(h, {
     role: 'final_repair',
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystemText(h.settings, 'final_repair'),
+    systemAppendix: builderSystemText(h.settings, 'final_repair', h.gitFlow ? summaryText(h.gitFlow) : undefined),
     message: renderPrompt('repair.final_message', { findings: findingsAsText(round2.items) }),
     cwd: h.project.rootPath,
     resumeSessionId: getBuilderSession(h.chat.id),
@@ -148,9 +166,12 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   if (!h.stopped && final.ok) {
     updateEvent(round2.eventId, { finalRepairNotReviewed: true });
     h.status('Final repair applied. The review loop is capped at two rounds, so this final repair was not re-reviewed.');
-  } else if (!h.stopped && !final.ok) {
+    return true;
+  }
+  if (!h.stopped && !final.ok) {
     h.error({ message: 'Final repair call failed', detail: final.error, source: 'builder', retryable: true });
   }
+  return false;
 }
 
 // ---------------------------------------------------------------- review gate

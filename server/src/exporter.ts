@@ -127,6 +127,16 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       const p = e.payload as any;
       return [`🛑 **Error** (${p.source ?? 'app'}): ${p.message}${p.detail ? `\n\n> ${p.detail}` : ''}`];
     }
+    case 'checkpoint': {
+      const p = e.payload as any;
+      const label = p.action === 'merge' ? `Merged \`${p.branch}\` → \`${p.target}\``
+        : p.action === 'push' ? `Pushed to \`origin/${p.target}\``
+        : p.action === 'preserve' ? `Uncommitted changes preserved on \`${p.branch}\``
+        : `Checkpoint saved on \`${p.branch}\``;
+      const lines = [`- 🔖 **${label}**${p.commit ? ` · \`${p.commit}\`` : ''}${p.message ? ` — ${p.message}` : ''}`];
+      if (p.files?.length) lines.push(...p.files.map((f: string) => `  - ${f}`));
+      return lines;
+    }
     case 'browser': {
       const p = e.payload as BrowserActionPayload;
       const lines = [`- 🌐 **Browser** (${p.role ?? 'agent'}): ${p.detail}${p.status === 'failed' ? ' — **failed**' : ''}${p.durationMs ? ` · ${fmtDur(p.durationMs)}` : ''}`];
@@ -281,6 +291,17 @@ ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
     case 'error': {
       const p = e.payload as any;
       return `<div class="ev"><span class="err">✕ ${escapeHtml(p.message)}</span>${p.detail ? `<div class="kv">${escapeHtml(p.detail)}</div>` : ''}</div>`;
+    }
+    case 'checkpoint': {
+      const p = e.payload as any;
+      const label = p.action === 'merge' ? `Merged ${escapeHtml(p.branch)} → ${escapeHtml(p.target ?? '')}`
+        : p.action === 'push' ? `Pushed to origin/${escapeHtml(p.target ?? '')}`
+        : p.action === 'preserve' ? `Uncommitted changes preserved on ${escapeHtml(p.branch)}`
+        : `Checkpoint saved on ${escapeHtml(p.branch)}`;
+      return `<div class="ev"><details><summary>🔖 ${label}${p.commit ? ` · <code>${escapeHtml(p.commit)}</code>` : ''}</summary><div class="body">
+${p.message ? `<div class="kv">${escapeHtml(p.message)}</div>` : ''}
+${p.files?.length ? `<ul>${p.files.map((f: string) => `<li><code>${escapeHtml(f)}</code></li>`).join('')}</ul>` : ''}
+</div></details></div>`;
     }
     case 'browser': {
       const p = e.payload as BrowserActionPayload;

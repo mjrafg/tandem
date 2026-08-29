@@ -1,44 +1,64 @@
 #!/usr/bin/env node
 /**
- * Minimal MCP stdio server exposing Tandem's one capability to the Builder:
- * tandem_set_working_dir. The tool call is forwarded to the Tandem app on
- * localhost, which validates the path, re-points the chat, and records the
- * change in the timeline. No other tools, no other side effects.
+ * Tandem's MCP stdio server for app-state capabilities offered to the Builder:
+ *   - tandem_set_working_dir: re-point the chat's active working directory
+ *   - tandem_set_git_workflow: update the chat's persistent Git policy
+ * Tool calls are forwarded to the Tandem app on localhost (token-authed),
+ * which validates, persists, and records the change in the timeline.
  */
 'use strict';
 
 const readline = require('node:readline');
 
 const BASE = (process.env.TANDEM_INTERNAL_URL || '').replace(/\/workdir$/, '');
-const API = `${BASE}/workdir`;
 const CHAT_ID = process.env.TANDEM_CHAT_ID;
 const TOKEN = process.env.TANDEM_INTERNAL_TOKEN;
 
-const TOOL = {
-  name: 'tandem_set_working_dir',
-  description: [
-    'Make a different directory this chat\'s active working directory in Tandem.',
-    'Use it when further work belongs in another directory — for example after cloning a repository or extracting an attached archive into a new folder.',
-    'The UI header, git status, and future turns will follow the new path.',
-  ].join(' '),
-  inputSchema: {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: 'Absolute path of the directory to make active.' },
+const TOOLS = [
+  {
+    name: 'tandem_set_working_dir',
+    description: [
+      'Make a different directory this chat\'s active working directory in Tandem.',
+      'Use it when further work belongs in another directory — for example after cloning a repository or extracting an attached archive into a new folder.',
+      'The UI header, git status, and future turns will follow the new path.',
+    ].join(' '),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path of the directory to make active.' },
+      },
+      required: ['path'],
     },
-    required: ['path'],
   },
-};
+  {
+    name: 'tandem_set_git_workflow',
+    description: [
+      'Update this chat\'s persistent Git workflow policy when the user asks for a change; it applies to future requests without re-asking.',
+      'Modes: working-branch (Tandem commits checkpoints on its own tandem/ branch, no merging), auto-merge (after each completed request, merge the Tandem branch into the target branch), direct (work and commit directly on the target branch).',
+      'Optionally set the target branch and whether completed merges are pushed to the remote.',
+    ].join(' '),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['working-branch', 'auto-merge', 'direct'], description: 'The Git workflow mode to use from now on.' },
+        target_branch: { type: 'string', description: 'Branch that auto-merge/direct mode targets (must exist). Defaults to the current target.' },
+        push: { type: 'string', enum: ['auto', 'never'], description: 'Whether completed work is pushed to origin. Only set when the user clearly authorized ongoing pushing (or revoked it).' },
+      },
+    },
+  },
+];
 
 // Admin-edited AI-facing text (descriptions only) — see Admin → AI Tools.
 try {
-  const ov = JSON.parse(process.env.TANDEM_TOOL_TEXT || '{}')[`tandem.${TOOL.name}`];
-  if (ov) {
-    if (typeof ov.description === 'string' && ov.description.trim()) TOOL.description = ov.description;
-    if (ov.params) {
+  const overrides = JSON.parse(process.env.TANDEM_TOOL_TEXT || '{}');
+  for (const tool of TOOLS) {
+    const ov = overrides[`tandem.${tool.name}`];
+    if (!ov) continue;
+    if (typeof ov.description === 'string' && ov.description.trim()) tool.description = ov.description;
+    if (ov.params && tool.inputSchema && tool.inputSchema.properties) {
       for (const [param, desc] of Object.entries(ov.params)) {
-        if (TOOL.inputSchema.properties[param] && typeof desc === 'string' && desc.trim()) {
-          TOOL.inputSchema.properties[param].description = desc;
+        if (tool.inputSchema.properties[param] && typeof desc === 'string' && desc.trim()) {
+          tool.inputSchema.properties[param].description = desc;
         }
       }
     }
@@ -57,18 +77,35 @@ function replyError(id, code, message) {
   send({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
-async function callTool(args) {
-  const path = args && typeof args.path === 'string' ? args.path : '';
-  const res = await fetch(API, {
+async function post(pathname, body) {
+  const res = await fetch(`${BASE}${pathname}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chatId: CHAT_ID, path, token: TOKEN }),
+    body: JSON.stringify({ chatId: CHAT_ID, token: TOKEN, ...body }),
   });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || body.ok === false) {
-    return { content: [{ type: 'text', text: `Could not change the working directory: ${body.error || res.status}` }], isError: true };
+  const parsed = await res.json().catch(() => ({}));
+  return { httpOk: res.ok, body: parsed };
+}
+
+async function callTool(name, args) {
+  args = args || {};
+  if (name === 'tandem_set_working_dir') {
+    const { httpOk, body } = await post('/workdir', { path: typeof args.path === 'string' ? args.path : '' });
+    if (!httpOk || body.ok === false) {
+      return { content: [{ type: 'text', text: `Could not change the working directory: ${body.error || 'error'}` }], isError: true };
+    }
+    return { content: [{ type: 'text', text: `Working directory is now ${body.path}. The chat UI and future turns follow this path.` }] };
   }
-  return { content: [{ type: 'text', text: `Working directory is now ${body.path}. The chat UI and future turns follow this path.` }] };
+  if (name === 'tandem_set_git_workflow') {
+    const { httpOk, body } = await post('/git-workflow', {
+      mode: args.mode, target_branch: args.target_branch, push: args.push,
+    });
+    if (!httpOk || body.ok === false) {
+      return { content: [{ type: 'text', text: `Could not update the Git workflow: ${body.error || 'error'}` }], isError: true };
+    }
+    return { content: [{ type: 'text', text: `Git workflow updated and persisted for this chat: ${body.summary}` }] };
+  }
+  return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
 }
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
@@ -80,21 +117,16 @@ rl.on('line', (line) => {
     reply(id, {
       protocolVersion: (params && params.protocolVersion) || '2024-11-05',
       capabilities: { tools: {} },
-      serverInfo: { name: 'tandem', version: '1.0.0' },
+      serverInfo: { name: 'tandem', version: '1.1.0' },
     });
-  } else if (method === 'notifications/initialized' || (method && method.startsWith('notifications/'))) {
+  } else if (method && method.startsWith('notifications/')) {
     // notifications need no response
   } else if (method === 'tools/list') {
-    reply(id, { tools: [TOOL] });
+    reply(id, { tools: TOOLS });
   } else if (method === 'tools/call') {
-    const name = params && params.name;
-    if (name !== TOOL.name) {
-      replyError(id, -32602, `Unknown tool: ${name}`);
-      return;
-    }
-    callTool(params.arguments)
+    callTool(params && params.name, params && params.arguments)
       .then((result) => reply(id, result))
-      .catch((err) => reply(id, { content: [{ type: 'text', text: `Working-directory change failed: ${String(err)}` }], isError: true }));
+      .catch((err) => reply(id, { content: [{ type: 'text', text: `Tool call failed: ${String(err)}` }], isError: true }));
   } else if (method === 'ping') {
     reply(id, {});
   } else if (id !== undefined) {

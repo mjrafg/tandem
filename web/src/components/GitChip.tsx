@@ -1,9 +1,16 @@
 import { GitBranch } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import type { GitStatus } from '@shared/types';
+import type { GitFlowState, GitStatus } from '@shared/types';
 import { api } from '../api';
 
-export function GitChip({ projectId }: { projectId: string }) {
+function workflowLabel(g: GitFlowState): string {
+  const push = g.push === 'auto' ? ' · push on' : '';
+  if (g.mode === 'auto-merge') return `Auto merge → ${g.targetBranch}${push}`;
+  if (g.mode === 'direct') return `Direct on ${g.targetBranch}${push}`;
+  return `Working branch → target ${g.targetBranch}${push}`;
+}
+
+export function GitChip({ projectId, gitState }: { projectId: string; gitState?: GitFlowState | null }) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -63,7 +70,9 @@ export function GitChip({ projectId }: { projectId: string }) {
             <p className="text-[12px] text-dim">Working tree is clean.</p>
           )}
           <p className="mt-2 border-t border-linesoft pt-2 text-[11px] leading-snug text-dim">
-            Tandem never commits, pushes, or deploys unless you ask for it.
+            {gitState && gitState.mode !== 'none'
+              ? <>Git workflow: <span className="text-mut">{workflowLabel(gitState)}</span> — checkpoints are committed automatically; nothing merges or pushes beyond this policy.</>
+              : 'Tandem never merges, pushes, or deploys unless you ask for it.'}
           </p>
         </div>
       )}

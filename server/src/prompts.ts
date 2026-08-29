@@ -67,11 +67,20 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     key: 'builder.deploy_guardrail',
-    name: 'Builder — commit/push/deploy guardrail',
-    description: 'Instruction-level guardrail against unrequested commits, pushes, publishes, deploys.',
+    name: 'Builder — merge/push/deploy guardrail',
+    description: 'Instruction-level guardrail: local work commits are fine; merging, pushing, publishing, deploying follow the persistent policy and the user\'s instructions.',
     group: 'builder',
     roles: ['builder', 'final repair'],
-    default: 'Never commit, push, publish, or deploy unless the user explicitly asked for it in this conversation.',
+    default: 'Local commits on this chat\'s Tandem working branch are fine (the app also checkpoints completed work automatically). Do not merge into the user\'s branch, push, publish, or deploy unless the active Git workflow policy or the user\'s explicit instructions in this conversation allow it.',
+  },
+  {
+    key: 'builder.git_workflow',
+    name: 'Builder — Git workflow state',
+    description: 'Tells the Builder the chat\'s persistent Git policy and how to change it when the user asks. Included only when the project is a Git repository.',
+    group: 'builder',
+    roles: ['builder', 'final repair'],
+    placeholders: ['git_workflow'],
+    default: 'Git workflow for this chat (persistent application state): {{git_workflow}}. The app automatically checkpoints completed work and applies this policy — you don\'t need to commit/merge yourself unless it helps. When the user asks to change how Git is handled (for example: merge finished work into a branch automatically from now on, stop merging, work directly on a branch, start pushing completed work), call the tandem_set_git_workflow tool once with the new policy — it persists for future requests without re-asking.',
   },
   {
     key: 'builder.continuation_compacted',
@@ -417,7 +426,7 @@ export function renderPrompt(key: string, vars: Record<string, string | number>)
 // The exact system-addition builders used by the production engine (and by the
 // Admin preview, so the preview can never drift from reality).
 
-export function builderSystemText(settings: AppSettings, role: 'builder' | 'final_repair'): string {
+export function builderSystemText(settings: AppSettings, role: 'builder' | 'final_repair', gitWorkflow?: string): string {
   const parts = [getPrompt('builder.base')];
   if (role === 'final_repair') parts.push(getPrompt('repair.final_base'));
   if (settings.sharedInstructions.trim()) parts.push(settings.sharedInstructions.trim());
@@ -429,6 +438,7 @@ export function builderSystemText(settings: AppSettings, role: 'builder' | 'fina
     getPrompt('builder.browser_guidance'),
     getPrompt('builder.deploy_guardrail'),
   ].join('\n'));
+  if (gitWorkflow) parts.push(renderPrompt('builder.git_workflow', { git_workflow: gitWorkflow }));
   return parts.join('\n\n');
 }
 
@@ -470,7 +480,7 @@ export function buildRolePreview(role: string, settings: AppSettings): string {
   }
   const r = role === 'final_repair' ? 'final_repair' : 'builder';
   return [
-    builderSystemText(settings, r),
-    '[at call time Tandem appends the message: on a fresh session, the compacted-context / recent-conversation sections, then the user request (with the attachment note when files are attached); on a resumed session, just the request]',
+    builderSystemText(settings, r, '{{git_workflow}}'),
+    '[at call time Tandem appends the message: on a fresh session, the compacted-context / recent-conversation sections, then the user request (with the attachment note when files are attached); on a resumed session, just the request. {{git_workflow}} is filled with the chat\'s persistent Git policy, and the section is omitted for non-Git directories]',
   ].join('\n\n');
 }

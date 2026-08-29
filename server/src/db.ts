@@ -52,6 +52,17 @@ CREATE INDEX IF NOT EXISTS idx_events_chat ON events(chat_id, seq);
 
 // additive migrations
 try { db.exec('ALTER TABLE chats ADD COLUMN builder_session_id TEXT'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE chats ADD COLUMN git_state TEXT'); } catch { /* exists */ }
+
+export function getGitStateRow(chatId: string): import('../../shared/types').GitFlowState | null {
+  const row = db.prepare('SELECT git_state AS s FROM chats WHERE id = ?').get(chatId) as any;
+  if (!row?.s) return null;
+  try { return JSON.parse(row.s); } catch { return null; }
+}
+
+export function setGitStateRow(chatId: string, state: import('../../shared/types').GitFlowState): void {
+  db.prepare('UPDATE chats SET git_state = ? WHERE id = ?').run(JSON.stringify(state), chatId);
+}
 
 export function getBuilderSession(chatId: string): string | null {
   const row = db.prepare('SELECT builder_session_id AS s FROM chats WHERE id = ?').get(chatId) as any;
@@ -84,10 +95,15 @@ export function rowToProject(r: any): Project {
 }
 
 export function rowToChat(r: any): Chat {
+  let gitState = null;
+  if (r.git_state) {
+    try { gitState = JSON.parse(r.git_state); } catch { /* ignore */ }
+  }
   return {
     id: r.id, projectId: r.project_id, title: r.title,
     createdAt: r.created_at, updatedAt: r.updated_at,
     running: !!r.running, lastCompactionEventId: r.last_compaction_event_id ?? null,
+    gitState,
   };
 }
 

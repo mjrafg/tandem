@@ -1,12 +1,12 @@
 import {
-  AlertTriangle, Archive, Braces, Camera, CircleCheck, CircleSlash, Clock, FileDiff, FileText, Globe,
-  Keyboard, ListTree, MousePointerClick, MoveVertical, OctagonX, Scan, Search as SearchIcon, Sparkles,
-  SquareTerminal, Terminal,
+  AlertTriangle, Archive, Braces, Camera, CircleCheck, CircleSlash, Clock, CloudUpload, FileDiff, FileText,
+  GitBranch, GitCommitHorizontal, GitMerge, Globe, Keyboard, ListTree, MousePointerClick, MoveVertical,
+  OctagonX, Scan, Search as SearchIcon, Sparkles, SquareTerminal, Terminal,
 } from 'lucide-react';
 import { useState } from 'react';
 import type {
-  AiCallPayload, BrowserActionPayload, ChatEvent, CommandPayload, CompactionPayload, ErrorPayload, FileChangePayload,
-  FileReadPayload, FindingsPayload, RunPayload, SearchPayload, StatusPayload,
+  AiCallPayload, BrowserActionPayload, ChatEvent, CheckpointPayload, CommandPayload, CompactionPayload, ErrorPayload,
+  FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, StatusPayload,
 } from '@shared/types';
 import { fmtDuration, fmtTokens, plural } from '../../lib/format';
 import { DiffView } from '../DiffView';
@@ -412,6 +412,38 @@ function BrowserActionDetail({ chatId, p }: { chatId: string; p: BrowserActionPa
         </a>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- git checkpoints
+
+export function CheckpointRow({ ev }: { ev: ChatEvent }) {
+  const p = ev.payload as CheckpointPayload;
+  const meta: Record<CheckpointPayload['action'], { icon: typeof GitCommitHorizontal; label: React.ReactNode }> = {
+    commit: { icon: GitCommitHorizontal, label: <>Checkpoint saved{p.files?.length ? <> · {plural(p.files.length, 'file')}</> : null}</> },
+    preserve: { icon: GitBranch, label: <>Uncommitted changes preserved · {plural(p.files?.length ?? 0, 'file')}</> },
+    merge: { icon: GitMerge, label: <>Merged to <span className="mono text-[12px]">{p.target}</span></> },
+    push: { icon: CloudUpload, label: <>Pushed to <span className="mono text-[12px]">origin/{p.target}</span></> },
+  };
+  const m = meta[p.action] ?? meta.commit;
+  return (
+    <ActivityRow
+      icon={<m.icon size={14} />}
+      label={m.label}
+      meta={p.commit ? <span className="mono">{p.commit}</span> : undefined}
+    >
+      <div className="rounded-lg border border-linesoft bg-bg1 px-3 py-2">
+        <KV k="branch" v={p.branch} mono />
+        {p.target && <KV k="target" v={p.target} mono />}
+        {p.commit && <KV k="commit" v={p.commit} mono />}
+        {p.message && <KV k="message" v={p.message} />}
+        {p.files && p.files.length > 0 && (
+          <div className="mt-1.5 border-t border-linesoft pt-1.5">
+            {p.files.map((f) => <div key={f} className="mono py-[1px] text-[11.5px] text-mut">{f}</div>)}
+          </div>
+        )}
+      </div>
+    </ActivityRow>
   );
 }
 

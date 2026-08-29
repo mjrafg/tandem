@@ -139,7 +139,7 @@ function TopBar({ chat, project, onCompact }: { chat: Chat; project: Project; on
             ? <Check size={11} className="shrink-0 text-ok" />
             : <Copy size={11} className="shrink-0 text-dim opacity-0 transition-opacity group-hover:opacity-100" />}
         </button>
-        <GitChip projectId={project.id} />
+        <GitChip projectId={project.id} gitState={chat.gitState} />
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         <ContextMeter usage={usage} onCompact={onCompact} />

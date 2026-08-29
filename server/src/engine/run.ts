@@ -13,6 +13,16 @@ export interface RunCtx {
   stopped: boolean;
   child?: ChildProcess;
   killTimer?: NodeJS.Timeout;
+  /** project root at run start (same-repo concurrency guard) */
+  rootPath?: string;
+}
+
+/** Another chat actively running in the same directory? (branch switching makes that destructive) */
+export function repoBusyBy(rootPath: string, exceptChatId: string): string | null {
+  for (const ctx of active.values()) {
+    if (ctx.chatId !== exceptChatId && ctx.rootPath === rootPath) return ctx.chatId;
+  }
+  return null;
 }
 
 const active = new Map<string, RunCtx>();
@@ -87,6 +97,8 @@ export class RunHandle {
   chat: Chat;
   project: Project;
   attachments: AttachmentMeta[];
+  /** active Git workflow for this run (set at adoption; undefined = unavailable) */
+  gitFlow?: import('../../../shared/types').GitFlowState;
   readonly settings: AppSettings;
 
   constructor(ctx: RunCtx, chat: Chat, project: Project, attachments: AttachmentMeta[]) {

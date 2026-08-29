@@ -50,6 +50,16 @@ export interface Project {
   lastOpenedAt: number;
 }
 
+export type GitFlowMode = 'working-branch' | 'auto-merge' | 'direct' | 'none';
+
+export interface GitFlowState {
+  mode: GitFlowMode;
+  workBranch: string;
+  targetBranch: string;
+  push: 'auto' | 'never';
+  repoPath: string;
+}
+
 export interface Chat {
   id: string;
   projectId: string;
@@ -58,6 +68,7 @@ export interface Chat {
   updatedAt: number;
   running: boolean;
   lastCompactionEventId: string | null;
+  gitState?: GitFlowState | null;
 }
 
 // ---------------------------------------------------------------- events
@@ -75,7 +86,8 @@ export type EventKind =
   | 'compaction'
   | 'run'
   | 'error'
-  | 'browser';
+  | 'browser'
+  | 'checkpoint';
 
 export type StepStatus = 'running' | 'done' | 'failed' | 'stopped';
 
@@ -210,6 +222,16 @@ export interface BrowserActionPayload {
   role?: string;
 }
 
+export interface CheckpointPayload {
+  /** commit = Tandem checkpoint · preserve = uncommitted work saved before branch adoption · merge / push */
+  action: 'commit' | 'preserve' | 'merge' | 'push';
+  branch: string;
+  target?: string;
+  commit?: string;
+  message?: string;
+  files?: string[];
+}
+
 export type EventPayloadMap = {
   user_message: UserMessagePayload;
   assistant_message: AssistantMessagePayload;
@@ -224,6 +246,7 @@ export type EventPayloadMap = {
   run: RunPayload;
   error: ErrorPayload;
   browser: BrowserActionPayload;
+  checkpoint: CheckpointPayload;
 };
 
 export interface ChatEvent<K extends EventKind = EventKind> {

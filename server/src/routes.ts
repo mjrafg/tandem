@@ -16,7 +16,7 @@ import {
 import { toHtml, toMarkdown, type ExportBundle } from './exporter';
 import { applyCompaction, runCompaction, type CompactionCall } from './engine/compactor';
 import { activeCtx } from './engine/run';
-import { applyWorkdirChange, isRunning, startRun, stopRun } from './engine/workflow';
+import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings } from './settings';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
@@ -223,6 +223,13 @@ export function registerRoutes(app: FastifyInstance): void {
     const { chatId, path: dirPath, token } = (req.body ?? {}) as { chatId?: string; path?: string; token?: string };
     if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
     const result = applyWorkdirChange(chatId ?? '', dirPath ?? '');
+    return result.ok ? result : reply.code(400).send(result);
+  });
+
+  app.post('/api/internal/git-workflow', async (req, reply) => {
+    const { chatId, token, mode, target_branch, push } = (req.body ?? {}) as Record<string, string | undefined>;
+    if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const result = await setGitWorkflow(chatId ?? '', { mode, target_branch, push });
     return result.ok ? result : reply.code(400).send(result);
   });
 

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import type { Chat, CompactionPayload, CompactOutcome, Provider } from '../../../shared/types';
 import { config } from '../config';
 import { computeUsage } from '../context';
-import { getBuilderSession, getProject } from '../db';
+import { getBuilderSession, getBuilderSessionProvider, getProject } from '../db';
 import { addEvent } from '../events';
 import { getSettings } from '../settings';
 
@@ -67,8 +67,10 @@ async function runNativeCompact(provider: Provider, ref: SessionRef): Promise<{ 
   }
   return {
     ok: false,
-    error: 'The installed Codex CLI (0.147) has no explicit compact operation invokable through `codex exec`. '
-      + 'Codex compacts its own context automatically during long invocations; there is nothing for Tandem to trigger.',
+    error: 'The installed Codex CLI (0.147) has no explicit compact operation invokable through `codex exec` — '
+      + 'slash commands like /compact are TUI-only, and sent through exec they reach the model as plain text '
+      + '(verified: the model just replies "Context compacted." while the session history stays fully intact). '
+      + 'Codex compacts its own context automatically during long invocations; that native behavior needs nothing from Tandem.',
   };
 }
 
@@ -100,6 +102,16 @@ export async function performNativeCompaction(chat: Chat, reason: 'manual' | 'au
     return {
       ok: false, provider, model, durationMs: 0,
       error: 'This chat has no active provider session yet — send a message first.',
+    };
+  }
+  const sessionProviderOwner = getBuilderSessionProvider(chat.id);
+  if (sessionProviderOwner !== provider) {
+    const owner = sessionProviderOwner === 'claude-code' ? 'Claude Code' : 'Codex';
+    const now = provider === 'claude-code' ? 'Claude Code' : 'Codex';
+    return {
+      ok: false, provider, model, durationMs: 0,
+      error: `The active session was created by ${owner}, but the Builder provider is now ${now}. `
+        + `A new ${now} session starts with the next message, and context management will follow it.`,
     };
   }
   const project = getProject(chat.projectId);

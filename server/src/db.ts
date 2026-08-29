@@ -53,6 +53,8 @@ CREATE INDEX IF NOT EXISTS idx_events_chat ON events(chat_id, seq);
 // additive migrations
 try { db.exec('ALTER TABLE chats ADD COLUMN builder_session_id TEXT'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE chats ADD COLUMN git_state TEXT'); } catch { /* exists */ }
+// which provider created the stored session (pre-existing sessions are Claude's)
+try { db.exec("ALTER TABLE chats ADD COLUMN builder_session_provider TEXT DEFAULT 'claude-code'"); } catch { /* exists */ }
 
 export function getGitStateRow(chatId: string): import('../../shared/types').GitFlowState | null {
   const row = db.prepare('SELECT git_state AS s FROM chats WHERE id = ?').get(chatId) as any;
@@ -69,8 +71,19 @@ export function getBuilderSession(chatId: string): string | null {
   return row?.s ?? null;
 }
 
-export function setBuilderSession(chatId: string, sessionId: string | null): void {
-  db.prepare('UPDATE chats SET builder_session_id = ? WHERE id = ?').run(sessionId, chatId);
+/** provider that created the stored session (defaults to claude-code for pre-migration rows) */
+export function getBuilderSessionProvider(chatId: string): import('../../shared/types').Provider {
+  const row = db.prepare('SELECT builder_session_provider AS p FROM chats WHERE id = ?').get(chatId) as any;
+  return row?.p === 'codex' ? 'codex' : 'claude-code';
+}
+
+export function setBuilderSession(
+  chatId: string,
+  sessionId: string | null,
+  provider: import('../../shared/types').Provider = 'claude-code',
+): void {
+  db.prepare('UPDATE chats SET builder_session_id = ?, builder_session_provider = ? WHERE id = ?')
+    .run(sessionId, provider, chatId);
 }
 
 // ---------------------------------------------------------------- kv

@@ -100,7 +100,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     withTandemTools: true,
     timeoutMs: BUILDER_TIMEOUT,
   });
-  if (first.sessionId) setBuilderSession(h.chat.id, first.sessionId);
+  if (first.sessionId) setBuilderSession(h.chat.id, first.sessionId, 'claude-code');
   if (h.stopped) return false;
   if (!first.ok) {
     h.error({ message: 'Builder call failed', detail: first.error, source: 'builder', retryable: true });
@@ -137,7 +137,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     withTandemTools: true,
     timeoutMs: BUILDER_TIMEOUT,
   });
-  if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId);
+  if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId, 'claude-code');
   if (h.stopped) return false;
   if (!repair.ok) {
     h.error({ message: 'Builder repair call failed', detail: repair.error, source: 'builder', retryable: true });
@@ -162,7 +162,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     withTandemTools: true,
     timeoutMs: BUILDER_TIMEOUT,
   });
-  if (final.sessionId) setBuilderSession(h.chat.id, final.sessionId);
+  if (final.sessionId) setBuilderSession(h.chat.id, final.sessionId, 'claude-code');
   if (!h.stopped && final.ok) {
     updateEvent(round2.eventId, { finalRepairNotReviewed: true });
     h.status('Final repair applied. The review loop is capped at two rounds, so this final repair was not re-reviewed.');

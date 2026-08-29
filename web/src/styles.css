@@ -1,0 +1,295 @@
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/jetbrains-mono';
+@import 'tailwindcss';
+
+@theme {
+  --color-bg0: #0b0c0f;
+  --color-bg1: #101216;
+  --color-bg2: #15181d;
+  --color-bg3: #1b1f26;
+  --color-line: #232830;
+  --color-linesoft: #1b1f25;
+  --color-ink: #e9ebef;
+  --color-mut: #9aa3af;
+  --color-dim: #667085;
+  --color-accent: #6e9bff;
+  --color-accentdim: #3c5aa8;
+  --color-builder: #e8a268;
+  --color-reviewer: #5bbfa5;
+  --color-compactor: #a48fff;
+  --color-ok: #4fb861;
+  --color-warn: #e0a83e;
+  --color-err: #e5534b;
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg0 text-ink font-sans antialiased;
+  font-size: 14px;
+  overscroll-behavior: none;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+/* ---------------------------------------------------------------- scrollbars */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a303a transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2a303a;
+  border-radius: 9px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------------------------------------------------------------- primitives */
+
+.btn,
+.btn-primary,
+.btn-ghost,
+.btn-outline,
+.btn-danger {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors select-none cursor-pointer whitespace-nowrap;
+}
+.btn:disabled,
+.btn-primary:disabled,
+.btn-ghost:disabled,
+.btn-outline:disabled,
+.btn-danger:disabled {
+  @apply opacity-45 cursor-not-allowed;
+}
+.btn-primary {
+  @apply bg-accent/90 text-[#0a1020] hover:bg-accent;
+}
+.btn-ghost {
+  @apply text-mut hover:text-ink hover:bg-bg3;
+}
+.btn-outline {
+  @apply border border-line text-ink hover:bg-bg2 hover:border-[#2e3540];
+}
+.btn-danger {
+  @apply bg-err/15 text-err hover:bg-err/25;
+}
+
+.input {
+  @apply w-full rounded-lg border border-line bg-bg0 px-3 py-2 text-[13.5px] text-ink placeholder:text-dim outline-none transition-colors;
+}
+.input:focus {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 14%, transparent);
+}
+
+.chip {
+  @apply inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[12px] text-mut;
+}
+
+.card {
+  @apply rounded-xl border border-line bg-bg1;
+}
+
+/* focus rings for keyboard nav */
+:where(button, a, [role='button'], input, textarea, select):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 70%, transparent);
+  outline-offset: 1px;
+  border-radius: 6px;
+}
+
+/* ---------------------------------------------------------------- markdown */
+
+.markdown {
+  @apply text-[14.5px] leading-[1.65] text-ink;
+  word-break: break-word;
+}
+.markdown > *:first-child {
+  margin-top: 0;
+}
+.markdown > *:last-child {
+  margin-bottom: 0;
+}
+.markdown p {
+  margin: 0.55em 0;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  @apply font-semibold text-ink;
+  margin: 1em 0 0.4em;
+  line-height: 1.3;
+}
+.markdown h1 {
+  font-size: 1.25em;
+}
+.markdown h2 {
+  font-size: 1.12em;
+}
+.markdown h3 {
+  font-size: 1.02em;
+}
+.markdown ul,
+.markdown ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+.markdown ul {
+  list-style: disc;
+}
+.markdown ol {
+  list-style: decimal;
+}
+.markdown li {
+  margin: 0.22em 0;
+}
+.markdown li::marker {
+  color: var(--color-dim);
+}
+.markdown code {
+  @apply font-mono text-[12.5px] bg-bg3 rounded-[5px] px-[5px] py-[1.5px] text-[#d7dce4];
+}
+.markdown pre {
+  @apply bg-[#0e1013] border border-linesoft rounded-lg my-2.5 overflow-x-auto;
+}
+.markdown pre code {
+  @apply block bg-transparent p-3 text-[12.5px] leading-[1.55];
+}
+.markdown a {
+  @apply text-accent no-underline hover:underline;
+}
+.markdown blockquote {
+  @apply border-l-2 border-line pl-3 text-mut my-2;
+}
+.markdown table {
+  @apply w-full text-[13px] my-2 border-collapse;
+}
+.markdown th,
+.markdown td {
+  @apply border border-line px-2.5 py-1.5 text-left;
+}
+.markdown th {
+  @apply bg-bg2 font-medium;
+}
+.markdown hr {
+  @apply border-line my-4;
+}
+.markdown strong {
+  @apply font-semibold;
+}
+
+/* ---------------------------------------------------------------- hljs (custom theme) */
+
+.hljs-comment,
+.hljs-quote {
+  color: #6a737d;
+}
+.hljs-keyword,
+.hljs-selector-tag {
+  color: #c792ea;
+}
+.hljs-string,
+.hljs-attr {
+  color: #9ece8c;
+}
+.hljs-number,
+.hljs-literal {
+  color: #e8a268;
+}
+.hljs-title,
+.hljs-name {
+  color: #82aaff;
+}
+.hljs-built_in,
+.hljs-type {
+  color: #5bbfa5;
+}
+.hljs-variable,
+.hljs-template-variable {
+  color: #e9ebef;
+}
+.hljs-tag {
+  color: #9aa3af;
+}
+.hljs-deletion {
+  color: #ff8f8a;
+}
+.hljs-addition {
+  color: #7ee08a;
+}
+
+/* ---------------------------------------------------------------- misc */
+
+.mono {
+  @apply font-mono text-[12.5px];
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pulse-soft {
+  animation: pulse-soft 1.6s ease-in-out infinite;
+}
+
+@keyframes shimmer-slide {
+  from {
+    background-position: -200% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+.working-text {
+  background: linear-gradient(90deg, var(--color-dim) 30%, var(--color-ink) 50%, var(--color-dim) 70%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-slide 2s linear infinite;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fade-up {
+  animation: fade-up 0.22s ease-out both;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spinner {
+  @apply inline-block rounded-full border-2 border-line;
+  border-top-color: var(--color-accent);
+  animation: spin 0.8s linear infinite;
+}

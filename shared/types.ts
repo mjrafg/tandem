@@ -1,7 +1,7 @@
 // Shared contracts between server and web.
 
 export type Provider = 'claude-code' | 'codex';
-export type RoleName = 'builder' | 'reviewer' | 'compactor';
+export type RoleName = 'builder' | 'reviewer';
 export type Effort = 'low' | 'medium' | 'high';
 
 export interface RoleConfig {
@@ -14,26 +14,23 @@ export interface RoleConfig {
 }
 
 export interface ContextConfig {
-  /** app-level context budget for the builder conversation (tokens) */
-  builderLimit: number;
-  reviewerLimit: number;
+  /**
+   * All thresholds are percentages of the PROVIDER'S reported context window
+   * for the active session — Tandem has no fixed token limit of its own.
+   */
   /** % at which the meter turns amber and the banner appears */
   warnPct: number;
-  /** % at which Compact becomes prominent */
+  /** % at which auto-compact (when enabled) triggers */
   compactPct: number;
   /** % at which the meter turns red */
   critPct: number;
-  /** tokens reserved for the model's reply */
-  outputReserve: number;
   autoCompact: boolean;
-  /** target size after compaction (tokens) */
-  autoTargetTokens: number;
-  /** most recent conversation kept verbatim through compaction (tokens) */
+  /** recent conversation seeded verbatim when a brand-new provider session starts (tokens) */
   preserveRecentTokens: number;
 }
 
 export interface AppSettings {
-  roles: { builder: RoleConfig; reviewer: RoleConfig; compactor: RoleConfig };
+  roles: { builder: RoleConfig; reviewer: RoleConfig };
   finalRepairInstructions: string;
   sharedInstructions: string;
   context: ContextConfig;
@@ -138,10 +135,13 @@ export interface AiUsage {
    * Cumulative inputTokens would multiple-count re-read context.
    */
   contextTokens?: number;
+  /** the provider-reported context window of the model that served this call */
+  contextWindow?: number;
 }
 
 export interface AiCallPayload {
-  role: RoleName | 'final_repair';
+  /** 'compactor' appears only in historical events from the removed Compactor role */
+  role: RoleName | 'final_repair' | 'compactor';
   provider: Provider;
   model: string;
   effort: Effort;
@@ -175,13 +175,23 @@ export interface FindingsPayload {
 }
 
 export interface CompactionPayload {
-  beforeTokens: number;
-  afterTokens: number;
   provider: Provider;
   model: string;
-  summary: string;
-  preserved: string[];
-  durationMs: number;
+  /** active provider context before / after — absent when not observable */
+  beforeTokens?: number;
+  afterTokens?: number;
+  /** provider context window at the time, when reported */
+  windowTokens?: number;
+  /** whether before/after come from the provider or from Tandem estimates */
+  source?: 'provider' | 'estimated';
+  /** manual = user clicked Compact · auto = Tandem threshold · provider-auto = the provider compacted on its own */
+  reason?: 'manual' | 'auto' | 'provider-auto';
+  /** provider session the compaction applied to */
+  sessionId?: string;
+  durationMs?: number;
+  /** legacy Compactor-role events only */
+  summary?: string;
+  preserved?: string[];
   simulated?: boolean;
 }
 
@@ -261,22 +271,40 @@ export interface ChatEvent<K extends EventKind = EventKind> {
 
 // ---------------------------------------------------------------- context
 
+/**
+ * Best available representation of the ACTIVE provider context for the chat's
+ * conversation session. Provider-reported values and Tandem estimates are
+ * never mixed silently — `source` says where `usedTokens` comes from, and
+ * `pendingTokens` is always an estimate, shown as one.
+ */
 export interface ContextUsage {
-  usedTokens: number;
-  limit: number;
-  pct: number;
-  estimated: true;
-  breakdown: { overhead: number; carried: number; recent: number };
+  /** provider that owns the conversation session (follows configuration, not role name) */
+  provider: Provider;
+  model: string | null;
+  sessionId: string | null;
+  /** last known active context (provider-reported unless source says otherwise) */
+  usedTokens: number | null;
+  /** provider-reported context window for the model; null = unknown */
+  windowTokens: number | null;
+  /** Tandem estimate of activity since the last provider report (enters the next turn) */
+  pendingTokens: number;
+  /** (usedTokens + pendingTokens) / windowTokens — null when either side is unknown */
+  pct: number | null;
+  /** where usedTokens comes from: provider report · estimate · nothing yet */
+  source: 'provider' | 'estimated' | 'none';
 }
 
-export interface CompactPreview {
-  previewId: string;
-  beforeTokens: number;
-  afterTokens: number;
+/** result of a provider-native compaction request */
+export interface CompactOutcome {
+  ok: boolean;
   provider: Provider;
   model: string;
-  summary: string;
-  preserved: string[];
+  beforeTokens?: number;
+  afterTokens?: number;
+  windowTokens?: number;
+  source?: 'provider' | 'estimated';
+  durationMs: number;
+  error?: string;
 }
 
 // ---------------------------------------------------------------- git
@@ -305,7 +333,7 @@ export interface DirListing {
 
 // ---------------------------------------------------------------- prompts
 
-export type PromptGroup = 'builder' | 'reviewer' | 'repair' | 'compactor';
+export type PromptGroup = 'builder' | 'reviewer' | 'repair';
 
 export interface PromptEntry {
   key: string;

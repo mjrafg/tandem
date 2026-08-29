@@ -16,24 +16,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
       instructions: '',
       enabled: true,
     },
-    compactor: {
-      provider: 'claude-code',
-      model: 'claude-sonnet-5',
-      effort: 'low',
-      instructions: '',
-    },
   },
   finalRepairInstructions: '',
   sharedInstructions: '',
   context: {
-    builderLimit: 160_000,
-    reviewerLimit: 200_000,
+    // percentages of the provider's reported context window for the session
     warnPct: 70,
     compactPct: 75,
     critPct: 88,
-    outputReserve: 8_000,
     autoCompact: false,
-    autoTargetTokens: 40_000,
     preserveRecentTokens: 12_000,
   },
 };
@@ -46,20 +37,26 @@ export function getSettings(): AppSettings {
   // deep-merge over defaults so new fields appear after upgrades
   const merged = structuredClone(DEFAULT_SETTINGS);
   deepMerge(merged as any, stored as any);
+  stripObsolete(merged);
   return merged;
+}
+
+/** Configuration for the removed Compactor role no longer affects runtime — drop it. */
+function stripObsolete(s: AppSettings): void {
+  delete (s.roles as any).compactor;
+  for (const key of Object.keys(s.context)) {
+    if (!(key in DEFAULT_SETTINGS.context)) delete (s.context as any)[key];
+  }
 }
 
 export function putSettings(patch: Partial<AppSettings>): AppSettings {
   const merged = getSettings();
   deepMerge(merged as any, patch as any);
+  stripObsolete(merged);
   const c = merged.context;
-  c.builderLimit = clamp(c.builderLimit, 8_000, 2_000_000);
-  c.reviewerLimit = clamp(c.reviewerLimit, 8_000, 2_000_000);
   c.warnPct = clamp(c.warnPct, 10, 99);
   c.compactPct = clamp(c.compactPct, 10, 99);
   c.critPct = clamp(c.critPct, 10, 99);
-  c.outputReserve = clamp(c.outputReserve, 0, 100_000);
-  c.autoTargetTokens = clamp(c.autoTargetTokens, 2_000, 500_000);
   c.preserveRecentTokens = clamp(c.preserveRecentTokens, 0, 200_000);
   kvSet('settings', merged);
   return merged;

@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { AttachmentMeta, Finding, FindingsPayload } from '../../../shared/types';
-import { computeUsage } from '../context';
+import { computeUsage, recentConversation } from '../context';
 import { getBuilderSession, getChat, getEvent, getProject, setBuilderSession } from '../db';
 import { addEvent, updateEvent } from '../events';
 import { getSettings } from '../settings';
 import { builderSystemText, getPrompt, renderPrompt, reviewerSystemText } from '../prompts';
 import { runClaudeTurn } from './claude';
 import { runCodexReview } from './codex';
-import { applyCompaction, recentConversation, runCompaction } from './compactor';
+import { performNativeCompaction } from './providerContext';
 import {
   RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, repoBusyBy, setChatRunning, stopRun,
 } from './run';
@@ -313,20 +313,21 @@ function latestCompactionSummary(h: RunHandle): string | null {
 
 // ---------------------------------------------------------------- auto-compact
 
+/**
+ * Threshold check → provider-native compaction. No summarizer model, no
+ * orchestration: the provider that owns the session compacts its own context.
+ * Runs only when the meter has a real provider-reported percentage.
+ */
 async function maybeAutoCompact(chatId: string): Promise<void> {
   try {
     const settings = getSettings();
     if (!settings.context.autoCompact) return;
     const chat = getChat(chatId);
     if (!chat || isRunning(chatId)) return;
-    if (computeUsage(chat).pct < settings.context.compactPct) return;
-    const call = await runCompaction(chat);
-    if (!call.ok) {
-      addEvent(chatId, 'error', { message: 'Automatic compaction failed', detail: call.error, source: 'compactor', retryable: true });
-      return;
-    }
-    applyCompaction(chat, call);
+    const usage = computeUsage(chat);
+    if (usage.pct == null || usage.pct < settings.context.compactPct) return;
+    await performNativeCompaction(chat, 'auto'); // emits its own compaction/error events
   } catch (err) {
-    addEvent(chatId, 'error', { message: 'Automatic compaction failed', detail: String(err), source: 'compactor' });
+    addEvent(chatId, 'error', { message: 'Automatic native compaction failed', detail: String(err), source: 'context' });
   }
 }

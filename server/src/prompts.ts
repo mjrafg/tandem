@@ -276,37 +276,10 @@ export const PROMPT_DEFS: PromptDef[] = [
       'Only report issues that matter for this request: incorrect or incomplete implementation, regressions, broken behavior, real security problems, relevant test/build failures, accidental unrelated changes. Do not demand unrelated improvements.',
     ].join('\n'),
   },
-  // ---------------------------------------------------------------- compactor
-  {
-    key: 'compactor.base',
-    name: 'Compactor — base instructions',
-    description: 'Start of every Compactor call.',
-    group: 'compactor',
-    roles: ['compactor'],
-    default: [
-      'You are the Compactor. Produce a compact replacement for this conversation\'s context.',
-      'Preserve: goals, instructions, decisions, current task state, key discoveries, changed files, test results that still matter, unresolved issues, reviewer findings, constraints, remaining work.',
-      'Aggressively drop stale noise and repetition.',
-    ].join('\n'),
-  },
-  {
-    key: 'compactor.output_directive',
-    name: 'Compactor — output directive',
-    description: 'Forces a clean summary-only reply.',
-    group: 'compactor',
-    roles: ['compactor'],
-    default: 'Reply with ONLY the compacted context in markdown — no preface, no commentary.',
-  },
-  {
-    key: 'compactor.message',
-    name: 'Compactor — message wrapper',
-    description: 'Wraps the serialized conversation digest.',
-    group: 'compactor',
-    roles: ['compactor'],
-    placeholders: ['conversation_digest'],
-    default: 'Compact this conversation:\n\n{{conversation_digest}}',
-  },
 ];
+// Context compaction is provider-native (the session's own CLI compacts its
+// own context) — Tandem sends no compaction prompt to any model, so there is
+// nothing to edit for it here.
 
 const DEF_BY_KEY = new Map(PROMPT_DEFS.map((d) => [d.key, d]));
 
@@ -450,15 +423,6 @@ export function reviewerSystemText(settings: AppSettings): string {
   return parts.join('\n\n');
 }
 
-export function compactorSystemText(settings: AppSettings): string {
-  return [
-    getPrompt('compactor.base'),
-    settings.sharedInstructions.trim(),
-    settings.roles.compactor.instructions.trim(),
-    getPrompt('compactor.output_directive'),
-  ].filter(Boolean).join('\n\n');
-}
-
 /** Admin "effective prompt" preview — the real assembly plus template skeletons. */
 export function buildRolePreview(role: string, settings: AppSettings): string {
   if (role === 'reviewer') {
@@ -469,13 +433,6 @@ export function buildRolePreview(role: string, settings: AppSettings): string {
       getPrompt('reviewer.round_section'),
       getPrompt('reviewer.output_format'),
       '[{{…}} placeholders are filled by Tandem at call time with real runtime values]',
-    ].join('\n\n');
-  }
-  if (role === 'compactor') {
-    return [
-      compactorSystemText(settings),
-      getPrompt('compactor.message'),
-      '[{{conversation_digest}} is generated from the chat\'s stored events at call time]',
     ].join('\n\n');
   }
   const r = role === 'final_repair' ? 'final_repair' : 'builder';

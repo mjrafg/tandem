@@ -4,7 +4,8 @@ import type { AppSettings, ContextUsage } from '@shared/types';
 import { fmtTokens } from '../lib/format';
 import { useStore } from '../store';
 
-function pctTone(pct: number, settings: AppSettings | null): 'ok' | 'warn' | 'crit' {
+function pctTone(pct: number | null, settings: AppSettings | null): 'ok' | 'warn' | 'crit' {
+  if (pct == null) return 'ok';
   const warn = settings?.context.warnPct ?? 70;
   const crit = settings?.context.critPct ?? 88;
   if (pct >= crit) return 'crit';
@@ -13,6 +14,13 @@ function pctTone(pct: number, settings: AppSettings | null): 'ok' | 'warn' | 'cr
 }
 
 const toneColor = { ok: 'var(--color-mut)', warn: 'var(--color-warn)', crit: 'var(--color-err)' } as const;
+
+const providerName = (p: ContextUsage['provider']) => (p === 'claude-code' ? 'Claude Code' : 'Codex');
+
+/** total the meter tracks: last provider report + estimated pending activity */
+function totalTokens(u: ContextUsage): number | null {
+  return u.usedTokens == null ? null : u.usedTokens + u.pendingTokens;
+}
 
 export function ContextMeter({ usage, onCompact }: { usage: ContextUsage | undefined; onCompact: () => void }) {
   const settings = useStore((s) => s.settings);
@@ -29,50 +37,64 @@ export function ContextMeter({ usage, onCompact }: { usage: ContextUsage | undef
   }, [open]);
 
   if (!usage) return null;
+  const total = totalTokens(usage);
   const tone = pctTone(usage.pct, settings);
   const color = toneColor[tone];
-  const pct = Math.min(100, usage.pct);
+  const ringPct = Math.min(100, usage.pct ?? 0);
   const r = 6.5;
   const c = 2 * Math.PI * r;
+  const approx = usage.source !== 'provider' || usage.pendingTokens > 0;
 
   return (
     <div className="relative" ref={ref}>
       <button
         className="chip cursor-pointer rounded-lg py-1 transition-colors hover:bg-bg3"
         onClick={() => setOpen((o) => !o)}
-        title="Context usage (estimated)"
+        title="Active provider context"
       >
         <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90">
           <circle cx="8" cy="8" r={r} fill="none" stroke="var(--color-line)" strokeWidth="2.5" />
-          <circle
-            cx="8" cy="8" r={r} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round"
-            strokeDasharray={`${(pct / 100) * c} ${c}`}
-          />
+          {usage.pct != null && (
+            <circle
+              cx="8" cy="8" r={r} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round"
+              strokeDasharray={`${(ringPct / 100) * c} ${c}`}
+            />
+          )}
         </svg>
         <span className="tabular-nums" style={{ color: tone === 'ok' ? undefined : color }}>
-          {fmtTokens(usage.usedTokens)} / {fmtTokens(usage.limit)}
+          {total == null ? '—' : `${approx ? '~' : ''}${fmtTokens(total)}`} / {usage.windowTokens ? fmtTokens(usage.windowTokens) : '?'}
         </span>
       </button>
 
       {open && (
-        <div className="card absolute right-0 top-[34px] z-40 w-[280px] p-3.5 shadow-2xl shadow-black/50 fade-up">
+        <div className="card absolute right-0 top-[34px] z-40 w-[300px] p-3.5 shadow-2xl shadow-black/50 fade-up">
           <div className="mb-1 flex items-baseline justify-between">
             <span className="text-[13px] font-medium">Context</span>
-            <span className="text-[12px] tabular-nums" style={{ color }}>{usage.pct}%</span>
+            {usage.pct != null && <span className="text-[12px] tabular-nums" style={{ color }}>{usage.pct}%</span>}
           </div>
           <div className="mb-2.5 h-[6px] overflow-hidden rounded-full bg-bg3">
-            <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+            <div className="h-full rounded-full transition-all" style={{ width: `${ringPct}%`, background: usage.pct != null ? color : 'transparent' }} />
           </div>
           <div className="space-y-1 text-[12px] text-mut">
-            <Row k="Effective context" v={`~${fmtTokens(usage.usedTokens)} tokens`} />
-            <Row k="Configured limit" v={`${fmtTokens(usage.limit)} tokens`} />
+            <Row
+              k="Used"
+              v={usage.usedTokens == null ? 'no provider report yet' : `${usage.source === 'provider' ? '' : '~'}${fmtTokens(usage.usedTokens)} tokens`}
+            />
+            {usage.pendingTokens > 0 && usage.usedTokens != null && (
+              <Row k="Since last report" v={`+ ~${fmtTokens(usage.pendingTokens)} (estimate)`} />
+            )}
+            <Row k="Provider window" v={usage.windowTokens ? `${fmtTokens(usage.windowTokens)} tokens` : 'unknown'} />
+            {settings?.context.autoCompact && <Row k="Auto compact" v={`at ${settings.context.compactPct}%`} />}
             <div className="my-1.5 border-t border-linesoft" />
-            <Row k="Carried (last call / compaction)" v={fmtTokens(usage.breakdown.carried)} />
-            <Row k="Recent activity" v={fmtTokens(usage.breakdown.recent)} />
-            <Row k="Role instructions & overhead" v={fmtTokens(usage.breakdown.overhead)} />
+            <Row k="Source" v={usage.source === 'provider' ? providerName(usage.provider) : usage.source === 'estimated' ? 'estimated' : '—'} />
+            {usage.model && <Row k="Model" v={usage.model} />}
           </div>
           <p className="mt-2 text-[11px] leading-snug text-dim">
-            Estimated from stored events and the last reported provider usage — not an exact provider number.
+            {usage.source === 'provider'
+              ? `Used is the ${providerName(usage.provider)}-reported size of the active session context; activity since then is a separate estimate.`
+              : usage.source === 'estimated'
+                ? 'No exact provider report is available for this state — values marked ~ are Tandem estimates.'
+                : 'The provider reports real context numbers once the conversation has its first call.'}
           </p>
           <button className="btn-outline mt-3 w-full" onClick={() => { setOpen(false); onCompact(); }}>
             <Archive size={13} /> Compact context…
@@ -94,7 +116,7 @@ function Row({ k, v }: { k: string; v: string }) {
 
 export function ContextBanner({ usage, onCompact }: { usage: ContextUsage | undefined; onCompact: () => void }) {
   const settings = useStore((s) => s.settings);
-  if (!usage || !settings) return null;
+  if (!usage || !settings || usage.pct == null) return null;
   const tone = pctTone(usage.pct, settings);
   if (tone === 'ok') return null;
   const crit = tone === 'crit';
@@ -103,7 +125,7 @@ export function ContextBanner({ usage, onCompact }: { usage: ContextUsage | unde
       crit ? 'border-err/25 bg-err/10 text-[#ffb3ae]' : 'border-warn/20 bg-warn/[0.07] text-warn'
     }`}>
       <span>
-        {crit ? 'Context is nearly full' : 'Context is getting large'} — {usage.pct}% of {fmtTokens(usage.limit)} tokens
+        {crit ? 'Context is nearly full' : 'Context is getting large'} — {usage.pct}% of the {usage.windowTokens ? fmtTokens(usage.windowTokens) : ''} provider window
         {settings.context.autoCompact ? ' · auto-compact is on' : ''}
       </span>
       <button

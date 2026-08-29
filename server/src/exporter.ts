@@ -18,6 +18,28 @@ export interface ExportBundle {
 const fmtTime = (ts: number) => new Date(ts).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 const fmtDur = (ms?: number) => (ms == null ? '' : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
 const fmtSize = (n: number) => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+const fmtTok = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
+/** Active provider context, provider vs estimate always labeled, unknown stays unknown. */
+function contextLine(u: ContextUsage): string {
+  const providerName = u.provider === 'claude-code' ? 'Claude Code' : 'Codex';
+  if (u.usedTokens == null) return `no provider report yet · provider ${providerName}`;
+  const used = fmtTok(u.usedTokens) + (u.pendingTokens > 0 ? ` + ~${fmtTok(u.pendingTokens)} pending (estimate)` : '');
+  const win = u.windowTokens ? `${fmtTok(u.windowTokens)} window` : 'window unknown';
+  const pct = u.pct != null ? ` (${u.pct}%)` : '';
+  const src = u.source === 'provider' ? `provider-reported · ${providerName}` : 'estimated';
+  return `${used} / ${win}${pct} — ${src}`;
+}
+
+/** compaction label parts shared by md + html */
+function compactionBits(p: CompactionPayload): { title: string; delta: string } {
+  const who = p.provider === 'claude-code' ? 'Claude' : 'Codex';
+  const auto = p.reason === 'provider-auto' ? ' automatically' : '';
+  const delta = p.beforeTokens != null && p.afterTokens != null
+    ? ` · ${fmtTok(p.beforeTokens)} → ${fmtTok(p.afterTokens)}`
+    : p.beforeTokens != null ? ` · was ${fmtTok(p.beforeTokens)}` : '';
+  return { title: `Context compacted${auto} · ${who}`, delta };
+}
 
 // ---------------------------------------------------------------- markdown
 
@@ -27,7 +49,7 @@ export function toMarkdown(b: ExportBundle): string {
   out.push('');
   out.push(`- **Project:** ${b.project.name} (\`${b.project.rootPath}\`)`);
   out.push(`- **Created:** ${fmtTime(b.chat.createdAt)} · **Last activity:** ${fmtTime(b.chat.updatedAt)}`);
-  out.push(`- **Context at export:** ~${Math.round(b.usage.usedTokens / 1000)}k / ${Math.round(b.usage.limit / 1000)}k tokens (${b.usage.pct}%, estimated)`);
+  out.push(`- **Active provider context at export:** ${contextLine(b.usage)}`);
   out.push(`- **Exported:** ${fmtTime(b.exportedAt)} by ${b.app.name} v${b.app.version}`);
   out.push('');
 
@@ -115,13 +137,18 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
     }
     case 'compaction': {
       const p = e.payload as CompactionPayload;
-      return [
-        `<details><summary><b>🗜 Context compacted</b> · ${Math.round(p.beforeTokens / 1000)}k → ${Math.round(p.afterTokens / 1000)}k tokens · ${p.model}${p.simulated ? ' · simulated' : ''}</summary>`,
+      const { title, delta } = compactionBits(p);
+      const lines = [
+        `<details><summary><b>🗜 ${title}</b>${delta} · ${p.model}${p.simulated ? ' · simulated' : ''}</summary>`,
         '',
-        `Preserved: ${p.preserved.join('; ')}`,
-        '',
-        '**Compacted context:**', '', p.summary, '', '</details>',
+        `- Provider-native compaction${p.reason ? ` (${p.reason})` : ''}${p.source ? ` · values ${p.source === 'provider' ? 'provider-reported' : 'estimated'}` : ''}`,
+        ...(p.windowTokens ? [`- Provider window: ${fmtTok(p.windowTokens)} tokens`] : []),
+        ...(p.sessionId ? [`- Session: \`${p.sessionId}\` (continues unchanged)`] : []),
       ];
+      if (p.preserved?.length) lines.push('', `Preserved: ${p.preserved.join('; ')}`);
+      if (p.summary) lines.push('', '**Compacted context (legacy Compactor call):**', '', p.summary);
+      lines.push('', '</details>');
+      return lines;
     }
     case 'error': {
       const p = e.payload as any;
@@ -205,7 +232,7 @@ export function toHtml(b: ExportBundle): string {
   <h1>${escapeHtml(b.chat.title)}</h1>
   <div class="meta">
     Project <code>${escapeHtml(b.project.name)}</code> · <code>${escapeHtml(b.project.rootPath)}</code><br>
-    ${fmtTime(b.chat.createdAt)} → ${fmtTime(b.chat.updatedAt)} · context ~${Math.round(b.usage.usedTokens / 1000)}k/${Math.round(b.usage.limit / 1000)}k (${b.usage.pct}%, estimated)<br>
+    ${fmtTime(b.chat.createdAt)} → ${fmtTime(b.chat.updatedAt)} · context ${escapeHtml(contextLine(b.usage))}<br>
     Exported ${fmtTime(b.exportedAt)} · ${escapeHtml(b.app.name)} v${b.app.version}
   </div>
 ${rows}
@@ -283,10 +310,12 @@ ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
     }
     case 'compaction': {
       const p = e.payload as CompactionPayload;
-      return `<div class="ev"><details><summary>🗜 Context compacted · ${Math.round(p.beforeTokens / 1000)}k → ${Math.round(p.afterTokens / 1000)}k · ${escapeHtml(p.model)}${p.simulated ? ' · simulated' : ''}</summary><div class="body">
-<div class="kv">provider ${p.provider} · duration ${fmtDur(p.durationMs)} · ${t}</div>
-<h4>Preserved</h4><ul>${p.preserved.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
-<h4>Compacted context</h4><pre>${escapeHtml(p.summary)}</pre></div></details></div>`;
+      const { title, delta } = compactionBits(p);
+      return `<div class="ev"><details><summary>🗜 ${escapeHtml(title)}${escapeHtml(delta)} · ${escapeHtml(p.model)}${p.simulated ? ' · simulated' : ''}</summary><div class="body">
+<div class="kv">provider-native · ${p.provider}${p.reason ? ` · ${p.reason}` : ''}${p.source ? ` · values ${p.source === 'provider' ? 'provider-reported' : 'estimated'}` : ''}${p.windowTokens ? ` · window ${fmtTok(p.windowTokens)}` : ''}${p.durationMs != null ? ` · ${fmtDur(p.durationMs)}` : ''} · ${t}</div>
+${p.sessionId ? `<div class="kv">session <code>${escapeHtml(p.sessionId)}</code> · continues unchanged</div>` : ''}
+${p.preserved?.length ? `<h4>Preserved</h4><ul>${p.preserved.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : ''}
+${p.summary ? `<h4>Compacted context (legacy Compactor call)</h4><pre>${escapeHtml(p.summary)}</pre>` : ''}</div></details></div>`;
     }
     case 'error': {
       const p = e.payload as any;

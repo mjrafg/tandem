@@ -1,5 +1,5 @@
 import type {
-  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactPreview, ContextUsage, DirListing, GitStatus, Project, PromptEntry, ToolInfo,
+  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, DirListing, GitStatus, Project, PromptEntry, ToolInfo,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -70,10 +70,8 @@ export const api = {
     j<{ ok: true }>(`/api/chats/${id}/messages`, { method: 'POST', body: JSON.stringify({ text, attachmentIds, review }) }),
   stop: (id: string) => j<{ ok: true; stopped: boolean }>(`/api/chats/${id}/stop`, { method: 'POST' }),
 
-  // context
-  compactPreview: (id: string) => j<CompactPreview>(`/api/chats/${id}/compact/preview`, { method: 'POST' }),
-  compactApply: (id: string, previewId: string) =>
-    j<{ ok: true }>(`/api/chats/${id}/compact/apply`, { method: 'POST', body: JSON.stringify({ previewId }) }),
+  // context — provider-native compaction of the chat's active session
+  compact: (id: string) => j<CompactOutcome>(`/api/chats/${id}/compact`, { method: 'POST' }),
 
   // AI prompts
   prompts: () => j<PromptEntry[]>('/api/prompts'),

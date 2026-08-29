@@ -16,7 +16,6 @@ const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
 const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }> = {
   builder: { title: 'Builder', blurb: 'Understands each request and does the actual work — investigates, edits, runs, verifies.', dot: 'bg-builder' },
   reviewer: { title: 'Reviewer', blurb: 'Independently evaluates the result against your request. Read-only; max two rounds.', dot: 'bg-reviewer' },
-  compactor: { title: 'Compactor', blurb: 'Summarizes the conversation context when it grows. Never touches the project.', dot: 'bg-compactor' },
 };
 
 export function SettingsView() {
@@ -128,25 +127,22 @@ export function SettingsView() {
         <SectionTitle>Context</SectionTitle>
         <div className="card space-y-4 px-4 py-4">
           <div className="grid grid-cols-2 gap-x-5 gap-y-3.5">
-            <Field label="Builder context limit" hint="tokens"><Num value={draft.context.builderLimit} onChange={(v) => set((d) => { d.context.builderLimit = v; })} /></Field>
-            <Field label="Reviewer context limit" hint="tokens"><Num value={draft.context.reviewerLimit} onChange={(v) => set((d) => { d.context.reviewerLimit = v; })} /></Field>
-            <Field label="Warning threshold" hint="%"><Num value={draft.context.warnPct} onChange={(v) => set((d) => { d.context.warnPct = v; })} /></Field>
-            <Field label="Compact becomes prominent" hint="%"><Num value={draft.context.compactPct} onChange={(v) => set((d) => { d.context.compactPct = v; })} /></Field>
-            <Field label="Critical threshold" hint="%"><Num value={draft.context.critPct} onChange={(v) => set((d) => { d.context.critPct = v; })} /></Field>
-            <Field label="Response reserve" hint="tokens"><Num value={draft.context.outputReserve} onChange={(v) => set((d) => { d.context.outputReserve = v; })} /></Field>
-            <Field label="Target size after compaction" hint="tokens"><Num value={draft.context.autoTargetTokens} onChange={(v) => set((d) => { d.context.autoTargetTokens = v; })} /></Field>
-            <Field label="Recent context kept verbatim" hint="tokens"><Num value={draft.context.preserveRecentTokens} onChange={(v) => set((d) => { d.context.preserveRecentTokens = v; })} /></Field>
+            <Field label="Warning threshold" hint="% of provider window"><Num value={draft.context.warnPct} onChange={(v) => set((d) => { d.context.warnPct = v; })} /></Field>
+            <Field label="Auto compact at" hint="% of provider window"><Num value={draft.context.compactPct} onChange={(v) => set((d) => { d.context.compactPct = v; })} /></Field>
+            <Field label="Critical threshold" hint="% of provider window"><Num value={draft.context.critPct} onChange={(v) => set((d) => { d.context.critPct = v; })} /></Field>
+            <Field label="Recent context seeded on a new session" hint="tokens"><Num value={draft.context.preserveRecentTokens} onChange={(v) => set((d) => { d.context.preserveRecentTokens = v; })} /></Field>
           </div>
           <div className="flex items-center justify-between gap-4 border-t border-linesoft pt-3.5">
             <div className="min-w-0">
               <div className="text-[13px] font-medium">Automatic compaction</div>
-              <p className="text-[12px] text-dim">Compact on its own once the prominent threshold is crossed. Off by default — you stay in control.</p>
+              <p className="text-[12px] text-dim">Ask the session's provider to compact natively once the threshold is crossed. Off by default — you stay in control.</p>
             </div>
             <Toggle checked={draft.context.autoCompact} onChange={(v) => set((d) => { d.context.autoCompact = v; })} label="Automatic compaction" />
           </div>
           <p className="text-[11.5px] leading-snug text-dim">
-            These are application-level budgets, not the provider's real maximum window. Context numbers shown in chat are estimates
-            derived from stored events and the last provider-reported usage.
+            Compaction is provider-native: the CLI that owns the active session (per the Builder's provider above) compacts
+            its own context — no separate Compactor model. Thresholds are percentages of the provider's reported context
+            window; the meter labels provider-reported values and estimates distinctly, and unknown stays unknown.
           </p>
         </div>
 
@@ -160,8 +156,9 @@ export function SettingsView() {
           <p><b className="text-ink">Tandem</b> v0.2 — real engine.</p>
           <p className="mt-1">
             Builder runs on the authenticated Claude Code CLI with full agency; the Reviewer runs on the Codex CLI in a
-            read-only-filesystem, network-enabled sandbox; compaction is a real Compactor call. Every prompt and tool
-            description Tandem sends is editable above, and every actual request is recorded in the chat timeline.
+            read-only-filesystem, network-enabled sandbox; context compaction is provider-native — the session's own CLI
+            compacts its own context. Every prompt and tool description Tandem sends is editable above, and every actual
+            request is recorded in the chat timeline.
           </p>
         </div>
       </div>
@@ -269,7 +266,7 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
         <Field label="Additional instructions" hint="appended to the built-in role prompt">
           <textarea
             className="input min-h-[56px] resize-y text-[13px]"
-            placeholder={role === 'builder' ? 'e.g. Prefer minimal diffs. Always run the test suite after changes.' : role === 'reviewer' ? 'e.g. Treat missing tests for changed code as a minor finding.' : 'e.g. Keep summaries under 2k tokens.'}
+            placeholder={role === 'builder' ? 'e.g. Prefer minimal diffs. Always run the test suite after changes.' : 'e.g. Treat missing tests for changed code as a minor finding.'}
             value={cfg.instructions}
             onChange={(e) => onChange({ instructions: e.target.value })}
           />

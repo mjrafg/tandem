@@ -83,12 +83,6 @@ export function setChatTitle(chatId: string, title: string): void {
   broadcastChat(chatId);
 }
 
-export function setChatCompaction(chatId: string, eventId: string | null): void {
-  db.prepare('UPDATE chats SET last_compaction_event_id = ? WHERE id = ?').run(eventId, chatId);
-  broadcastChat(chatId);
-  broadcastContext(chatId);
-}
-
 export function broadcastChat(chatId: string): void {
   const row = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
   if (row) broadcast({ type: 'chat', chat: rowToChat(row) });

@@ -1,9 +1,6 @@
 import type { AiCallPayload, Chat, ChatEvent, CompactionPayload, ContextUsage } from '../../shared/types';
-import { db, rowToEvent } from './db';
+import { db, getBuilderSession, rowToEvent } from './db';
 import { getSettings } from './settings';
-
-/** fixed cost of role instructions + tool plumbing supplied on every call */
-const BASE_OVERHEAD = 2_400;
 
 export function estimateTokens(s: string | undefined | null): number {
   return Math.ceil((s ?? '').length / 4);
@@ -29,8 +26,6 @@ export function estimateEventTokens(e: ChatEvent): number {
       return estimateTokens((p as AiCallPayload).response?.text);
     case 'findings':
       return estimateTokens(JSON.stringify(p.items ?? []));
-    case 'compaction':
-      return estimateTokens(p.summary);
     case 'error':
       return estimateTokens(p.message) + estimateTokens(p.detail);
     case 'browser':
@@ -38,69 +33,124 @@ export function estimateEventTokens(e: ChatEvent): number {
         + Math.min(estimateTokens((p.console ?? []).map((c: any) => c.text).join(' ')), 300);
     case 'checkpoint':
       return 30 + Math.min((p.files?.length ?? 0) * 4, 200);
-    case 'run':
-      return 0;
     default:
       return 0;
   }
 }
 
+function chatEvents(chatId: string): ChatEvent[] {
+  return db.prepare('SELECT * FROM events WHERE chat_id = ? ORDER BY seq').all(chatId).map(rowToEvent);
+}
+
 /**
- * Effective builder-context estimate for a chat.
+ * Best available representation of the chat's ACTIVE provider context.
  *
- * Anchors on the most reliable recent signal: the last AI call that reported
- * token usage, or the size after the last applied compaction — whichever came
- * later — then adds rough estimates for everything after that anchor.
+ * Anchor: the most recent provider signal — the context size reported at the
+ * end of the last conversation call (final-turn tokens), or the post-compaction
+ * reading, whichever is newer. Activity recorded after the anchor is a Tandem
+ * estimate and stays separate (`pendingTokens`). Cumulative usage is never
+ * shown as active context, and no fixed Tandem limit stands in for the
+ * provider's real window — unknown stays unknown.
  */
 export function computeUsage(chat: Chat): ContextUsage {
   const settings = getSettings();
-  const limit = settings.context.builderLimit;
-  const rows = db.prepare('SELECT * FROM events WHERE chat_id = ? ORDER BY seq').all(chat.id);
-  const events = rows.map(rowToEvent);
+  const provider = settings.roles.builder.provider;
+  const events = chatEvents(chat.id);
 
-  let carried = 0;
-  let anchorSeq = 0;
-
-  const compactionEvent = chat.lastCompactionEventId
-    ? events.find((e) => e.id === chat.lastCompactionEventId)
-    : undefined;
-
-  // Only builder-context calls anchor the meter; reviewer/compactor calls
-  // have their own separate context.
-  let lastUsageCall: ChatEvent | undefined;
+  // last conversation-session call with a provider-reported context size
+  let lastCall: ChatEvent | undefined;
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.kind === 'ai_call') {
-      const p = e.payload as AiCallPayload;
-      if ((p.role === 'builder' || p.role === 'final_repair') && p.response?.usage) {
-        lastUsageCall = e;
-        break;
-      }
+    if (e.kind !== 'ai_call') continue;
+    const p = e.payload as AiCallPayload;
+    if ((p.role === 'builder' || p.role === 'final_repair') && p.response?.usage?.contextTokens != null) {
+      lastCall = e;
+      break;
+    }
+  }
+  // last compaction with a known resulting size
+  let lastCompaction: ChatEvent | undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind === 'compaction' && (e.payload as CompactionPayload).afterTokens != null) {
+      lastCompaction = e;
+      break;
     }
   }
 
-  if (lastUsageCall && (!compactionEvent || lastUsageCall.seq > compactionEvent.seq)) {
-    const usage = (lastUsageCall.payload as AiCallPayload).response!.usage!;
-    // contextTokens = the session's context size after the call's final turn;
-    // the cumulative in/out sum (fallback for old events) overcounts re-reads.
-    carried = usage.contextTokens ?? usage.inputTokens + usage.outputTokens;
-    anchorSeq = lastUsageCall.seq;
-  } else if (compactionEvent) {
-    carried = (compactionEvent.payload as CompactionPayload).afterTokens;
-    anchorSeq = compactionEvent.seq;
+  // the provider window is a property of the session's model — take the most
+  // recent report of it regardless of which anchor wins
+  let windowTokens: number | null = null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind === 'ai_call') {
+      const w = (e.payload as AiCallPayload).response?.usage?.contextWindow;
+      if (w) { windowTokens = w; break; }
+    } else if (e.kind === 'compaction') {
+      const w = (e.payload as CompactionPayload).windowTokens;
+      if (w) { windowTokens = w; break; }
+    }
   }
 
-  let recent = 0;
+  let usedTokens: number | null = null;
+  let model: string | null = null;
+  let source: ContextUsage['source'] = 'none';
+  let anchorSeq = 0;
+
+  const callSeq = lastCall?.seq ?? -1;
+  const compSeq = lastCompaction?.seq ?? -1;
+  if (compSeq > callSeq && lastCompaction) {
+    const p = lastCompaction.payload as CompactionPayload;
+    usedTokens = p.afterTokens!;
+    model = p.model ?? null;
+    source = p.source ?? 'estimated';
+    anchorSeq = lastCompaction.seq;
+  } else if (lastCall) {
+    const p = lastCall.payload as AiCallPayload;
+    usedTokens = p.response!.usage!.contextTokens!;
+    model = p.model;
+    source = 'provider';
+    anchorSeq = lastCall.seq;
+  }
+
+  let pendingTokens = 0;
   for (const e of events) {
-    if (e.seq > anchorSeq) recent += estimateEventTokens(e);
+    if (e.seq > anchorSeq && e.kind !== 'compaction') pendingTokens += estimateEventTokens(e);
   }
 
-  const usedTokens = BASE_OVERHEAD + carried + recent;
+  const total = usedTokens != null ? usedTokens + pendingTokens : null;
   return {
+    provider,
+    model,
+    sessionId: getBuilderSession(chat.id),
     usedTokens,
-    limit,
-    pct: Math.min(999, Math.round((usedTokens / limit) * 100)),
-    estimated: true,
-    breakdown: { overhead: BASE_OVERHEAD, carried, recent },
+    windowTokens,
+    pendingTokens,
+    pct: total != null && windowTokens ? Math.round((total / windowTokens) * 100) : null,
+    source,
   };
+}
+
+/**
+ * Recent user/assistant exchange, seeded verbatim when a brand-new provider
+ * session starts for a chat that already has history.
+ */
+export function recentConversation(chatId: string, capChars: number, excludeLastUserMessage: boolean): string {
+  const events = chatEvents(chatId);
+  let lastUserId: string | null = null;
+  if (excludeLastUserMessage) {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].kind === 'user_message') { lastUserId = events[i].id; break; }
+    }
+  }
+  const lines: string[] = [];
+  for (const e of events) {
+    if (e.id === lastUserId) continue;
+    const p = e.payload as any;
+    if (e.kind === 'user_message') lines.push(`User: ${p.text ?? ''}${p.attachments?.length ? ` [attached: ${p.attachments.map((a: any) => a.name).join(', ')}]` : ''}`);
+    else if (e.kind === 'assistant_message' && p.text?.trim()) lines.push(`Assistant: ${p.text}`);
+  }
+  let text = lines.join('\n\n');
+  if (text.length > capChars) text = `…\n${text.slice(-capChars)}`;
+  return text;
 }

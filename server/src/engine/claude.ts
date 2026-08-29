@@ -30,7 +30,7 @@ const EFFORT_THINKING: Record<Effort, string> = { low: '', medium: '12000', high
  * process-level boundaries (timeout, stop, environment).
  */
 export async function runClaudeTurn(h: RunHandle, opts: {
-  role: 'builder' | 'final_repair' | 'compactor';
+  role: 'builder' | 'final_repair';
   model: string;
   effort: Effort;
   systemAppendix: string;
@@ -48,12 +48,8 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     '--verbose',
     '--include-partial-messages',
     '--model', opts.model,
+    '--permission-mode', 'bypassPermissions',
   ];
-  if (opts.role === 'compactor') {
-    args.push('--max-turns', '4'); // summarization needs no tool loop
-  } else {
-    args.push('--permission-mode', 'bypassPermissions');
-  }
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
   args.push('--append-system-prompt', opts.systemAppendix);
 
@@ -82,7 +78,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   const startedAt = Date.now();
   const servedTools = opts.withTandemTools ? await servedToolRecord(['tandem', 'tandem_browser']) : [];
   const aiCall = addEvent(h.chat.id, 'ai_call', {
-    role: opts.role === 'compactor' ? 'compactor' : opts.role,
+    role: opts.role,
     provider: 'claude-code',
     model: opts.model,
     effort: opts.effort,
@@ -122,6 +118,18 @@ export async function runClaudeTurn(h: RunHandle, opts: {
           sessionId = ev.session_id;
           actualModel = ev.model;
           if (actualModel && actualModel !== opts.model) updateEvent(aiCall.id, { model: actualModel });
+        } else if (ev.subtype === 'compact_boundary') {
+          // the CLI compacted the session's context on its own mid-run —
+          // record the provider's action, never treat it as an error
+          const meta = ev.compact_metadata ?? {};
+          addEvent(h.chat.id, 'compaction', {
+            provider: 'claude-code',
+            model: actualModel ?? opts.model,
+            reason: meta.trigger === 'manual' ? 'manual' : 'provider-auto',
+            source: 'provider',
+            ...(typeof meta.pre_tokens === 'number' ? { beforeTokens: meta.pre_tokens } : {}),
+            ...(sessionId ? { sessionId } : {}),
+          }, { runId: h.ctx.runId });
         }
         break;
       }
@@ -188,6 +196,13 @@ export async function runClaudeTurn(h: RunHandle, opts: {
           if (last) {
             usage.contextTokens = (last.input_tokens ?? 0) + (last.cache_read_input_tokens ?? 0)
               + (last.cache_creation_input_tokens ?? 0) + (last.output_tokens ?? 0);
+          }
+          // provider-reported context window of the model that served the call
+          const mu = ev.modelUsage;
+          if (mu && typeof mu === 'object') {
+            const entry = (actualModel && mu[actualModel]) || Object.values(mu)[0];
+            const win = (entry as any)?.contextWindow;
+            if (typeof win === 'number' && win > 0) usage.contextWindow = win;
           }
         }
         if (ev.is_error || (ev.subtype && ev.subtype !== 'success')) {

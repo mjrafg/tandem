@@ -300,36 +300,48 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
 
 export function CompactionRow({ ev }: { ev: ChatEvent }) {
   const p = ev.payload as CompactionPayload;
+  const est = p.source === 'estimated' ? '~' : '';
+  const delta = p.beforeTokens != null && p.afterTokens != null
+    ? `${est}${fmtTokens(p.beforeTokens)} → ${est}${fmtTokens(p.afterTokens)} tokens`
+    : p.beforeTokens != null ? `was ${est}${fmtTokens(p.beforeTokens)} tokens` : null;
   return (
     <ActivityRow
       icon={<Archive size={14} />}
       label={
         <span>
-          Context compacted
-          <span className="ml-2 tabular-nums text-compactor">{fmtTokens(p.beforeTokens)} → {fmtTokens(p.afterTokens)} tokens</span>
+          Context compacted{p.reason === 'provider-auto' ? ' automatically' : ''} · {providerName(p.provider)}
+          {delta && <span className="ml-2 tabular-nums text-compactor">{delta}</span>}
         </span>
       }
       meta={p.model}
     >
       <div className="space-y-2.5">
         <div className="rounded-lg border border-linesoft bg-bg1 px-3 py-2">
-          <KV k="before" v={`~${fmtTokens(p.beforeTokens)} tokens`} />
-          <KV k="after" v={`~${fmtTokens(p.afterTokens)} tokens`} />
-          <KV k="compactor" v={`${providerName(p.provider)} · ${p.model}${p.simulated ? ' · simulated (mock mode)' : ''}`} />
-          <KV k="duration" v={fmtDuration(p.durationMs)} />
+          {p.beforeTokens != null && <KV k="before" v={`${est}${fmtTokens(p.beforeTokens)} tokens`} />}
+          {p.afterTokens != null && <KV k="after" v={`${est}${fmtTokens(p.afterTokens)} tokens`} />}
+          {p.windowTokens != null && <KV k="provider window" v={`${fmtTokens(p.windowTokens)} tokens`} />}
+          <KV k="compacted by" v={`${providerName(p.provider)} · ${p.model}${p.summary ? ' (legacy Compactor call)' : ' (provider-native)'}${p.simulated ? ' · simulated (mock mode)' : ''}`} />
+          {p.reason && <KV k="reason" v={p.reason === 'manual' ? 'manual (Compact context)' : p.reason === 'auto' ? 'automatic (Tandem threshold)' : 'provider compacted on its own'} />}
+          {p.source && <KV k="values" v={p.source === 'provider' ? 'provider-reported' : 'estimated'} />}
+          {p.sessionId && <KV k="session" v={`${p.sessionId.slice(0, 8)}… (continues unchanged)`} />}
+          {p.durationMs != null && <KV k="duration" v={fmtDuration(p.durationMs)} />}
         </div>
-        <div className="rounded-lg border border-linesoft bg-bg1 px-3 py-2">
-          <div className="mb-1 text-[11.5px] font-medium uppercase tracking-wide text-dim">Preserved</div>
-          <ul className="space-y-0.5">
-            {p.preserved.map((x, i) => (
-              <li key={i} className="text-[12.5px] text-mut">· {x}</li>
-            ))}
-          </ul>
-        </div>
-        <div className="rounded-lg border border-linesoft bg-bg1 px-3.5 py-2.5">
-          <div className="mb-1.5 text-[11.5px] font-medium uppercase tracking-wide text-dim">Compacted context</div>
-          <Markdown text={p.summary} />
-        </div>
+        {p.preserved && p.preserved.length > 0 && (
+          <div className="rounded-lg border border-linesoft bg-bg1 px-3 py-2">
+            <div className="mb-1 text-[11.5px] font-medium uppercase tracking-wide text-dim">Preserved</div>
+            <ul className="space-y-0.5">
+              {p.preserved.map((x, i) => (
+                <li key={i} className="text-[12.5px] text-mut">· {x}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {p.summary && (
+          <div className="rounded-lg border border-linesoft bg-bg1 px-3.5 py-2.5">
+            <div className="mb-1.5 text-[11.5px] font-medium uppercase tracking-wide text-dim">Compacted context</div>
+            <Markdown text={p.summary} />
+          </div>
+        )}
       </div>
     </ActivityRow>
   );

@@ -9,7 +9,6 @@ const GROUPS: { key: PromptGroup; title: string; blurb: string }[] = [
   { key: 'builder', title: 'Builder', blurb: 'Instructions and message templates for every Builder call.' },
   { key: 'reviewer', title: 'Reviewer', blurb: 'Instructions, evidence sections, and the PASS/FINDINGS contract.' },
   { key: 'repair', title: 'Repair', blurb: 'How reviewer findings are handed back, and the final repair round.' },
-  { key: 'compactor', title: 'Compactor', blurb: 'Context compaction instructions and the digest wrapper.' },
 ];
 
 export function PromptsSection() {

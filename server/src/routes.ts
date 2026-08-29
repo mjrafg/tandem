@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { AppSettings, AttachmentMeta, BrowserActionPayload, CompactPreview, RoleName } from '../../shared/types';
+import type { AppSettings, AttachmentMeta, BrowserActionPayload, RoleName } from '../../shared/types';
 import {
   createSession, destroySession, getUser, loginAllowed, recordLoginAttempt,
   setPassword, setSessionCookie, verifyPassword,
@@ -11,10 +11,10 @@ import { computeUsage } from './context';
 import { config, shotsDir } from './config';
 import { db, getChat, getProject, rowToChat } from './db';
 import {
-  addEvent, broadcastChat, deriveTitle, getEvents, listChats, setChatCompaction, setChatTitle,
+  addEvent, broadcastChat, deriveTitle, getEvents, listChats, setChatTitle,
 } from './events';
 import { toHtml, toMarkdown, type ExportBundle } from './exporter';
-import { applyCompaction, runCompaction, type CompactionCall } from './engine/compactor';
+import { performNativeCompaction } from './engine/providerContext';
 import { activeCtx } from './engine/run';
 import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
@@ -181,40 +181,15 @@ export function registerRoutes(app: FastifyInstance): void {
     return computeUsage(chat);
   });
 
-  const previews = new Map<string, { chatId: string; call: CompactionCall }>();
-
-  app.post('/api/chats/:id/compact/preview', async (req, reply) => {
+  // Provider-native compaction: the provider that owns the chat's session
+  // compacts its own context. No separate Compactor model is ever invoked.
+  app.post('/api/chats/:id/compact', async (req, reply) => {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
     if (isRunning(chat.id)) return reply.code(409).send({ error: 'Wait for the current run to finish before compacting.' });
-    const call = await runCompaction(chat); // the real Compactor CLI call
-    if (!call.ok) return reply.code(502).send({ error: call.error ?? 'Compaction failed.' });
-    const previewId = randomUUID();
-    previews.set(previewId, { chatId: chat.id, call });
-    setTimeout(() => previews.delete(previewId), 30 * 60_000).unref?.();
-    const preview: CompactPreview = {
-      previewId,
-      beforeTokens: call.beforeTokens,
-      afterTokens: call.afterTokens,
-      provider: call.provider,
-      model: call.model,
-      summary: call.summary,
-      preserved: call.preserved,
-    };
-    return preview;
-  });
-
-  app.post('/api/chats/:id/compact/apply', async (req, reply) => {
-    const chat = getChat((req.params as any).id);
-    if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
-    const { previewId } = (req.body ?? {}) as { previewId?: string };
-    const stored = previewId ? previews.get(previewId) : undefined;
-    if (!stored || stored.chatId !== chat.id) {
-      return reply.code(400).send({ error: 'Preview expired — generate a new one.' });
-    }
-    previews.delete(previewId!);
-    const eventId = applyCompaction(chat, stored.call);
-    return { ok: true, eventId };
+    const outcome = await performNativeCompaction(chat, 'manual');
+    if (!outcome.ok) return reply.code(502).send({ error: outcome.error ?? 'Native compaction failed.', outcome });
+    return outcome;
   });
 
   // ------------------------------------------------- internal (localhost MCP)

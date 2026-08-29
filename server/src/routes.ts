@@ -19,7 +19,7 @@ import { activeCtx } from './engine/run';
 import { applyWorkdirChange, isRunning, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings } from './settings';
-import { buildRolePreview, listPrompts, resetPrompt, setPromptOverride } from './prompts';
+import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
 
 export function registerRoutes(app: FastifyInstance): void {
   // ---------------------------------------------------------------- health / auth
@@ -283,6 +283,20 @@ export function registerRoutes(app: FastifyInstance): void {
   // ---------------------------------------------------------------- AI prompts
 
   app.get('/api/prompts', async () => listPrompts());
+
+  app.get('/api/prompts/export', async (_req, reply) => {
+    reply.header('Content-Disposition', 'attachment; filename="tandem-prompts.json"');
+    return reply.type('application/json').send(JSON.stringify(exportPrompts(), null, 2));
+  });
+
+  app.post('/api/prompts/import', async (req, reply) => {
+    try {
+      const summary = importPrompts(req.body);
+      return { summary, prompts: listPrompts() };
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : 'Invalid prompts file.' });
+    }
+  });
 
   app.put('/api/prompts/:key', async (req, reply) => {
     const key = String((req.params as any).key ?? '');

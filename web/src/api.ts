@@ -77,6 +77,10 @@ export const api = {
 
   // AI prompts
   prompts: () => j<PromptEntry[]>('/api/prompts'),
+  promptsExportUrl: '/api/prompts/export',
+  importPrompts: (data: unknown) =>
+    j<{ summary: { applied: string[]; resetToDefault: string[]; unchanged: string[]; skipped: string[] }; prompts: PromptEntry[] }>(
+      '/api/prompts/import', { method: 'POST', body: JSON.stringify(data) }),
   savePrompt: (key: string, value: string) =>
     j<PromptEntry>(`/api/prompts/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   resetPrompt: (key: string) => j<PromptEntry>(`/api/prompts/${encodeURIComponent(key)}`, { method: 'DELETE' }),

@@ -345,6 +345,68 @@ export function listPrompts(): PromptEntry[] {
   }));
 }
 
+// ---------------------------------------------------------------- import/export
+
+export interface PromptsExport {
+  app: 'tandem';
+  kind: 'prompts';
+  version: 1;
+  exportedAt: string;
+  /** key → current effective text (defaults included, so the file is a complete snapshot) */
+  prompts: Record<string, string>;
+}
+
+export function exportPrompts(): PromptsExport {
+  const prompts: Record<string, string> = {};
+  for (const d of PROMPT_DEFS) prompts[d.key] = getPrompt(d.key);
+  return { app: 'tandem', kind: 'prompts', version: 1, exportedAt: new Date().toISOString(), prompts };
+}
+
+export interface PromptsImportResult {
+  applied: string[];
+  resetToDefault: string[];
+  unchanged: string[];
+  skipped: string[];
+}
+
+/**
+ * Apply a prompts JSON file. Accepts the export shape ({ prompts: {…} }) or a
+ * bare key→text map. Known keys only; a value equal to the default clears the
+ * override; keys absent from the file are left untouched.
+ */
+export function importPrompts(data: unknown): PromptsImportResult {
+  const map = (data && typeof data === 'object' && !Array.isArray(data))
+    ? ((data as any).prompts && typeof (data as any).prompts === 'object' ? (data as any).prompts : data)
+    : null;
+  if (!map || typeof map !== 'object' || Array.isArray(map)) {
+    throw new Error('Expected a JSON object with prompt texts (the exported format, or a plain {key: text} map).');
+  }
+  const entries = Object.entries(map as Record<string, unknown>).filter(([k]) => k !== 'app' && k !== 'kind' && k !== 'version' && k !== 'exportedAt');
+  if (entries.length > 200) throw new Error('Too many entries in the file.');
+
+  const result: PromptsImportResult = { applied: [], resetToDefault: [], unchanged: [], skipped: [] };
+  for (const [key, raw] of entries) {
+    const def = DEF_BY_KEY.get(key);
+    if (!def || typeof raw !== 'string' || raw.length > 20_000) {
+      result.skipped.push(key);
+      continue;
+    }
+    const current = getPrompt(key);
+    if (raw === current) {
+      // still normalize storage: matching the default must not linger as an override
+      if (raw === def.default) resetPrompt(key);
+      result.unchanged.push(key);
+    } else if (raw === def.default || raw.trim().length === 0) {
+      resetPrompt(key);
+      result.resetToDefault.push(key);
+    } else {
+      setPromptOverride(key, raw);
+      result.applied.push(key);
+    }
+  }
+  return result;
+}
+
 /** {{name}} substitution; unknown placeholders stay visible rather than vanishing. */
 export function renderPrompt(key: string, vars: Record<string, string | number>): string {
   return getPrompt(key).replace(/\{\{(\w+)\}\}/g, (m, name: string) =>

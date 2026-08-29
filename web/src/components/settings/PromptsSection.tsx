@@ -1,5 +1,5 @@
-import { ChevronRight, RotateCcw } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { ChevronRight, Download, RotateCcw, Upload } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PromptEntry, PromptGroup } from '@shared/types';
 import { api } from '../../api';
 import { useStore } from '../../store';
@@ -18,6 +18,8 @@ export function PromptsSection() {
   const [open, setOpen] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api.prompts()
@@ -68,6 +70,33 @@ export function PromptsSection() {
     }
   }
 
+  async function importFile(file: File) {
+    setImporting(true);
+    try {
+      let data: unknown;
+      try {
+        data = JSON.parse(await file.text());
+      } catch {
+        toast('That file is not valid JSON.', 'error');
+        return;
+      }
+      const { summary, prompts } = await api.importPrompts(data);
+      setEntries(prompts);
+      setDrafts({});
+      const parts = [
+        summary.applied.length > 0 ? `${summary.applied.length} customized` : '',
+        summary.resetToDefault.length > 0 ? `${summary.resetToDefault.length} reset to default` : '',
+        summary.unchanged.length > 0 ? `${summary.unchanged.length} unchanged` : '',
+        summary.skipped.length > 0 ? `${summary.skipped.length} unknown key(s) skipped` : '',
+      ].filter(Boolean);
+      toast(`Prompts imported — ${parts.join(', ') || 'no changes'}`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Import failed', 'error');
+    } finally {
+      setImporting(false);
+    }
+  }
+
   if (!entries) {
     return (
       <div className="card flex justify-center px-4 py-8">
@@ -78,13 +107,39 @@ export function PromptsSection() {
 
   return (
     <div className="space-y-4">
-      <p className="text-[12px] leading-relaxed text-dim">
-        Every static instruction Tandem itself sends to Claude or Codex — the runtime values in{' '}
-        <code className="mono text-[11px] text-mut">{'{{placeholders}}'}</code> are filled in by the application at
-        call time. Editing wording never weakens code-enforced boundaries (Reviewer stays filesystem-read-only, the
-        review loop stays capped, Stop still kills processes). The exact assembled request of every call remains
-        inspectable in the chat timeline.
-      </p>
+      <div className="flex items-start gap-4">
+        <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-dim">
+          Every static instruction Tandem itself sends to Claude or Codex — the runtime values in{' '}
+          <code className="mono text-[11px] text-mut">{'{{placeholders}}'}</code> are filled in by the application at
+          call time. Editing wording never weakens code-enforced boundaries (Reviewer stays filesystem-read-only, the
+          review loop stays capped, Stop still kills processes). The exact assembled request of every call remains
+          inspectable in the chat timeline.
+        </p>
+        <div className="flex shrink-0 items-center gap-1">
+          <a href={api.promptsExportUrl} download className="btn-ghost text-[12px]" title="Download all prompts as JSON (a complete snapshot you can edit or move to another instance)">
+            <Download size={13} /> Export
+          </a>
+          <button
+            className="btn-ghost text-[12px]"
+            disabled={importing}
+            onClick={() => fileRef.current?.click()}
+            title="Apply a prompts JSON file — known keys are updated, values matching the default reset it, keys missing from the file stay untouched"
+          >
+            {importing ? <Spinner size={12} /> : <Upload size={13} />} Import
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void importFile(f);
+              e.currentTarget.value = '';
+            }}
+          />
+        </div>
+      </div>
 
       {GROUPS.map((g) => {
         const list = byGroup.get(g.key) ?? [];

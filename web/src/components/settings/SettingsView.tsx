@@ -5,6 +5,7 @@ import type { AppSettings, Effort, Provider, RoleConfig, RoleName } from '@share
 import { api } from '../../api';
 import { useStore } from '../../store';
 import { Field, Modal, SelectBox, Spinner, Toggle } from '../ui';
+import { PromptsSection } from './PromptsSection';
 
 const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
   'claude-code': ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
@@ -113,6 +114,10 @@ export function SettingsView() {
             />
           </div>
         </div>
+
+        {/* ------------------------------------------------ AI prompts */}
+        <SectionTitle>AI Prompts</SectionTitle>
+        <PromptsSection />
 
         {/* ------------------------------------------------ context */}
         <SectionTitle>Context</SectionTitle>

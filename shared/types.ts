@@ -276,6 +276,22 @@ export interface DirListing {
   writable: boolean;
 }
 
+// ---------------------------------------------------------------- prompts
+
+export type PromptGroup = 'builder' | 'reviewer' | 'repair' | 'compactor';
+
+export interface PromptEntry {
+  key: string;
+  name: string;
+  description: string;
+  group: PromptGroup;
+  roles: string[];
+  placeholders: string[];
+  default: string;
+  value: string;
+  customized: boolean;
+}
+
 // ---------------------------------------------------------------- SSE
 
 export type ServerMsg =

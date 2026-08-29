@@ -6,7 +6,8 @@ import { config } from '../config';
 import { estimateTokens, computeUsage } from '../context';
 import { getProject, setBuilderSession } from '../db';
 import { addEvent, getEvents, setChatCompaction } from '../events';
-import { BASE_PROMPTS, getSettings } from '../settings';
+import { getSettings } from '../settings';
+import { compactorSystemText, renderPrompt } from '../prompts';
 import { runClaudeTurn } from './claude';
 import { RunHandle, type RunCtx } from './run';
 
@@ -111,12 +112,7 @@ export async function runCompaction(chat: Chat): Promise<CompactionCall> {
   const project = getProject(chat.projectId)!;
   const h = new RunHandle(ctx, chat, project, []);
 
-  const systemAppendix = [
-    BASE_PROMPTS.compactor,
-    settings.sharedInstructions.trim(),
-    cfg.instructions.trim(),
-    'Reply with ONLY the compacted context in markdown — no preface, no commentary.',
-  ].filter(Boolean).join('\n\n');
+  const systemAppendix = compactorSystemText(settings);
 
   const result = cfg.provider === 'claude-code'
     ? await runClaudeTurn(h, {
@@ -124,7 +120,7 @@ export async function runCompaction(chat: Chat): Promise<CompactionCall> {
       model: cfg.model,
       effort: cfg.effort,
       systemAppendix,
-      message: `Compact this conversation:\n\n${digest}`,
+      message: renderPrompt('compactor.message', { conversation_digest: digest }),
       cwd: scratch,
       emitActivity: false,
       timeoutMs: COMPACT_TIMEOUT,

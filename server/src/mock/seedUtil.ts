@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { EventKind, EventPayloadMap } from '../../../shared/types';
 import { db } from '../db';
 import { addEvent } from '../events';
-import { BASE_PROMPTS } from '../settings';
+import { getPrompt } from '../prompts';
 
 export const CLAUDE_CLI = 'claude -p --output-format stream-json --model claude-opus-5';
 export const CODEX_CLI = 'codex exec --json --sandbox read-only -m gpt-5-codex';
@@ -41,7 +41,7 @@ export class Timeline {
 
 export function seedPrompt(role: 'builder' | 'reviewer' | 'final_repair', project: string, dir: string, ctxK: number, request: string): string {
   return [
-    role === 'reviewer' ? BASE_PROMPTS.reviewer : role === 'final_repair' ? BASE_PROMPTS.final_repair : BASE_PROMPTS.builder,
+    getPrompt(role === 'reviewer' ? 'reviewer.base' : role === 'final_repair' ? 'repair.final_base' : 'builder.base'),
     `Project: ${project}\nWorking directory: ${dir}`,
     `[active conversation context · ~${ctxK}k tokens]`,
     request,

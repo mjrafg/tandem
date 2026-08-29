@@ -3,19 +3,29 @@ import type { AttachmentMeta, Finding, FindingsPayload } from '../../../shared/t
 import { computeUsage } from '../context';
 import { getBuilderSession, getChat, getEvent, getProject, setBuilderSession } from '../db';
 import { addEvent, updateEvent } from '../events';
-import { BASE_PROMPTS, getSettings } from '../settings';
+import { getSettings } from '../settings';
+import { builderSystemText, getPrompt, renderPrompt, reviewerSystemText } from '../prompts';
 import { runClaudeTurn } from './claude';
 import { runCodexReview } from './codex';
 import { applyCompaction, recentConversation, runCompaction } from './compactor';
 import {
   RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, setChatRunning, stopRun,
 } from './run';
-import { captureWorktree, diffWorktrees, type WorktreeDelta } from './snapshot';
+import { captureWorktree, diffWorktrees, type DeltaNoteKind } from './snapshot';
 
 export { isRunning, stopRun, applyWorkdirChange } from './run';
 
 const BUILDER_TIMEOUT = 30 * 60_000;
 const REVIEW_TIMEOUT = 15 * 60_000;
+/** the review-loop cap — enforced by the orchestration below, not by prompts */
+const MAX_REVIEW_ROUNDS = 2;
+
+/** wording for the changed-files note comes from the prompt registry */
+interface ReviewDelta { files: string[]; note: string }
+
+function noteFor(kind: DeltaNoteKind): string {
+  return getPrompt(kind === 'git' ? 'reviewer.note_git' : kind === 'git_state' ? 'reviewer.note_git_state' : 'reviewer.note_nongit');
+}
 
 /**
  * The production run: ONE Builder invocation per user message — the Builder
@@ -60,7 +70,7 @@ async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
     role: 'builder',
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystem(h, 'builder'),
+    systemAppendix: builderSystemText(h.settings, 'builder'),
     message: builderMessage(h, userText, resume),
     cwd: startDir,
     resumeSessionId: resume,
@@ -90,8 +100,8 @@ async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
     role: 'builder',
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystem(h, 'builder'),
-    message: `The independent Reviewer evaluated the result against the user's request and returned these findings:\n\n${findingsAsText(round1.items)}\n\nAddress them in the project now.`,
+    systemAppendix: builderSystemText(h.settings, 'builder'),
+    message: renderPrompt('repair.findings_message', { findings: findingsAsText(round1.items) }),
     cwd: endDir,
     resumeSessionId: getBuilderSession(h.chat.id),
     withTandemTools: true,
@@ -114,8 +124,8 @@ async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
     role: 'final_repair',
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystem(h, 'final_repair'),
-    message: `Final repair round. The Reviewer's remaining findings:\n\n${findingsAsText(round2.items)}\n\nAddress them precisely; there will be no further review.`,
+    systemAppendix: builderSystemText(h.settings, 'final_repair'),
+    message: renderPrompt('repair.final_message', { findings: findingsAsText(round2.items) }),
     cwd: h.project.rootPath,
     resumeSessionId: getBuilderSession(h.chat.id),
     withTandemTools: true,
@@ -133,70 +143,55 @@ async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
 // ---------------------------------------------------------------- review gate
 
 /** Decide from RESULTING STATE whether review applies; null = no review. */
-function reviewGate(before: ReturnType<typeof captureWorktree>, startDir: string, endDir: string, h: RunHandle): WorktreeDelta | null {
+function reviewGate(before: ReturnType<typeof captureWorktree>, startDir: string, endDir: string, h: RunHandle): ReviewDelta | null {
   if (endDir === startDir) {
     const delta = diffWorktrees(before, captureWorktree(endDir));
-    return delta.changed ? delta : null;
+    return delta.changed ? { files: delta.files, note: noteFor(delta.noteKind) } : null;
   }
   // the Builder moved the chat to a different directory during the run
   const after = captureWorktree(endDir);
   if (after.kind === 'git') {
     if (after.files.size === 0) return null; // clean tree (e.g. fresh clone): nothing modified
     return {
-      changed: true,
       files: [...after.files.entries()].map(([f, s]) => `${s} ${f}`).slice(0, 100),
-      note: `The working directory changed to ${endDir} during the run. Uncommitted changes there:`,
+      note: renderPrompt('reviewer.note_switched', { new_dir: endDir }),
     };
   }
   h.status('Review skipped: the working directory changed mid-run and the new directory has no baseline to diff against.');
   return null;
 }
 
-function currentDelta(h: RunHandle): WorktreeDelta {
+function currentDelta(h: RunHandle): ReviewDelta {
   const state = captureWorktree(h.project.rootPath);
   if (state.kind === 'git') {
     return {
-      changed: true,
       files: [...state.files.entries()].map(([f, s]) => `${s} ${f}`).slice(0, 100),
-      note: state.files.size > 0 ? 'Uncommitted changes per `git status --porcelain`:' : 'Inspect the repository state directly (`git status`, `git log`).',
+      note: state.files.size > 0 ? getPrompt('reviewer.note_git') : getPrompt('reviewer.note_git_clean'),
     };
   }
-  return { changed: true, files: [], note: 'Not a git repository — inspect the working tree directly.' };
+  return { files: [], note: getPrompt('reviewer.note_nongit_inspect') };
 }
 
 // ---------------------------------------------------------------- reviewer
 
-async function review(h: RunHandle, userText: string, delta: WorktreeDelta, round: number):
+async function review(h: RunHandle, userText: string, delta: ReviewDelta, round: number):
   Promise<{ verdict: 'pass' | 'findings'; items: Finding[]; eventId: string } | null> {
   h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is checking the repaired result…');
   const cfg = h.settings.roles.reviewer;
   const prompt = [
-    `# The user's original request\n${userText}`,
-    `# Changed files\n${delta.note}\n${delta.files.map((f) => `- ${f}`).join('\n') || '(list unavailable — inspect directly)'}`,
-    `# Round\n${round} of maximum 2.`,
-    [
-      '# Required output format',
-      'First line: exactly `PASS` or `FINDINGS`.',
-      'If FINDINGS, list each one as:',
-      '1. [major|minor] <short title> — <file>:<line>',
-      '   <what is wrong, concretely>',
-      '   Recommendation: <one line>',
-      'Only report issues that matter for this request: incorrect or incomplete implementation, regressions, broken behavior, real security problems, relevant test/build failures, accidental unrelated changes. Do not demand unrelated improvements.',
-    ].join('\n'),
+    renderPrompt('reviewer.request_section', { original_request: userText }),
+    renderPrompt('reviewer.changed_section', {
+      changed_files_note: delta.note,
+      changed_files: delta.files.map((f) => `- ${f}`).join('\n') || getPrompt('reviewer.changed_empty'),
+    }),
+    renderPrompt('reviewer.round_section', { review_round: round, max_review_rounds: MAX_REVIEW_ROUNDS }),
+    getPrompt('reviewer.output_format'),
   ].join('\n\n');
-
-  const systemParts = [BASE_PROMPTS.reviewer];
-  if (h.settings.sharedInstructions.trim()) systemParts.push(h.settings.sharedInstructions.trim());
-  if (cfg.instructions.trim()) systemParts.push(cfg.instructions.trim());
-  systemParts.push([
-    'A real internal browser (headless Chromium) is available through the browser_* tools — open URLs including localhost, interact with pages, resize the viewport, read the console, take screenshots you can see. Use it if inspecting the running application helps your judgment. Your project filesystem access remains read-only.',
-    'Your shell has network access via the sandbox\'s HTTP(S) proxy: public URLs and name resolution work with normal tools (curl, wget). Local/private addresses (localhost, 127.0.0.1, 172.x, 10.x…) are excluded from the default proxy env, so for those force the proxy — e.g. `curl --noproxy \'\' http://127.0.0.1:PORT/…` — or use the internal browser, which reaches them directly.',
-  ].join('\n'));
 
   const result = await runCodexReview(h, {
     model: cfg.model,
     effort: cfg.effort,
-    prompt: `${systemParts.join('\n\n')}\n\n${prompt}`,
+    prompt: `${reviewerSystemText(h.settings)}\n\n${prompt}`,
     cwd: h.project.rootPath,
     timeoutMs: REVIEW_TIMEOUT,
   });
@@ -256,21 +251,8 @@ function findingsAsText(items: Finding[]): string {
 }
 
 // ---------------------------------------------------------------- prompts
-
-function builderSystem(h: RunHandle, role: 'builder' | 'final_repair'): string {
-  const parts = [BASE_PROMPTS.builder];
-  if (role === 'final_repair') parts.push(BASE_PROMPTS.final_repair);
-  if (h.settings.sharedInstructions.trim()) parts.push(h.settings.sharedInstructions.trim());
-  const roleExtra = role === 'final_repair' ? h.settings.finalRepairInstructions : h.settings.roles.builder.instructions;
-  if (roleExtra.trim()) parts.push(roleExtra.trim());
-  parts.push([
-    'You are running inside Tandem, a chat product: the user sees your streamed replies plus a live record of your commands, file reads, and edits.',
-    'The current directory is this chat\'s active workspace. If you set up a project somewhere else (for example after cloning a repository or extracting an archive) and further work belongs there, call the tandem_set_working_dir tool to make it the chat\'s working directory.',
-    'A real internal browser (headless Chromium) is available through the browser_* tools: open any URL including localhost and file://, inspect page structure, click, type, resize the viewport to any dimensions, read the console, and take screenshots you can see. Use it whenever actually rendering or driving a page would help; skip it when it would not.',
-    'Never commit, push, publish, or deploy unless the user explicitly asked for it in this conversation.',
-  ].join('\n'));
-  return parts.join('\n\n');
-}
+// All static wording comes from the prompt registry (Admin → AI Prompts).
+// Do not add literal instruction strings here — add them to prompts.ts.
 
 function builderMessage(h: RunHandle, userText: string, resumeSessionId: string | null): string {
   const parts: string[] = [];
@@ -278,14 +260,15 @@ function builderMessage(h: RunHandle, userText: string, resumeSessionId: string 
     // fresh CLI session: seed continuity from the stored record
     const compaction = latestCompactionSummary(h);
     const recent = recentConversation(h.chat.id, h.settings.context.preserveRecentTokens * 4, true);
-    if (compaction) parts.push(`# Compacted context of this conversation so far\n${compaction}`);
-    if (recent.trim()) parts.push(`# Recent conversation\n${recent}`);
+    if (compaction) parts.push(renderPrompt('builder.continuation_compacted', { compacted_context: compaction }));
+    if (recent.trim()) parts.push(renderPrompt('builder.continuation_recent', { recent_conversation: recent }));
   }
   let body = userText.trim();
   if (h.attachments.length > 0) {
-    body += `\n\n[Files the user attached to this message — stored on this machine]\n${h.attachments.map((a) => `- ${a.path} (${Math.round(a.size / 1024)} KB)`).join('\n')}`;
+    const attachmentList = h.attachments.map((a) => `- ${a.path} (${Math.round(a.size / 1024)} KB)`).join('\n');
+    body += `\n\n${renderPrompt('builder.attachments', { attachment_list: attachmentList })}`;
   }
-  parts.push(parts.length > 0 ? `# New request\n${body}` : body);
+  parts.push(parts.length > 0 ? renderPrompt('builder.new_request', { user_message: body }) : body);
   return parts.join('\n\n');
 }
 

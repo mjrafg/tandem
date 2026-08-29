@@ -1,4 +1,4 @@
-import type { AppSettings, RoleName } from '../../shared/types';
+import type { AppSettings } from '../../shared/types';
 import { kvGet, kvSet } from './db';
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -38,34 +38,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
 };
 
-/**
- * The concise built-in role instructions. These are the actual strings the
- * engine will hand to each CLI (plus the user's additional instructions), and
- * they are shown verbatim in the Admin prompt preview — no hidden layers.
- */
-export const BASE_PROMPTS: Record<RoleName | 'final_repair', string> = {
-  builder: [
-    'You are the Builder, the coding agent for this project.',
-    'Understand the request and decide yourself how to investigate and act: read, search, run commands, edit files, verify.',
-    'Do only what the request needs. Report honestly what you did and what you found.',
-  ].join('\n'),
-  reviewer: [
-    'You are the Reviewer. Independently evaluate the current state of the project against the user\'s original request.',
-    'You may inspect the project read-only; you must not modify anything. You have network access for verification.',
-    'Reply PASS if the request is correctly and completely implemented with no regressions.',
-    'Otherwise list concrete, actionable findings with file evidence. Do not demand unrelated improvements.',
-    'If something material to the request cannot be verified (an unreachable URL, a check you cannot run), do not PASS on assumptions — report it as a finding.',
-  ].join('\n'),
-  compactor: [
-    'You are the Compactor. Produce a compact replacement for this conversation\'s context.',
-    'Preserve: goals, instructions, decisions, current task state, key discoveries, changed files, test results that still matter, unresolved issues, reviewer findings, constraints, remaining work.',
-    'Aggressively drop stale noise and repetition.',
-  ].join('\n'),
-  final_repair: [
-    'This is the final repair round. Address the reviewer\'s remaining findings precisely.',
-    'There will be no further review after this — keep the change minimal and safe.',
-  ].join('\n'),
-};
+// All built-in instruction text lives in prompts.ts (Admin → AI Prompts).
 
 export function getSettings(): AppSettings {
   const stored = kvGet<AppSettings>('settings');
@@ -90,26 +63,6 @@ export function putSettings(patch: Partial<AppSettings>): AppSettings {
   c.preserveRecentTokens = clamp(c.preserveRecentTokens, 0, 200_000);
   kvSet('settings', merged);
   return merged;
-}
-
-export function composeEffectivePrompt(role: RoleName | 'final_repair', settings: AppSettings): string {
-  const parts: string[] = [];
-  parts.push(`# Built-in ${role.replace('_', ' ')} instructions\n${BASE_PROMPTS[role]}`);
-  if (settings.sharedInstructions.trim()) {
-    parts.push(`# Shared instructions (Admin)\n${settings.sharedInstructions.trim()}`);
-  }
-  const roleCfg = role === 'final_repair' ? null : settings.roles[role];
-  const extra = role === 'final_repair' ? settings.finalRepairInstructions : roleCfg?.instructions ?? '';
-  if (extra.trim()) {
-    parts.push(`# Additional ${role.replace('_', ' ')} instructions (Admin)\n${extra.trim()}`);
-  }
-  parts.push(
-    '# At call time, the application adds\n' +
-    '- the working directory (the CLI runs inside the chat\'s active project)\n' +
-    '- for the Builder: the Tandem runtime note (working-directory tool, no commit/push/deploy unless asked) and, on a fresh session, the compacted context plus recent conversation\n' +
-    '- the current request (user message with any attachment paths, reviewer findings to repair, or the conversation digest to compact)',
-  );
-  return parts.join('\n\n');
 }
 
 function deepMerge(target: Record<string, any>, src: Record<string, any>): void {

@@ -1,5 +1,5 @@
 import type {
-  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactPreview, ContextUsage, DirListing, GitStatus, Project,
+  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactPreview, ContextUsage, DirListing, GitStatus, Project, PromptEntry,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -74,6 +74,12 @@ export const api = {
   compactPreview: (id: string) => j<CompactPreview>(`/api/chats/${id}/compact/preview`, { method: 'POST' }),
   compactApply: (id: string, previewId: string) =>
     j<{ ok: true }>(`/api/chats/${id}/compact/apply`, { method: 'POST', body: JSON.stringify({ previewId }) }),
+
+  // AI prompts
+  prompts: () => j<PromptEntry[]>('/api/prompts'),
+  savePrompt: (key: string, value: string) =>
+    j<PromptEntry>(`/api/prompts/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
+  resetPrompt: (key: string) => j<PromptEntry>(`/api/prompts/${encodeURIComponent(key)}`, { method: 'DELETE' }),
 
   // settings
   settings: () => j<AppSettings>('/api/settings'),

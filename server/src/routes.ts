@@ -18,7 +18,8 @@ import { applyCompaction, runCompaction, type CompactionCall } from './engine/co
 import { activeCtx } from './engine/run';
 import { applyWorkdirChange, isRunning, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
-import { composeEffectivePrompt, getSettings, putSettings } from './settings';
+import { getSettings, putSettings } from './settings';
+import { buildRolePreview, listPrompts, resetPrompt, setPromptOverride } from './prompts';
 
 export function registerRoutes(app: FastifyInstance): void {
   // ---------------------------------------------------------------- health / auth
@@ -276,7 +277,34 @@ export function registerRoutes(app: FastifyInstance): void {
 
   app.get('/api/settings/effective-prompt', async (req) => {
     const role = ((req.query as any).role ?? 'builder') as RoleName | 'final_repair';
-    return { role, prompt: composeEffectivePrompt(role, getSettings()) };
+    return { role, prompt: buildRolePreview(role, getSettings()) };
+  });
+
+  // ---------------------------------------------------------------- AI prompts
+
+  app.get('/api/prompts', async () => listPrompts());
+
+  app.put('/api/prompts/:key', async (req, reply) => {
+    const key = String((req.params as any).key ?? '');
+    const { value } = (req.body ?? {}) as { value?: string };
+    if (typeof value !== 'string') return reply.code(400).send({ error: 'Provide "value".' });
+    if (value.length > 20_000) return reply.code(400).send({ error: 'Prompt text is limited to 20,000 characters.' });
+    try {
+      setPromptOverride(key, value);
+    } catch {
+      return reply.code(404).send({ error: 'Unknown prompt key.' });
+    }
+    return listPrompts().find((p) => p.key === key);
+  });
+
+  app.delete('/api/prompts/:key', async (req, reply) => {
+    const key = String((req.params as any).key ?? '');
+    try {
+      resetPrompt(key);
+    } catch {
+      return reply.code(404).send({ error: 'Unknown prompt key.' });
+    }
+    return listPrompts().find((p) => p.key === key) ?? { ok: true };
   });
 
   // ---------------------------------------------------------------- export

@@ -115,7 +115,17 @@ export interface ChangedFile {
 }
 export interface FileChangePayload { files: ChangedFile[] }
 
-export interface AiUsage { inputTokens: number; outputTokens: number }
+export interface AiUsage {
+  /** total tokens consumed by the call (summed across its internal turns) */
+  inputTokens: number;
+  outputTokens: number;
+  /**
+   * size of the conversation context at the END of the call (final turn's
+   * input + cache + output) — the honest anchor for the context meter.
+   * Cumulative inputTokens would multiple-count re-read context.
+   */
+  contextTokens?: number;
+}
 
 export interface AiCallPayload {
   role: RoleName | 'final_repair';

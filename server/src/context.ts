@@ -76,7 +76,9 @@ export function computeUsage(chat: Chat): ContextUsage {
 
   if (lastUsageCall && (!compactionEvent || lastUsageCall.seq > compactionEvent.seq)) {
     const usage = (lastUsageCall.payload as AiCallPayload).response!.usage!;
-    carried = usage.inputTokens + usage.outputTokens;
+    // contextTokens = the session's context size after the call's final turn;
+    // the cumulative in/out sum (fallback for old events) overcounts re-reads.
+    carried = usage.contextTokens ?? usage.inputTokens + usage.outputTokens;
     anchorSeq = lastUsageCall.seq;
   } else if (compactionEvent) {
     carried = (compactionEvent.payload as CompactionPayload).afterTokens;

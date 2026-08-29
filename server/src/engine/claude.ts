@@ -180,6 +180,14 @@ export async function runClaudeTurn(h: RunHandle, opts: {
             inputTokens: (ev.usage.input_tokens ?? 0) + (ev.usage.cache_read_input_tokens ?? 0) + (ev.usage.cache_creation_input_tokens ?? 0),
             outputTokens: ev.usage.output_tokens ?? 0,
           };
+          // the FINAL turn's tokens describe the session's current context size;
+          // the cumulative numbers above describe what the call consumed
+          const iters = Array.isArray(ev.usage.iterations) ? ev.usage.iterations.filter((i: any) => i && (i.input_tokens != null || i.cache_read_input_tokens != null)) : [];
+          const last = iters[iters.length - 1];
+          if (last) {
+            usage.contextTokens = (last.input_tokens ?? 0) + (last.cache_read_input_tokens ?? 0)
+              + (last.cache_creation_input_tokens ?? 0) + (last.output_tokens ?? 0);
+          }
         }
         if (ev.is_error || (ev.subtype && ev.subtype !== 'success')) {
           resultError = ev.subtype === 'error_max_turns'

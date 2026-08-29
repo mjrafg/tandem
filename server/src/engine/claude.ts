@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AiUsage, ChangedFile, ChatEvent, Effort } from '../../../shared/types';
-import { config } from '../config';
+import { config, shotsDir } from '../config';
 import {
   addEvent, appendAssistantText, beginAssistantMessage, finishAssistantMessage, updateEvent,
 } from '../events';
@@ -36,7 +36,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   message: string;
   cwd: string;
   resumeSessionId?: string | null;
-  withWorkdirTool?: boolean;
+  withTandemTools?: boolean;
   emitActivity?: boolean;
   timeoutMs: number;
 }): Promise<ClaudeTurnResult> {
@@ -57,24 +57,22 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   args.push('--append-system-prompt', opts.systemAppendix);
 
   let mcpConfigFile: string | null = null;
-  if (opts.withWorkdirTool) {
-    const mcpScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'mcp-workdir.cjs');
-    if (fs.existsSync(mcpScript)) {
+  if (opts.withTandemTools) {
+    const distDir = path.dirname(process.argv[1] ?? '.');
+    const workdirScript = path.resolve(distDir, 'mcp-workdir.cjs');
+    const browserScript = path.resolve(distDir, 'mcp-browser.cjs');
+    const mcpServers: Record<string, unknown> = {};
+    // Tandem env (chat id, internal token, shots dir) is inherited from this
+    // process's environment by the stdio servers.
+    if (fs.existsSync(workdirScript)) {
+      mcpServers.tandem = { type: 'stdio', command: process.execPath, args: [workdirScript] };
+    }
+    if (fs.existsSync(browserScript)) {
+      mcpServers.tandem_browser = { type: 'stdio', command: process.execPath, args: [browserScript] };
+    }
+    if (Object.keys(mcpServers).length > 0) {
       mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
-      fs.writeFileSync(mcpConfigFile, JSON.stringify({
-        mcpServers: {
-          tandem: {
-            type: 'stdio',
-            command: process.execPath,
-            args: [mcpScript],
-            env: {
-              TANDEM_INTERNAL_URL: `http://127.0.0.1:${config.port}/api/internal/workdir`,
-              TANDEM_CHAT_ID: h.chat.id,
-              TANDEM_INTERNAL_TOKEN: config.internalToken,
-            },
-          },
-        },
-      }));
+      fs.writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers }));
       args.push('--mcp-config', mcpConfigFile, '--strict-mcp-config');
     }
   }
@@ -210,6 +208,12 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: '',
       ...(EFFORT_THINKING[opts.effort] ? { MAX_THINKING_TOKENS: EFFORT_THINKING[opts.effort] } : {}),
+      // inherited by the tandem MCP stdio servers (workdir + browser)
+      TANDEM_INTERNAL_URL: `http://127.0.0.1:${config.port}/api/internal`,
+      TANDEM_CHAT_ID: h.chat.id,
+      TANDEM_INTERNAL_TOKEN: config.internalToken,
+      TANDEM_SHOTS_DIR: shotsDir,
+      TANDEM_BROWSER_ROLE: opts.role,
     },
     stdinData: opts.message,
     timeoutMs: opts.timeoutMs,
@@ -296,7 +300,9 @@ function mapToolUse(h: RunHandle, cwd: string, name: string, input: any): { even
     case 'EnterPlanMode':
       return null;
     default:
-      if (name.startsWith('mcp__tandem__')) return null; // its effect is recorded by the internal endpoint
+      // tandem MCP tools (workdir, browser) record their own effects via the
+      // internal endpoint — mapping them here would duplicate events
+      if (name.startsWith('mcp__tandem')) return null;
       return emit('status', { text: `Used tool ${name}` });
   }
 }

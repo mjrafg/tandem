@@ -1,5 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { AiUsage, Effort } from '../../../shared/types';
-import { config } from '../config';
+import { config, shotsDir } from '../config';
 import { addEvent, updateEvent } from '../events';
 import { spawnStreaming } from './procs';
 import type { RunHandle } from './run';
@@ -33,6 +35,17 @@ export async function runCodexReview(h: RunHandle, opts: {
   ];
   if (opts.model.trim()) args.push('-m', opts.model.trim());
   args.push('-c', `model_reasoning_effort="${opts.effort}"`);
+  // the internal browser tool (MCP servers run outside the shell sandbox; the
+  // browser writes only screenshots into Tandem's shots dir — the Reviewer's
+  // project access stays read-only)
+  const browserScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'mcp-browser.cjs');
+  if (fs.existsSync(browserScript)) {
+    args.push(
+      '-c', `mcp_servers.tandem_browser.command="${process.execPath}"`,
+      '-c', `mcp_servers.tandem_browser.args=["${browserScript}"]`,
+      '-c', 'mcp_servers.tandem_browser.tool_timeout_sec=120',
+    );
+  }
 
   const cliShown = `${config.codexBin} ${args.join(' ')}`;
   const startedAt = Date.now();
@@ -106,7 +119,16 @@ export async function runCodexReview(h: RunHandle, opts: {
     bin: config.codexBin,
     args,
     cwd: opts.cwd,
-    env: { OPENAI_API_KEY: '', NO_COLOR: '1' },
+    env: {
+      OPENAI_API_KEY: '',
+      NO_COLOR: '1',
+      // inherited by the tandem_browser MCP stdio server
+      TANDEM_INTERNAL_URL: `http://127.0.0.1:${config.port}/api/internal`,
+      TANDEM_CHAT_ID: h.chat.id,
+      TANDEM_INTERNAL_TOKEN: config.internalToken,
+      TANDEM_SHOTS_DIR: shotsDir,
+      TANDEM_BROWSER_ROLE: 'reviewer',
+    },
     stdinData: opts.prompt,
     timeoutMs: opts.timeoutMs,
     onLine,

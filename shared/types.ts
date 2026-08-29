@@ -74,7 +74,8 @@ export type EventKind =
   | 'findings'
   | 'compaction'
   | 'run'
-  | 'error';
+  | 'error'
+  | 'browser';
 
 export type StepStatus = 'running' | 'done' | 'failed' | 'stopped';
 
@@ -182,6 +183,29 @@ export interface ErrorPayload {
   retryable?: boolean;
 }
 
+export interface BrowserActionPayload {
+  /** navigate | snapshot | click | type | select | press | scroll | wait | screenshot | resize | console | evaluate */
+  action: string;
+  /** one human-readable line describing what happened */
+  detail: string;
+  /** page URL after the action */
+  url?: string;
+  title?: string;
+  viewport?: { width: number; height: number; deviceScaleFactor?: number };
+  /** element ref / selector that was interacted with */
+  ref?: string;
+  /** entered value (already redacted for password fields / sensitive input) */
+  value?: string;
+  /** screenshot file name (served via /api/chats/:id/shots/:file) */
+  screenshotFile?: string;
+  console?: { level: string; text: string }[];
+  error?: string;
+  durationMs?: number;
+  status: 'done' | 'failed';
+  /** which role drove the browser (builder / reviewer) */
+  role?: string;
+}
+
 export type EventPayloadMap = {
   user_message: UserMessagePayload;
   assistant_message: AssistantMessagePayload;
@@ -195,6 +219,7 @@ export type EventPayloadMap = {
   compaction: CompactionPayload;
   run: RunPayload;
   error: ErrorPayload;
+  browser: BrowserActionPayload;
 };
 
 export interface ChatEvent<K extends EventKind = EventKind> {

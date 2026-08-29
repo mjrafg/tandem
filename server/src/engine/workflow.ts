@@ -64,7 +64,7 @@ async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
     message: builderMessage(h, userText, resume),
     cwd: startDir,
     resumeSessionId: resume,
-    withWorkdirTool: true,
+    withTandemTools: true,
     timeoutMs: BUILDER_TIMEOUT,
   });
   if (first.sessionId) setBuilderSession(h.chat.id, first.sessionId);
@@ -94,7 +94,7 @@ async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
     message: `The independent Reviewer evaluated the result against the user's request and returned these findings:\n\n${findingsAsText(round1.items)}\n\nAddress them in the project now.`,
     cwd: endDir,
     resumeSessionId: getBuilderSession(h.chat.id),
-    withWorkdirTool: true,
+    withTandemTools: true,
     timeoutMs: BUILDER_TIMEOUT,
   });
   if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId);
@@ -118,7 +118,7 @@ async function runWorkflow(h: RunHandle, userText: string): Promise<void> {
     message: `Final repair round. The Reviewer's remaining findings:\n\n${findingsAsText(round2.items)}\n\nAddress them precisely; there will be no further review.`,
     cwd: h.project.rootPath,
     resumeSessionId: getBuilderSession(h.chat.id),
-    withWorkdirTool: true,
+    withTandemTools: true,
     timeoutMs: BUILDER_TIMEOUT,
   });
   if (final.sessionId) setBuilderSession(h.chat.id, final.sessionId);
@@ -188,6 +188,7 @@ async function review(h: RunHandle, userText: string, delta: WorktreeDelta, roun
   const systemParts = [BASE_PROMPTS.reviewer];
   if (h.settings.sharedInstructions.trim()) systemParts.push(h.settings.sharedInstructions.trim());
   if (cfg.instructions.trim()) systemParts.push(cfg.instructions.trim());
+  systemParts.push('A real internal browser (headless Chromium) is available through the browser_* tools — open URLs including localhost, interact with pages, resize the viewport, read the console, take screenshots you can see. Use it if inspecting the running application helps your judgment. Your project filesystem access remains read-only.');
 
   const result = await runCodexReview(h, {
     model: cfg.model,
@@ -262,6 +263,7 @@ function builderSystem(h: RunHandle, role: 'builder' | 'final_repair'): string {
   parts.push([
     'You are running inside Tandem, a chat product: the user sees your streamed replies plus a live record of your commands, file reads, and edits.',
     'The current directory is this chat\'s active workspace. If you set up a project somewhere else (for example after cloning a repository or extracting an archive) and further work belongs there, call the tandem_set_working_dir tool to make it the chat\'s working directory.',
+    'A real internal browser (headless Chromium) is available through the browser_* tools: open any URL including localhost and file://, inspect page structure, click, type, resize the viewport to any dimensions, read the console, and take screenshots you can see. Use it whenever actually rendering or driving a page would help; skip it when it would not.',
     'Never commit, push, publish, or deploy unless the user explicitly asked for it in this conversation.',
   ].join('\n'));
   return parts.join('\n\n');

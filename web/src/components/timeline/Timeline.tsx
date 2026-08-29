@@ -4,14 +4,14 @@ import { fmtBytes, fmtTime } from '../../lib/format';
 import { attachmentIcon } from '../Composer';
 import { Markdown } from '../Markdown';
 import {
-  AiCallRow, ChangeGroupRow, CommandGroupRow, CompactionRow, ErrorRow, FindingsRow, ReadGroupRow, RunMarker, SearchGroupRow, StatusLine,
+  AiCallRow, BrowserGroupRow, ChangeGroupRow, CommandGroupRow, CompactionRow, ErrorRow, FindingsRow, ReadGroupRow, RunMarker, SearchGroupRow, StatusLine,
 } from './rows';
 
 type Item =
   | { key: string; type: 'single'; ev: ChatEvent }
-  | { key: string; type: 'group'; kind: 'command' | 'file_read' | 'search' | 'file_change'; events: ChatEvent[] };
+  | { key: string; type: 'group'; kind: 'command' | 'file_read' | 'search' | 'file_change' | 'browser'; events: ChatEvent[] };
 
-const GROUPABLE = new Set(['command', 'file_read', 'search', 'file_change']);
+const GROUPABLE = new Set(['command', 'file_read', 'search', 'file_change', 'browser']);
 
 function buildItems(events: ChatEvent[]): Item[] {
   const items: Item[] = [];
@@ -27,7 +27,7 @@ function buildItems(events: ChatEvent[]): Item[] {
       if (last && last.type === 'group' && last.kind === ev.kind && last.events[0].runId === ev.runId) {
         last.events.push(ev);
       } else {
-        items.push({ key: ev.id, type: 'group', kind: ev.kind as 'command' | 'file_read' | 'search' | 'file_change', events: [ev] });
+        items.push({ key: ev.id, type: 'group', kind: ev.kind as 'command' | 'file_read' | 'search' | 'file_change' | 'browser', events: [ev] });
       }
       continue;
     }
@@ -47,6 +47,7 @@ export const Timeline = memo(function Timeline({ events }: { events: ChatEvent[]
             case 'file_read': return <ReadGroupRow key={item.key} events={item.events} />;
             case 'search': return <SearchGroupRow key={item.key} events={item.events} />;
             case 'file_change': return <ChangeGroupRow key={item.key} events={item.events} />;
+            case 'browser': return <BrowserGroupRow key={item.key} events={item.events} />;
           }
         }
         const ev = (item as Extract<Item, { type: 'single' }>).ev;

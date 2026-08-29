@@ -17,10 +17,13 @@ export const config = {
   /** CLI binaries for the agent roles (PATH-resolved unless overridden) */
   claudeBin: process.env.TANDEM_CLAUDE_BIN || 'claude',
   codexBin: process.env.TANDEM_CODEX_BIN || 'codex',
-  /** per-boot secret for localhost-internal calls (MCP workdir tool → app) */
-  internalToken: randomBytes(24).toString('hex'),
+  /** per-boot secret for localhost-internal calls (MCP tools → app); env override is for dev/testing */
+  internalToken: process.env.TANDEM_INTERNAL_TOKEN || randomBytes(24).toString('hex'),
 };
+
+export const shotsDir = path.join(dataDir, 'shots');
 
 fs.mkdirSync(config.dataDir, { recursive: true });
 fs.mkdirSync(config.projectsDir, { recursive: true });
 fs.mkdirSync(path.join(config.dataDir, 'tmp'), { recursive: true });
+fs.mkdirSync(shotsDir, { recursive: true });

@@ -2,19 +2,20 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { AppSettings, AttachmentMeta, CompactPreview, RoleName } from '../../shared/types';
+import type { AppSettings, AttachmentMeta, BrowserActionPayload, CompactPreview, RoleName } from '../../shared/types';
 import {
   createSession, destroySession, getUser, loginAllowed, recordLoginAttempt,
   setPassword, setSessionCookie, verifyPassword,
 } from './auth';
 import { computeUsage } from './context';
-import { config } from './config';
+import { config, shotsDir } from './config';
 import { db, getChat, getProject, rowToChat } from './db';
 import {
   addEvent, broadcastChat, deriveTitle, getEvents, listChats, setChatCompaction, setChatTitle,
 } from './events';
 import { toHtml, toMarkdown, type ExportBundle } from './exporter';
 import { applyCompaction, runCompaction, type CompactionCall } from './engine/compactor';
+import { activeCtx } from './engine/run';
 import { applyWorkdirChange, isRunning, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
 import { composeEffectivePrompt, getSettings, putSettings } from './settings';
@@ -221,6 +222,50 @@ export function registerRoutes(app: FastifyInstance): void {
     if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
     const result = applyWorkdirChange(chatId ?? '', dirPath ?? '');
     return result.ok ? result : reply.code(400).send(result);
+  });
+
+  app.post('/api/internal/browser-event', async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, any>;
+    if (b.token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const chat = getChat(String(b.chatId ?? ''));
+    if (!chat) return reply.code(404).send({ ok: false, error: 'Unknown chat.' });
+    const s = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : undefined);
+    const payload: BrowserActionPayload = {
+      action: s(b.action, 40) ?? 'action',
+      detail: s(b.detail, 300) ?? '',
+      url: s(b.url, 600),
+      title: s(b.title, 200),
+      viewport: b.viewport && typeof b.viewport.width === 'number'
+        ? { width: b.viewport.width, height: b.viewport.height, deviceScaleFactor: b.viewport.deviceScaleFactor }
+        : undefined,
+      ref: s(b.ref, 120),
+      value: s(b.value, 240),
+      screenshotFile: s(b.screenshotFile, 80),
+      console: Array.isArray(b.console)
+        ? b.console.slice(0, 12).map((c: any) => ({ level: s(c?.level, 20) ?? 'log', text: s(c?.text, 240) ?? '' }))
+        : undefined,
+      error: s(b.error, 400),
+      durationMs: typeof b.durationMs === 'number' ? b.durationMs : undefined,
+      status: b.status === 'failed' ? 'failed' : 'done',
+      role: s(b.role, 20),
+    };
+    addEvent(chat.id, 'browser', payload, { runId: activeCtx(chat.id)?.runId });
+    return { ok: true };
+  });
+
+  // ------------------------------------------------- browser screenshots
+
+  app.get('/api/chats/:id/shots/:file', async (req, reply) => {
+    const chat = getChat((req.params as any).id);
+    if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
+    const file = String((req.params as any).file ?? '');
+    if (!/^[\w-]+\.jpg$/.test(file)) return reply.code(400).send({ error: 'Bad file name.' });
+    const full = path.join(shotsDir, chat.id, file);
+    if (!fs.existsSync(full)) return reply.code(404).send({ error: 'Screenshot not found.' });
+    return reply
+      .header('Cache-Control', 'private, max-age=604800, immutable')
+      .type('image/jpeg')
+      .send(fs.createReadStream(full));
   });
 
   // ---------------------------------------------------------------- settings

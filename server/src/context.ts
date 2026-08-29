@@ -33,6 +33,9 @@ export function estimateEventTokens(e: ChatEvent): number {
       return estimateTokens(p.summary);
     case 'error':
       return estimateTokens(p.message) + estimateTokens(p.detail);
+    case 'browser':
+      return 40 + estimateTokens(p.detail) + estimateTokens(p.value)
+        + Math.min(estimateTokens((p.console ?? []).map((c: any) => c.text).join(' ')), 300);
     case 'run':
       return 0;
     default:

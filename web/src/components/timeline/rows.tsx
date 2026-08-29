@@ -1,8 +1,10 @@
 import {
-  AlertTriangle, Archive, CircleCheck, CircleSlash, FileDiff, FileText, OctagonX, Search as SearchIcon, Sparkles, Terminal,
+  AlertTriangle, Archive, Braces, Camera, CircleCheck, CircleSlash, Clock, FileDiff, FileText, Globe,
+  Keyboard, ListTree, MousePointerClick, MoveVertical, OctagonX, Scan, Search as SearchIcon, Sparkles,
+  SquareTerminal, Terminal,
 } from 'lucide-react';
 import type {
-  AiCallPayload, ChatEvent, CommandPayload, CompactionPayload, ErrorPayload, FileChangePayload,
+  AiCallPayload, BrowserActionPayload, ChatEvent, CommandPayload, CompactionPayload, ErrorPayload, FileChangePayload,
   FileReadPayload, FindingsPayload, RunPayload, SearchPayload, StatusPayload,
 } from '@shared/types';
 import { fmtDuration, fmtTokens, plural } from '../../lib/format';
@@ -298,6 +300,86 @@ export function CompactionRow({ ev }: { ev: ChatEvent }) {
         </div>
       </div>
     </ActivityRow>
+  );
+}
+
+// ---------------------------------------------------------------- browser
+
+const BROWSER_ICONS: Record<string, typeof Globe> = {
+  navigate: Globe, back: Globe, forward: Globe, reload: Globe,
+  click: MousePointerClick, type: Keyboard, select: Keyboard, press: Keyboard,
+  scroll: MoveVertical, wait: Clock, screenshot: Camera, resize: Scan,
+  console: SquareTerminal, snapshot: ListTree, evaluate: Braces,
+};
+
+export function BrowserGroupRow({ events }: { events: ChatEvent[] }) {
+  const acts = events.map((e) => ({ id: e.chatId, ev: e, p: e.payload as BrowserActionPayload }));
+  const failed = acts.filter((a) => a.p.status === 'failed').length;
+  const total = acts.reduce((n, a) => n + (a.p.durationMs ?? 0), 0);
+  const reviewer = acts[0].p.role === 'reviewer';
+  const label = acts.length === 1
+    ? <>Browser · {truncate(acts[0].p.detail, 62)}</>
+    : <>Browser activity · {acts.length} actions</>;
+
+  return (
+    <ActivityRow
+      icon={<Globe size={14} />}
+      tone={failed > 0 ? 'error' : 'default'}
+      label={
+        <span className="inline-flex items-center gap-2">
+          <span>{label}</span>
+          {reviewer && <span className="inline-block h-[6px] w-[6px] rounded-full bg-reviewer" title="Driven by the Reviewer" />}
+          {failed > 0 && <span className="text-err">{failed} failed</span>}
+        </span>
+      }
+      meta={fmtDuration(total)}
+    >
+      <div className="space-y-1.5">
+        {acts.map(({ ev, p }) => <BrowserActionDetail key={ev.id} chatId={ev.chatId} p={p} />)}
+      </div>
+    </ActivityRow>
+  );
+}
+
+function BrowserActionDetail({ chatId, p }: { chatId: string; p: BrowserActionPayload }) {
+  const Icon = BROWSER_ICONS[p.action] ?? Globe;
+  return (
+    <div className={`rounded-lg border px-3 py-2 ${p.status === 'failed' ? 'border-err/30 bg-err/[0.06]' : 'border-linesoft bg-bg1'}`}>
+      <div className="flex items-baseline gap-2">
+        <Icon size={13} className={`shrink-0 translate-y-[2px] ${p.status === 'failed' ? 'text-err' : 'text-dim'}`} />
+        <span className="min-w-0 flex-1 text-[12.5px] text-ink">{p.detail}</span>
+        {p.durationMs != null && <span className="shrink-0 text-[11px] tabular-nums text-dim">{fmtDuration(p.durationMs)}</span>}
+      </div>
+      {(p.url || p.viewport) && (
+        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-3 pl-[21px] text-[11.5px] text-dim">
+          {p.url && <span className="mono min-w-0 max-w-full truncate" title={p.title}>{p.url}</span>}
+          {p.viewport && <span className="shrink-0 tabular-nums">{p.viewport.width}×{p.viewport.height}{p.viewport.deviceScaleFactor && p.viewport.deviceScaleFactor !== 1 ? ` @${p.viewport.deviceScaleFactor}x` : ''}</span>}
+        </div>
+      )}
+      {p.value && <div className="mono mt-0.5 pl-[21px] text-[11.5px] text-mut">↳ {p.value}</div>}
+      {p.error && <div className="mt-1 pl-[21px] text-[12px] text-[#ffb3ae]">{p.error}</div>}
+      {p.console && p.console.length > 0 && (
+        <pre className="mono mt-1.5 ml-[21px] max-h-48 overflow-y-auto whitespace-pre-wrap rounded-md border border-linesoft bg-[#0e1013] px-2.5 py-1.5 text-[11.5px] leading-[1.55] text-[#c3c9d4]">
+          {p.console.map((c, i) => <span key={i} className={c.level === 'error' ? 'text-[#ff9a94]' : c.level === 'warning' ? 'text-warn' : ''}>[{c.level}] {c.text}{'\n'}</span>)}
+        </pre>
+      )}
+      {p.screenshotFile && (
+        <a
+          href={`/api/chats/${chatId}/shots/${p.screenshotFile}`}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-1.5 block pl-[21px]"
+          title="Open full size"
+        >
+          <img
+            src={`/api/chats/${chatId}/shots/${p.screenshotFile}`}
+            alt={p.detail}
+            loading="lazy"
+            className="max-h-[260px] max-w-full rounded-lg border border-linesoft transition-opacity hover:opacity-90"
+          />
+        </a>
+      )}
+    </div>
   );
 }
 

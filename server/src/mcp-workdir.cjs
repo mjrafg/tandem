@@ -9,7 +9,8 @@
 
 const readline = require('node:readline');
 
-const API = process.env.TANDEM_INTERNAL_URL;
+const BASE = (process.env.TANDEM_INTERNAL_URL || '').replace(/\/workdir$/, '');
+const API = `${BASE}/workdir`;
 const CHAT_ID = process.env.TANDEM_CHAT_ID;
 const TOKEN = process.env.TANDEM_INTERNAL_TOKEN;
 

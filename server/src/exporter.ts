@@ -1,7 +1,10 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type {
-  AiCallPayload, Chat, ChatEvent, CommandPayload, CompactionPayload, ContextUsage,
+  AiCallPayload, BrowserActionPayload, Chat, ChatEvent, CommandPayload, CompactionPayload, ContextUsage,
   FileChangePayload, FileReadPayload, FindingsPayload, Project, SearchPayload,
 } from '../../shared/types';
+import { shotsDir } from './config';
 
 export interface ExportBundle {
   exportedAt: number;
@@ -29,13 +32,13 @@ export function toMarkdown(b: ExportBundle): string {
   out.push('');
 
   for (const e of b.events) {
-    out.push(...eventToMarkdown(e));
+    out.push(...eventToMarkdown(e, b.chat.id));
     out.push('');
   }
   return out.join('\n');
 }
 
-function eventToMarkdown(e: ChatEvent): string[] {
+function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
   const t = fmtTime(e.ts);
   switch (e.kind) {
     case 'user_message': {
@@ -117,6 +120,16 @@ function eventToMarkdown(e: ChatEvent): string[] {
       const p = e.payload as any;
       return [`🛑 **Error** (${p.source ?? 'app'}): ${p.message}${p.detail ? `\n\n> ${p.detail}` : ''}`];
     }
+    case 'browser': {
+      const p = e.payload as BrowserActionPayload;
+      const lines = [`- 🌐 **Browser** (${p.role ?? 'agent'}): ${p.detail}${p.status === 'failed' ? ' — **failed**' : ''}${p.durationMs ? ` · ${fmtDur(p.durationMs)}` : ''}`];
+      if (p.url) lines.push(`  - \`${p.url}\`${p.title ? ` — ${p.title}` : ''}`);
+      if (p.value) lines.push(`  - value: \`${p.value}\``);
+      if (p.error) lines.push(`  - error: ${p.error}`);
+      if (p.screenshotFile) lines.push(`  - screenshot: \`shots/${chatId}/${p.screenshotFile}\` (embedded in the HTML export)`);
+      if (p.console?.length) lines.push(...p.console.map((c) => `  - console [${c.level}]: ${c.text}`));
+      return lines;
+    }
     default:
       return [`- (${(e as ChatEvent).kind})`];
   }
@@ -133,7 +146,7 @@ function escapeHtml(s: string): string {
 }
 
 export function toHtml(b: ExportBundle): string {
-  const rows = b.events.map((e) => eventToHtml(e)).join('\n');
+  const rows = b.events.map((e) => eventToHtml(e, b.chat.id)).join('\n');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -194,7 +207,7 @@ function diffToHtml(diff: string): string {
   }).join('\n');
 }
 
-function eventToHtml(e: ChatEvent): string {
+function eventToHtml(e: ChatEvent, chatId: string): string {
   const t = fmtTime(e.ts);
   switch (e.kind) {
     case 'user_message': {
@@ -257,6 +270,26 @@ ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
     case 'error': {
       const p = e.payload as any;
       return `<div class="ev"><span class="err">✕ ${escapeHtml(p.message)}</span>${p.detail ? `<div class="kv">${escapeHtml(p.detail)}</div>` : ''}</div>`;
+    }
+    case 'browser': {
+      const p = e.payload as BrowserActionPayload;
+      let img = '';
+      if (p.screenshotFile) {
+        try {
+          const data = fs.readFileSync(path.join(shotsDir, chatId, p.screenshotFile));
+          img = `<div><img src="data:image/jpeg;base64,${data.toString('base64')}" style="max-width:100%;border:1px solid #24272d;border-radius:8px;margin-top:6px"></div>`;
+        } catch {
+          img = `<div class="kv">screenshot file missing: ${escapeHtml(p.screenshotFile)}</div>`;
+        }
+      }
+      return `<div class="ev"><details${p.status === 'failed' || p.screenshotFile ? ' open' : ''}><summary>🌐 Browser (${escapeHtml(p.role ?? 'agent')}) · ${escapeHtml(p.detail)}${p.status === 'failed' ? ' · <span class="err">failed</span>' : ''}${p.durationMs ? ` · ${fmtDur(p.durationMs)}` : ''}</summary><div class="body">
+${p.url ? `<div class="kv"><code>${escapeHtml(p.url)}</code>${p.title ? ` — ${escapeHtml(p.title)}` : ''}</div>` : ''}
+${p.viewport ? `<div class="kv">viewport ${p.viewport.width}×${p.viewport.height}${p.viewport.deviceScaleFactor && p.viewport.deviceScaleFactor !== 1 ? ` @${p.viewport.deviceScaleFactor}x` : ''}</div>` : ''}
+${p.value ? `<div class="kv">value <code>${escapeHtml(p.value)}</code></div>` : ''}
+${p.error ? `<div class="kv err">${escapeHtml(p.error)}</div>` : ''}
+${p.console?.length ? `<pre>${escapeHtml(p.console.map((c) => `[${c.level}] ${c.text}`).join('\n'))}</pre>` : ''}
+${img}
+</div></details></div>`;
     }
     default:
       return '';

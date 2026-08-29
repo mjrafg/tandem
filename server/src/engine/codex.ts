@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { AiUsage, Effort } from '../../../shared/types';
 import { config, internalBase, shotsDir } from '../config';
 import { addEvent, updateEvent } from '../events';
+import { catalogForRole, hasIntegrationTools } from '../integrations/exec';
 import { spawnStreaming } from './procs';
 import { servedToolRecord, toolTextEnv } from '../toolText';
 import type { RunHandle } from './run';
@@ -93,10 +94,25 @@ export async function runCodexReview(h: RunHandle, opts: {
       '-c', 'mcp_servers.tandem_browser.tool_timeout_sec=120',
     );
   }
+  // integration tools the admin has allowed for the reviewer role (the gateway
+  // executes nothing itself — Tandem's execution layer enforces role access
+  // again server-side, so this stays true even if the flag were tampered with)
+  const extScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'mcp-integrations.cjs');
+  const serveExt = fs.existsSync(extScript) && hasIntegrationTools('reviewer');
+  if (serveExt) {
+    args.push(
+      '-c', `mcp_servers.tandem_ext.command="${process.execPath}"`,
+      '-c', `mcp_servers.tandem_ext.args=["${extScript}"]`,
+      '-c', 'mcp_servers.tandem_ext.tool_timeout_sec=120',
+    );
+  }
 
   const cliShown = `${config.codexBin} ${args.join(' ')}`;
   const startedAt = Date.now();
-  const servedTools = fs.existsSync(browserScript) ? await servedToolRecord(['tandem_browser']) : [];
+  const servedTools = [
+    ...(fs.existsSync(browserScript) ? await servedToolRecord(['tandem_browser']) : []),
+    ...(serveExt ? catalogForRole('reviewer').map((t) => ({ name: t.name, description: t.description })) : []),
+  ];
   const aiCall = addEvent(h.chat.id, 'ai_call', {
     role: 'reviewer',
     provider: 'codex',
@@ -177,6 +193,7 @@ export async function runCodexReview(h: RunHandle, opts: {
       TANDEM_INTERNAL_TOKEN: config.internalToken,
       TANDEM_SHOTS_DIR: shotsDir,
       TANDEM_BROWSER_ROLE: 'reviewer',
+      TANDEM_ROLE: 'reviewer',
       TANDEM_TOOL_TEXT: toolTextEnv(),
     },
     stdinData: opts.prompt,

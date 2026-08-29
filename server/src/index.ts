@@ -8,6 +8,7 @@ import { authHook, ensureUser, setPassword } from './auth';
 import { config } from './config';
 import { registerRoutes } from './routes';
 import { registerProjectRoutes } from './projectRoutes';
+import { registerIntegrationRoutes } from './integrationRoutes';
 import { recoverInterruptedRuns } from './engine/run';
 import { backfillModelWindows } from './context';
 import { seedIfEmpty } from './mock/seed';
@@ -48,6 +49,7 @@ async function main(): Promise<void> {
   app.addHook('onRequest', authHook);
 
   registerRoutes(app);
+  registerIntegrationRoutes(app);
   registerProjectRoutes(app);
 
   // ---------------------------------------------------------------- SPA

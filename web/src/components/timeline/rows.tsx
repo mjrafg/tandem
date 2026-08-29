@@ -1,12 +1,12 @@
 import {
   AlertTriangle, Archive, Braces, Camera, CircleCheck, CircleSlash, Clock, CloudUpload, FileDiff, FileText,
   GitBranch, GitCommitHorizontal, GitMerge, Globe, Keyboard, ListTree, MousePointerClick, MoveVertical,
-  OctagonX, Scan, Search as SearchIcon, Sparkles, SquareTerminal, Terminal,
+  OctagonX, Plug, Scan, Search as SearchIcon, Sparkles, SquareTerminal, Terminal,
 } from 'lucide-react';
 import { useState } from 'react';
 import type {
   AiCallPayload, BrowserActionPayload, ChatEvent, CheckpointPayload, CommandPayload, CompactionPayload, ErrorPayload,
-  FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, StatusPayload,
+  FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, StatusPayload, ToolCallPayload,
 } from '@shared/types';
 import { fmtDuration, fmtTokens, plural } from '../../lib/format';
 import { DiffView } from '../DiffView';
@@ -293,6 +293,51 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
         ))}
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- integration tool call
+
+export function ToolCallRow({ ev }: { ev: ChatEvent }) {
+  const p = ev.payload as ToolCallPayload;
+  const failed = p.status === 'failed';
+  const argsText = JSON.stringify(p.args ?? {});
+  return (
+    <ActivityRow
+      icon={<Plug size={14} />}
+      tone={failed ? 'error' : 'default'}
+      label={
+        <span>
+          Tool · <span className="mono text-[12.5px]">{p.tool}</span>
+          {p.status === 'running' && <span className="ml-2 text-dim">running…</span>}
+        </span>
+      }
+      meta={`${p.integration}${p.durationMs != null ? ` · ${fmtDuration(p.durationMs)}` : ''}`}
+    >
+      <div className="space-y-2.5">
+        <div className="rounded-lg border border-linesoft bg-bg1 px-3 py-2">
+          <KV k="integration" v={`${p.integration} (${p.integrationType})`} />
+          <KV k="role" v={p.role} />
+          <KV k="status" v={p.status} />
+          {p.durationMs != null && <KV k="duration" v={fmtDuration(p.durationMs)} />}
+        </div>
+        <div className="rounded-lg border border-linesoft bg-bg1 px-3 py-2">
+          <div className="mb-1 text-[11.5px] font-medium uppercase tracking-wide text-dim">Arguments</div>
+          <pre className="mono max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[12px] leading-[1.55] text-[#c3c9d4]">{argsText}</pre>
+        </div>
+        {p.error && (
+          <div className="rounded-lg border border-err/25 bg-err/[0.06] px-3 py-2 text-[12.5px] text-[#ffb3ae]">{p.error}</div>
+        )}
+        {p.resultPreview && (
+          <div className="rounded-lg border border-linesoft bg-bg1 px-3 py-2">
+            <div className="mb-1 text-[11.5px] font-medium uppercase tracking-wide text-dim">
+              Result{(p.resultBytes ?? 0) > p.resultPreview.length ? ` · preview of ${fmtTokens(p.resultBytes!)} chars` : ''}
+            </div>
+            <pre className="mono max-h-72 overflow-y-auto whitespace-pre-wrap break-words text-[12px] leading-[1.55] text-[#c3c9d4]">{p.resultPreview}</pre>
+          </div>
+        )}
+      </div>
+    </ActivityRow>
   );
 }
 

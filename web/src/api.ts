@@ -1,5 +1,6 @@
 import type {
-  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, DirListing, GitStatus, Project, PromptEntry, ToolInfo,
+  AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
+  DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, PromptEntry, RoleName, Skill, ToolInfo,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -72,6 +73,42 @@ export const api = {
 
   // context — provider-native compaction of the chat's active session
   compact: (id: string) => j<CompactOutcome>(`/api/chats/${id}/compact`, { method: 'POST' }),
+
+  // credentials (secret material is write-only — never returned)
+  credentials: () => j<CredentialMeta[]>('/api/credentials'),
+  credentialFields: (type: CredentialType) => j<{ fields: string[] }>(`/api/credentials/fields/${type}`),
+  createCredential: (name: string, type: CredentialType, data: Record<string, string>) =>
+    j<CredentialMeta>('/api/credentials', { method: 'POST', body: JSON.stringify({ name, type, data }) }),
+  updateCredential: (id: string, patch: { name?: string; data?: Record<string, string> }) =>
+    j<CredentialMeta>(`/api/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteCredential: (id: string) => j<{ ok: true }>(`/api/credentials/${id}`, { method: 'DELETE' }),
+
+  // integrations
+  integrations: () => j<Integration[]>('/api/integrations'),
+  createIntegration: (body: { name: string; type: IntegrationType; config: unknown; credentialId?: string | null }) =>
+    j<Integration>('/api/integrations', { method: 'POST', body: JSON.stringify(body) }),
+  updateIntegration: (id: string, patch: Record<string, unknown>) =>
+    j<Integration>(`/api/integrations/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteIntegration: (id: string) => j<{ ok: true }>(`/api/integrations/${id}`, { method: 'DELETE' }),
+  testIntegration: (id: string) => j<{ ok: boolean; detail: string; integration: Integration }>(`/api/integrations/${id}/test`, { method: 'POST' }),
+  refreshIntegrationTools: (id: string) =>
+    j<{ ok: boolean; discovered: number; integration: Integration }>(`/api/integrations/${id}/refresh-tools`, { method: 'POST' }),
+  updateIntegrationTool: (id: string, toolId: string, patch: { description?: string; enabled?: boolean; roles?: RoleName[] }) =>
+    j<IntegrationTool>(`/api/integrations/${id}/tools/${toolId}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  createIntegrationTool: (id: string, body: unknown) =>
+    j<IntegrationTool>(`/api/integrations/${id}/tools`, { method: 'POST', body: JSON.stringify(body) }),
+  replaceIntegrationTool: (id: string, toolId: string, body: unknown) =>
+    j<IntegrationTool>(`/api/integrations/${id}/tools/${toolId}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteIntegrationTool: (id: string, toolId: string) =>
+    j<{ ok: true }>(`/api/integrations/${id}/tools/${toolId}`, { method: 'DELETE' }),
+  integrationsExportUrl: '/api/integrations/export',
+  importIntegrations: (data: unknown) =>
+    j<{ imported: string[]; skipped: string[]; missingCredentials: string[]; integrations: Integration[] }>(
+      '/api/integrations/import', { method: 'POST', body: JSON.stringify(data) }),
+
+  // skills
+  skills: () => j<Skill[]>('/api/skills'),
+  saveSkills: (skills: Skill[]) => j<{ skills: Skill[] }>('/api/skills', { method: 'PUT', body: JSON.stringify({ skills }) }),
 
   // AI prompts
   prompts: () => j<PromptEntry[]>('/api/prompts'),

@@ -8,6 +8,7 @@ import {
 } from '../events';
 import { spawnStreaming } from './procs';
 import { recordModelWindow } from '../context';
+import { catalogForRole, hasIntegrationTools } from '../integrations/exec';
 import { servedToolRecord, toolTextEnv } from '../toolText';
 import type { RunHandle } from './run';
 
@@ -59,6 +60,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     const distDir = path.dirname(process.argv[1] ?? '.');
     const workdirScript = path.resolve(distDir, 'mcp-workdir.cjs');
     const browserScript = path.resolve(distDir, 'mcp-browser.cjs');
+    const extScript = path.resolve(distDir, 'mcp-integrations.cjs');
     const mcpServers: Record<string, unknown> = {};
     // Tandem env (chat id, internal token, shots dir) is inherited from this
     // process's environment by the stdio servers.
@@ -67,6 +69,12 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     }
     if (fs.existsSync(browserScript)) {
       mcpServers.tandem_browser = { type: 'stdio', command: process.execPath, args: [browserScript] };
+    }
+    // Admin-configured integration tools, served through the gateway (the
+    // gateway loads the role-filtered catalog fresh on every invocation, so
+    // new integrations become available without any Tandem restart)
+    if (fs.existsSync(extScript) && hasIntegrationTools(opts.role)) {
+      mcpServers.tandem_ext = { type: 'stdio', command: process.execPath, args: [extScript] };
     }
     if (Object.keys(mcpServers).length > 0) {
       mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
@@ -77,7 +85,12 @@ export async function runClaudeTurn(h: RunHandle, opts: {
 
   const cliShown = `${config.claudeBin} ${args.map((a) => (a.length > 60 ? `${a.slice(0, 57)}…` : a)).join(' ')}`;
   const startedAt = Date.now();
-  const servedTools = opts.withTandemTools ? await servedToolRecord(['tandem', 'tandem_browser']) : [];
+  const servedTools = opts.withTandemTools
+    ? [
+      ...await servedToolRecord(['tandem', 'tandem_browser']),
+      ...catalogForRole(opts.role).map((t) => ({ name: t.name, description: t.description })),
+    ]
+    : [];
   const aiCall = addEvent(h.chat.id, 'ai_call', {
     role: opts.role,
     provider: 'claude-code',
@@ -236,6 +249,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       TANDEM_INTERNAL_TOKEN: config.internalToken,
       TANDEM_SHOTS_DIR: shotsDir,
       TANDEM_BROWSER_ROLE: opts.role,
+      TANDEM_ROLE: opts.role,
       TANDEM_TOOL_TEXT: toolTextEnv(),
     },
     stdinData: opts.message,

@@ -84,7 +84,8 @@ export type EventKind =
   | 'run'
   | 'error'
   | 'browser'
-  | 'checkpoint';
+  | 'checkpoint'
+  | 'tool_call';
 
 export type StepStatus = 'running' | 'done' | 'failed' | 'stopped';
 
@@ -232,6 +233,22 @@ export interface BrowserActionPayload {
   role?: string;
 }
 
+/** an AI invocation of an integration-backed tool, executed by Tandem (args/results sanitized — never credentials) */
+export interface ToolCallPayload {
+  tool: string;
+  integration: string;
+  integrationType: IntegrationType;
+  role: string;
+  args: Record<string, unknown>;
+  status: StepStatus;
+  /** truncated, sanitized result preview stored with the event */
+  resultPreview?: string;
+  resultBytes?: number;
+  error?: string;
+  startedAt: number;
+  durationMs?: number;
+}
+
 export interface CheckpointPayload {
   /** commit = Tandem checkpoint · preserve = uncommitted work saved before branch adoption · merge / push */
   action: 'commit' | 'preserve' | 'merge' | 'push';
@@ -257,6 +274,7 @@ export type EventPayloadMap = {
   error: ErrorPayload;
   browser: BrowserActionPayload;
   checkpoint: CheckpointPayload;
+  tool_call: ToolCallPayload;
 };
 
 export interface ChatEvent<K extends EventKind = EventKind> {
@@ -368,6 +386,141 @@ export interface ToolInfo {
   description: string;
   customized: boolean;
   params: ToolParamInfo[];
+  /** built-in Tandem MCP server tool vs. Admin-configured integration tool */
+  source?: 'builtin' | 'integration';
+  integrationId?: string;
+  toolId?: string;
+  enabled?: boolean;
+  /** integration tools: roles are editable checkboxes, enforced at serve+execute time */
+  rolesEditable?: boolean;
+}
+
+// ---------------------------------------------------------------- integrations
+
+export type IntegrationType = 'mcp' | 'openapi' | 'http' | 'ssh';
+
+export type CredentialType =
+  | 'bearer_token'    // Authorization: Bearer <token>
+  | 'api_key_header'  // <header>: <value>
+  | 'basic_auth'      // Authorization: Basic base64(user:pass)
+  | 'header_set'      // arbitrary secret headers
+  | 'env_set'         // secret env vars for stdio MCP servers
+  | 'ssh_private_key';
+
+/** credential metadata — secret material never leaves the server */
+export interface CredentialMeta {
+  id: string;
+  name: string;
+  type: CredentialType;
+  createdAt: number;
+  updatedAt: number;
+  /** integration names currently referencing this credential */
+  usedBy: string[];
+}
+
+export interface HttpToolParam {
+  name: string;
+  type: 'string' | 'number' | 'boolean' | 'json';
+  in: 'path' | 'query' | 'body';
+  required: boolean;
+  description?: string;
+}
+
+/** execution facts for one tool — immutable through description editing */
+export interface IntegrationToolSpec {
+  kind: 'http' | 'mcp' | 'ssh';
+  // http / openapi-derived
+  method?: string;
+  path?: string;
+  baseUrl?: string;
+  fixedQuery?: Record<string, string>;
+  fixedHeaders?: Record<string, string>;
+  bodyMode?: 'none' | 'json';
+  params?: HttpToolParam[];
+  // mcp: the tool's name on the remote server
+  remoteName?: string;
+  // ssh
+  op?: 'execute' | 'read_file' | 'list_directory';
+}
+
+export interface IntegrationTool {
+  id: string;
+  integrationId: string;
+  /** short name within the integration */
+  name: string;
+  /** globally unique served name: <integration slug>_<name> */
+  fullName: string;
+  description: string;
+  defaultDescription: string;
+  paramsSchema: { properties: Record<string, unknown>; required: string[] };
+  spec: IntegrationToolSpec;
+  enabled: boolean;
+  roles: RoleName[];
+  /** discovery no longer returns this tool (kept so settings are not lost silently) */
+  missing?: boolean;
+}
+
+export interface McpIntegrationConfig {
+  transport: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
+  /** non-secret env for stdio servers (secrets belong in an env_set credential) */
+  env?: Record<string, string>;
+  url?: string;
+  /** non-secret headers for http servers (secrets belong in a credential) */
+  headers?: Record<string, string>;
+}
+
+export interface OpenApiIntegrationConfig {
+  specSource: 'url' | 'pasted';
+  specUrl?: string;
+  /** stored spec text (pasted/uploaded, or the last fetched copy) */
+  specText?: string;
+  baseUrl?: string;
+  specTitle?: string;
+}
+
+export interface HttpIntegrationConfig {
+  baseUrl: string;
+  /** non-secret headers sent with every tool of this integration */
+  headers?: Record<string, string>;
+}
+
+export interface SshIntegrationConfig {
+  host: string;
+  port?: number;
+  user: string;
+  defaultDir?: string;
+}
+
+export interface Integration {
+  id: string;
+  slug: string;
+  name: string;
+  type: IntegrationType;
+  enabled: boolean;
+  credentialId: string | null;
+  credentialName?: string | null;
+  config: McpIntegrationConfig | OpenApiIntegrationConfig | HttpIntegrationConfig | SshIntegrationConfig;
+  createdAt: number;
+  updatedAt: number;
+  lastTestAt?: number | null;
+  lastTestOk?: boolean | null;
+  lastTestError?: string | null;
+  tools: IntegrationTool[];
+}
+
+// ---------------------------------------------------------------- skills
+
+/** named instruction set appended to a role's system text when enabled */
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  enabled: boolean;
+  roles: RoleName[];
+  updatedAt: number;
 }
 
 // ---------------------------------------------------------------- SSE

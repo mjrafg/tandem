@@ -5,7 +5,10 @@ import type { AppSettings, Effort, Provider, RoleConfig, RoleName } from '@share
 import { api } from '../../api';
 import { useStore } from '../../store';
 import { Field, MenuButton, Modal, SelectBox, Spinner, Toggle } from '../ui';
+import { CredentialsSection } from './CredentialsSection';
+import { IntegrationsSection } from './IntegrationsSection';
 import { PromptsSection } from './PromptsSection';
+import { SkillsSection } from './SkillsSection';
 import { ToolsSection } from './ToolsSection';
 
 const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
@@ -123,6 +126,18 @@ export function SettingsView() {
         {/* ------------------------------------------------ AI tools */}
         <SectionTitle>AI Tools</SectionTitle>
         <ToolsSection />
+
+        {/* ------------------------------------------------ skills */}
+        <SectionTitle>Skills</SectionTitle>
+        <SkillsSection />
+
+        {/* ------------------------------------------------ integrations */}
+        <SectionTitle>Integrations</SectionTitle>
+        <IntegrationsSection />
+
+        {/* ------------------------------------------------ credentials */}
+        <SectionTitle>Credentials</SectionTitle>
+        <CredentialsSection />
 
         {/* ------------------------------------------------ context */}
         <SectionTitle>Context</SectionTitle>

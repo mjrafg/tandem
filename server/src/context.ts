@@ -73,6 +73,8 @@ export function estimateEventTokens(e: ChatEvent): number {
         + Math.min(estimateTokens((p.console ?? []).map((c: any) => c.text).join(' ')), 300);
     case 'checkpoint':
       return 30 + Math.min((p.files?.length ?? 0) * 4, 200);
+    case 'tool_call':
+      return 60 + estimateTokens(JSON.stringify(p.args ?? {})) + estimateTokens(p.resultPreview);
     default:
       return 0;
   }

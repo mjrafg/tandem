@@ -150,6 +150,23 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       lines.push('', '</details>');
       return lines;
     }
+    case 'tool_call': {
+      const p = e.payload as any;
+      const icon = p.status === 'failed' ? '⚠️' : '🔌';
+      const lines = [
+        `<details><summary>${icon} <b>Tool</b> · \`${p.tool}\` · ${p.integration} (${p.integrationType}) · ${p.status}${p.durationMs != null ? ` · ${fmtDur(p.durationMs)}` : ''}</summary>`,
+        '',
+        `- Role: ${p.role}`,
+        `- Arguments: \`${JSON.stringify(p.args ?? {})}\``,
+      ];
+      if (p.error) lines.push(`- Error: ${p.error}`);
+      if (p.resultPreview) {
+        lines.push('', '**Result:**', '', '```', p.resultPreview, '```');
+        if ((p.resultBytes ?? 0) > p.resultPreview.length) lines.push(`_(preview — full result was ${p.resultBytes} characters)_`);
+      }
+      lines.push('', '</details>');
+      return lines;
+    }
     case 'error': {
       const p = e.payload as any;
       return [`🛑 **Error** (${p.source ?? 'app'}): ${p.message}${p.detail ? `\n\n> ${p.detail}` : ''}`];
@@ -316,6 +333,15 @@ ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
 ${p.sessionId ? `<div class="kv">session <code>${escapeHtml(p.sessionId)}</code> · continues unchanged</div>` : ''}
 ${p.preserved?.length ? `<h4>Preserved</h4><ul>${p.preserved.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : ''}
 ${p.summary ? `<h4>Compacted context (legacy Compactor call)</h4><pre>${escapeHtml(p.summary)}</pre>` : ''}</div></details></div>`;
+    }
+    case 'tool_call': {
+      const p = e.payload as any;
+      return `<div class="ev"><details><summary>🔌 Tool · <code>${escapeHtml(p.tool)}</code> · ${escapeHtml(p.integration)} (${escapeHtml(p.integrationType)}) · ${p.status}${p.durationMs != null ? ` · ${fmtDur(p.durationMs)}` : ''}</summary><div class="body">
+<div class="kv">role ${escapeHtml(p.role)} · ${t}</div>
+<h4>Arguments</h4><pre>${escapeHtml(JSON.stringify(p.args ?? {}, null, 2))}</pre>
+${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
+${p.resultPreview ? `<h4>Result${(p.resultBytes ?? 0) > p.resultPreview.length ? ` (preview of ${p.resultBytes} chars)` : ''}</h4><pre>${escapeHtml(p.resultPreview)}</pre>` : ''}
+</div></details></div>`;
     }
     case 'error': {
       const p = e.payload as any;

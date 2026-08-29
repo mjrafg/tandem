@@ -405,6 +405,7 @@ export function builderSystemText(settings: AppSettings, role: 'builder' | 'fina
   if (settings.sharedInstructions.trim()) parts.push(settings.sharedInstructions.trim());
   const extra = role === 'final_repair' ? settings.finalRepairInstructions : settings.roles.builder.instructions;
   if (extra.trim()) parts.push(extra.trim());
+  parts.push(...skillTexts('builder'));
   parts.push([
     getPrompt('builder.environment'),
     getPrompt('builder.workdir_guidance'),
@@ -419,8 +420,17 @@ export function reviewerSystemText(settings: AppSettings): string {
   const parts = [getPrompt('reviewer.base')];
   if (settings.sharedInstructions.trim()) parts.push(settings.sharedInstructions.trim());
   if (settings.roles.reviewer.instructions.trim()) parts.push(settings.roles.reviewer.instructions.trim());
+  parts.push(...skillTexts('reviewer'));
   parts.push([getPrompt('reviewer.browser_guidance'), getPrompt('reviewer.network_guidance')].join('\n'));
   return parts.join('\n\n');
+}
+
+/** Admin → Skills: enabled instruction sets for a role, appended verbatim */
+function skillTexts(role: 'builder' | 'reviewer'): string[] {
+  const list = kvGet<{ name: string; instructions: string; enabled: boolean; roles: string[] }[]>('skills') ?? [];
+  return list
+    .filter((s) => s.enabled && s.roles.includes(role) && s.instructions.trim())
+    .map((s) => `# Skill: ${s.name}\n${s.instructions.trim()}`);
 }
 
 /** Admin "effective prompt" preview — the real assembly plus template skeletons. */

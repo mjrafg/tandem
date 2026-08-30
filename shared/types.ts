@@ -233,11 +233,13 @@ export interface BrowserActionPayload {
   role?: string;
 }
 
-/** an AI invocation of an integration-backed tool, executed by Tandem (args/results sanitized — never credentials) */
+/** an AI invocation of a Tandem-executed tool (integration-backed or built-in); args/results sanitized — never credentials */
 export interface ToolCallPayload {
   tool: string;
+  /** the source shown in the timeline: an integration name, or "Project Memory" */
   integration: string;
-  integrationType: IntegrationType;
+  /** absent for Tandem's own built-in tools */
+  integrationType?: IntegrationType;
   role: string;
   args: Record<string, unknown>;
   status: StepStatus;
@@ -508,6 +510,22 @@ export interface Integration {
   lastTestOk?: boolean | null;
   lastTestError?: string | null;
   tools: IntegrationTool[];
+}
+
+// ---------------------------------------------------------------- project memory
+
+/**
+ * Shared knowledge belonging to a PROJECT (the existing projects row), not to a
+ * chat: every chat of that project reads and writes the same set.
+ */
+export interface ProjectMemory {
+  id: string;
+  projectId: string;
+  title: string;
+  content: string;
+  tags: string[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 // ---------------------------------------------------------------- skills

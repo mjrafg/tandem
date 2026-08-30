@@ -15,6 +15,10 @@ import {
 } from './events';
 import { toHtml, toMarkdown, type ExportBundle } from './exporter';
 import { performNativeCompaction } from './engine/providerContext';
+import {
+  allMemories, createMemory, getMemory, listMemories, searchMemories, toToolShape,
+  toJson as toMemoryJson, toMarkdown as toMemoryMarkdown, toPlainText as toMemoryText,
+} from './projectMemory';
 import { activeCtx } from './engine/run';
 import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
@@ -206,6 +210,106 @@ export function registerRoutes(app: FastifyInstance): void {
     if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
     const result = await setGitWorkflow(chatId ?? '', { mode, target_branch, push });
     return result.ok ? result : reply.code(400).send(result);
+  });
+
+  /**
+   * Project Memory for the Builder. The project is resolved from the calling
+   * chat — the model never supplies a project id, so a call cannot reach
+   * another project's memory even with a valid id from elsewhere. Refused
+   * outright while a review is running: the Reviewer must stay independent.
+   */
+  app.post('/api/internal/project-memory', async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, any>;
+    if (b.token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const chat = getChat(String(b.chatId ?? ''));
+    if (!chat) return reply.code(404).send({ ok: false, error: 'Unknown chat.' });
+    if (activeCtx(chat.id)?.phase === 'reviewer') {
+      return reply.code(403).send({ ok: false, error: 'Project Memory is not available to the Reviewer.' });
+    }
+    const projectId = chat.projectId;
+    const started = Date.now();
+    const op = String(b.op ?? '');
+    const args: Record<string, unknown> = {};
+    for (const k of ['query', 'limit', 'memory_id', 'title', 'tags']) if (b[k] !== undefined) args[k] = b[k];
+    if (b.content !== undefined) args.content = String(b.content).slice(0, 200);
+
+    const record = (status: 'done' | 'failed', text: string, error?: string) => {
+      addEvent(chat.id, 'tool_call', {
+        tool: `project_memory_${op}`,
+        integration: 'Project Memory',
+        role: 'builder',
+        args,
+        status,
+        resultPreview: text.slice(0, 4_000),
+        resultBytes: text.length,
+        ...(error ? { error } : {}),
+        startedAt: started,
+        durationMs: Date.now() - started,
+      });
+    };
+
+    try {
+      let text: string;
+      if (op === 'search') {
+        const found = searchMemories(projectId, String(b.query ?? ''), b.limit);
+        text = found.length === 0
+          ? `No project memories match "${String(b.query ?? '')}".`
+          : `${found.length} project ${found.length === 1 ? 'memory' : 'memories'} matched:\n${JSON.stringify(found.map(toToolShape), null, 2)}`;
+      } else if (op === 'list') {
+        const all = listMemories(projectId, b.limit);
+        text = all.length === 0
+          ? 'This project has no stored memories yet.'
+          : `${all.length} stored:\n${JSON.stringify(all.map(toToolShape), null, 2)}`;
+      } else if (op === 'get') {
+        const one = getMemory(projectId, String(b.memory_id ?? ''));
+        if (!one) {
+          const msg = 'No memory with that id exists in this project.';
+          record('failed', msg, msg);
+          return { ok: true, text: msg };
+        }
+        text = JSON.stringify(toToolShape(one), null, 2);
+      } else if (op === 'create') {
+        const made = createMemory(projectId, { title: b.title, content: b.content, tags: b.tags });
+        text = `Stored in this project's memory (memory_id ${made.id}). Every chat in this project can now find it.`;
+      } else {
+        return reply.code(400).send({ ok: false, error: `Unknown project memory operation: ${op}` });
+      }
+      record('done', text);
+      return { ok: true, text };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      record('failed', message, message);
+      return reply.code(400).send({ ok: false, error: message });
+    }
+  });
+
+  // ------------------------------------------------- project memory (UI)
+
+  app.get('/api/projects/:id/memories', async (req, reply) => {
+    const project = getProject((req.params as any).id);
+    if (!project) return reply.code(404).send({ error: 'Project not found.' });
+    const memories = allMemories(project.id);
+    return { projectId: project.id, count: memories.length, memories };
+  });
+
+  app.get('/api/projects/:id/memories/export', async (req, reply) => {
+    const project = getProject((req.params as any).id);
+    if (!project) return reply.code(404).send({ error: 'Project not found.' });
+    const format = String((req.query as any)?.format ?? 'md');
+    const memories = allMemories(project.id);
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'json') {
+      reply.header('Content-Type', 'application/json; charset=utf-8');
+      reply.header('Content-Disposition', `attachment; filename="project-memory-${stamp}.json"`);
+      return reply.send(toMemoryJson(project.id, memories));
+    }
+    if (format === 'text') {
+      reply.header('Content-Type', 'text/plain; charset=utf-8');
+      return reply.send(toMemoryText(memories));
+    }
+    reply.header('Content-Type', 'text/markdown; charset=utf-8');
+    reply.header('Content-Disposition', `attachment; filename="project-memory-${stamp}.md"`);
+    return reply.send(toMemoryMarkdown(memories));
   });
 
   app.post('/api/internal/browser-event', async (req, reply) => {

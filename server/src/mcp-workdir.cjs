@@ -3,8 +3,13 @@
  * Tandem's MCP stdio server for app-state capabilities offered to the Builder:
  *   - tandem_set_working_dir: re-point the chat's active working directory
  *   - tandem_set_git_workflow: update the chat's persistent Git policy
+ *   - project_memory_*: the project's shared memory (Builder only)
  * Tool calls are forwarded to the Tandem app on localhost (token-authed),
  * which validates, persists, and records the change in the timeline.
+ *
+ * This server is configured only for Builder/final-repair invocations, so the
+ * Reviewer is never served these tools; the app additionally refuses memory
+ * calls made while a review is running.
  */
 'use strict';
 
@@ -44,6 +49,55 @@ const TOOLS = [
         target_branch: { type: 'string', description: 'Branch that auto-merge/direct mode targets (must exist). Defaults to the current target.' },
         push: { type: 'string', enum: ['auto', 'never'], description: 'Whether completed work is pushed to origin. Only set when the user clearly authorized ongoing pushing (or revoked it).' },
       },
+    },
+  },
+  {
+    name: 'project_memory_search',
+    description: [
+      'Search this project\'s shared memory — notes kept about the project itself (architecture decisions, conventions, constraints, gotchas).',
+      'Plain case-insensitive text matching over title, content and tags. Optional: call it when project knowledge would help; nothing is retrieved automatically.',
+      'The memory belongs to the project, so every chat in this project sees the same entries.',
+    ].join(' '),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Words to look for in the memory titles, content and tags.' },
+        limit: { type: 'number', description: 'Maximum number of memories to return (default 20, max 50).' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'project_memory_list',
+    description: 'List this project\'s stored memories, most recently updated first. Useful to see what the project already knows before searching for something specific.',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'number', description: 'Maximum number of memories to return (default 20, max 50).' } },
+    },
+  },
+  {
+    name: 'project_memory_get',
+    description: 'Read one memory of this project in full, by the memory_id returned from a search or list.',
+    inputSchema: {
+      type: 'object',
+      properties: { memory_id: { type: 'string', description: 'The memory_id from project_memory_search or project_memory_list.' } },
+      required: ['memory_id'],
+    },
+  },
+  {
+    name: 'project_memory_create',
+    description: [
+      'Record one durable fact about this project that would help future work — an architectural decision, a convention, a constraint, a hard-won gotcha.',
+      'Write it only when the knowledge outlives the current task; do not log task progress, summaries, or anything already obvious from the code.',
+    ].join(' '),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short name for the fact, e.g. "Auth architecture".' },
+        content: { type: 'string', description: 'The fact itself, stated plainly in a sentence or two.' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'A few lowercase keywords for retrieval, e.g. ["auth", "jwt"].' },
+      },
+      required: ['title', 'content'],
     },
   },
 ];
@@ -104,6 +158,23 @@ async function callTool(name, args) {
       return { content: [{ type: 'text', text: `Could not update the Git workflow: ${body.error || 'error'}` }], isError: true };
     }
     return { content: [{ type: 'text', text: `Git workflow updated and persisted for this chat: ${body.summary}` }] };
+  }
+  if (name.startsWith('project_memory_')) {
+    // the app resolves the project from this chat — no project id is accepted
+    // from the model, so a call can only ever touch its own project's memory
+    const { httpOk, body } = await post('/project-memory', {
+      op: name.replace('project_memory_', ''),
+      query: args.query,
+      limit: args.limit,
+      memory_id: args.memory_id,
+      title: args.title,
+      content: args.content,
+      tags: args.tags,
+    });
+    if (!httpOk || body.ok === false) {
+      return { content: [{ type: 'text', text: `Project memory: ${body.error || 'error'}` }], isError: true };
+    }
+    return { content: [{ type: 'text', text: body.text }] };
   }
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
 }

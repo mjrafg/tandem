@@ -271,13 +271,21 @@ async function review(h: RunHandle, userText: string, subject: ReviewSubject, ro
     getPrompt('reviewer.output_format'),
   ].join('\n\n');
 
-  const result = await runCodexReview(h, {
-    model: cfg.model,
-    effort: cfg.effort,
-    prompt: `${reviewerSystemText(h.settings)}\n\n${prompt}`,
-    cwd: h.project.rootPath,
-    timeoutMs: REVIEW_TIMEOUT,
-  });
+  // mark the phase so Builder-only app-state tools are refused server-side
+  // while the Reviewer is the one running
+  h.ctx.phase = 'reviewer';
+  let result;
+  try {
+    result = await runCodexReview(h, {
+      model: cfg.model,
+      effort: cfg.effort,
+      prompt: `${reviewerSystemText(h.settings)}\n\n${prompt}`,
+      cwd: h.project.rootPath,
+      timeoutMs: REVIEW_TIMEOUT,
+    });
+  } finally {
+    h.ctx.phase = 'builder';
+  }
   if (h.stopped) return null;
   if (!result.ok) {
     h.error({ message: 'Reviewer could not run', detail: result.error, source: 'reviewer', retryable: true });

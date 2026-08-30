@@ -316,7 +316,7 @@ export function ToolCallRow({ ev }: { ev: ChatEvent }) {
     >
       <div className="space-y-2.5">
         <div className="rounded-lg border border-linesoft bg-bg1 px-3 py-2">
-          <KV k="integration" v={`${p.integration} (${p.integrationType})`} />
+          <KV k="source" v={p.integrationType ? `${p.integration} (${p.integrationType})` : p.integration} />
           <KV k="role" v={p.role} />
           <KV k="status" v={p.status} />
           {p.durationMs != null && <KV k="duration" v={fmtDuration(p.durationMs)} />}

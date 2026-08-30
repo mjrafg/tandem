@@ -8,6 +8,7 @@ import { Composer } from './Composer';
 import { ContextBanner, ContextMeter } from './ContextMeter';
 import { ExportMenu } from './ExportMenu';
 import { GitChip } from './GitChip';
+import { ProjectMemoryMenu } from './ProjectMemoryMenu';
 import { Timeline } from './timeline/Timeline';
 import { MenuButton, Spinner } from './ui';
 
@@ -144,6 +145,7 @@ function TopBar({ chat, project, onCompact }: { chat: Chat; project: Project; on
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         <ContextMeter usage={usage} onCompact={onCompact} />
+        <ProjectMemoryMenu projectId={project.id} />
         <ExportMenu chatId={chat.id} />
       </div>
     </header>

@@ -1,6 +1,6 @@
 import type {
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
-  DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, PromptEntry, RoleName, Skill, ToolInfo,
+  DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, PromptEntry, RoleName, Skill, ToolInfo,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -105,6 +105,15 @@ export const api = {
   importIntegrations: (data: unknown) =>
     j<{ imported: string[]; skipped: string[]; missingCredentials: string[]; integrations: Integration[] }>(
       '/api/integrations/import', { method: 'POST', body: JSON.stringify(data) }),
+
+  // project memory (scoped by the project id, shared by all its chats)
+  projectMemories: (projectId: string) =>
+    j<{ projectId: string; count: number; memories: ProjectMemory[] }>(`/api/projects/${projectId}/memories`),
+  projectMemoryExportUrl: (projectId: string, format: 'md' | 'json') =>
+    `/api/projects/${projectId}/memories/export?format=${format}`,
+  projectMemoryText: (projectId: string) =>
+    fetch(`/api/projects/${projectId}/memories/export?format=text`, { credentials: 'same-origin' })
+      .then((r) => { if (!r.ok) throw new Error(`Export failed (${r.status})`); return r.text(); }),
 
   // skills
   skills: () => j<Skill[]>('/api/skills'),

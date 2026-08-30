@@ -15,6 +15,12 @@ export interface RunCtx {
   killTimer?: NodeJS.Timeout;
   /** project root at run start (same-repo concurrency guard) */
   rootPath?: string;
+  /**
+   * Which role the run is currently executing. Set to 'reviewer' around review
+   * calls so app-state tools meant for the Builder (Project Memory) can be
+   * refused server-side, not merely withheld from the Reviewer's tool list.
+   */
+  phase?: 'builder' | 'reviewer';
 }
 
 /** Another chat actively running in the same directory? (branch switching makes that destructive) */

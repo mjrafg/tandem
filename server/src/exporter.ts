@@ -154,7 +154,7 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       const p = e.payload as any;
       const icon = p.status === 'failed' ? '⚠️' : '🔌';
       const lines = [
-        `<details><summary>${icon} <b>Tool</b> · \`${p.tool}\` · ${p.integration} (${p.integrationType}) · ${p.status}${p.durationMs != null ? ` · ${fmtDur(p.durationMs)}` : ''}</summary>`,
+        `<details><summary>${icon} <b>Tool</b> · \`${p.tool}\` · ${p.integration}${p.integrationType ? ` (${p.integrationType})` : ''} · ${p.status}${p.durationMs != null ? ` · ${fmtDur(p.durationMs)}` : ''}</summary>`,
         '',
         `- Role: ${p.role}`,
         `- Arguments: \`${JSON.stringify(p.args ?? {})}\``,
@@ -340,7 +340,7 @@ ${p.summary ? `<h4>Compacted context (legacy Compactor call)</h4><pre>${escapeHt
     }
     case 'tool_call': {
       const p = e.payload as any;
-      return `<div class="ev"><details><summary>🔌 Tool · <code>${escapeHtml(p.tool)}</code> · ${escapeHtml(p.integration)} (${escapeHtml(p.integrationType)}) · ${p.status}${p.durationMs != null ? ` · ${fmtDur(p.durationMs)}` : ''}</summary><div class="body">
+      return `<div class="ev"><details><summary>🔌 Tool · <code>${escapeHtml(p.tool)}</code> · ${escapeHtml(p.integration)}${p.integrationType ? ` (${escapeHtml(p.integrationType)})` : ''} · ${p.status}${p.durationMs != null ? ` · ${fmtDur(p.durationMs)}` : ''}</summary><div class="body">
 <div class="kv">role ${escapeHtml(p.role)} · ${t}</div>
 <h4>Arguments</h4><pre>${escapeHtml(JSON.stringify(p.args ?? {}, null, 2))}</pre>
 ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}

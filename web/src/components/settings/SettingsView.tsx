@@ -18,7 +18,7 @@ const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
 
 const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }> = {
   builder: { title: 'Builder', blurb: 'Understands each request and does the actual work — investigates, edits, runs, verifies.', dot: 'bg-builder' },
-  reviewer: { title: 'Reviewer', blurb: 'Independently evaluates each result against your request — changed files when there are any, otherwise the answer itself. Inspects and verifies with its own tools; max two rounds.', dot: 'bg-reviewer' },
+  reviewer: { title: 'Reviewer', blurb: 'Independently evaluates each result against your request — changed files when there are any, otherwise the answer itself. Verifies with its own tools inside a read-only jail; max two rounds.', dot: 'bg-reviewer' },
 };
 
 export function SettingsView() {
@@ -172,11 +172,11 @@ export function SettingsView() {
           <p><b className="text-ink">Tandem</b> v0.2 — real engine.</p>
           <p className="mt-1">
             Builder runs on the authenticated Claude Code CLI with full agency; the Reviewer runs on the Codex CLI with
-            network access and the tools you grant it (Codex only permits tool calls with approvals escalated, so its
-            filesystem sandbox is no longer read-only — "inspect, don't modify" is an instruction, while which tools it
-            may call stays enforced by Tandem). Context compaction is provider-native — the session's own CLI compacts
-            its own context. Every prompt and tool description Tandem sends is editable above, and every actual request
-            is recorded in the chat timeline.
+            network access and the tools you grant it, inside a Tandem-enforced read-only jail (bubblewrap) where the
+            project, Tandem's code and its database cannot be written — so it can verify with real tools without being
+            able to change anything. Context compaction is provider-native — the session's own CLI compacts its own
+            context. Every prompt and tool description Tandem sends is editable above, and every actual request is
+            recorded in the chat timeline.
           </p>
         </div>
       </div>

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,16 +25,15 @@ export interface CodexResult {
  * Base posture: filesystem read-only, network enabled through Codex's sandbox
  * proxy (public internet, DNS, and local services).
  *
- * IMPORTANT — this base is NOT an OS-enforced boundary any more. Codex 0.147
- * auto-denies every MCP tool call in non-interactive `exec` ("user cancelled
- * MCP tool call") under every approval policy, including its own defaults; the
- * only mechanism that permits them is `--approve-for-me`, which routes
- * approvals through automatic review and escalates to a workspace-write
- * sandbox. Tandem is configured (by explicit operator choice) to give the
- * Reviewer real tools, so the Reviewer CAN write to the project. What still
- * constrains it: the instruction-level "inspect, do not modify" rule in the
- * Reviewer prompt, and Tandem's own per-tool role permissions, which are
- * enforced server-side in the integration execution layer.
+ * Codex 0.147 auto-denies every MCP tool call in non-interactive `exec` ("user
+ * cancelled MCP tool call") under every approval policy, including its own
+ * defaults; the only mechanism that permits them is `--approve-for-me`, which
+ * escalates approvals and thereby drops Codex's own filesystem restriction.
+ * The Reviewer needs its tools, so Tandem enforces the read-only boundary
+ * itself instead of trusting this profile: the codex process tree runs inside a
+ * bubblewrap namespace (see readOnlyJailArgs) where the project, Tandem's code,
+ * and Tandem's database are bind-mounted read-only. Writes fail with EROFS in
+ * the kernel regardless of what Codex or the model decides.
  */
 const PERMISSIONS_NAME = 'tandem-reviewer';
 const BASE_PROFILE = `# Written by Tandem (server/src/engine/codex.ts) per review; deleted afterwards.
@@ -84,6 +84,47 @@ function mcpBlock(name: string, command: string, args: string[], env: Record<str
 
 function codexHomeDir(): string {
   return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
+// ------------------------------------------------- OS-enforced read-only wrap
+//
+// Codex only permits MCP tool calls when approvals are escalated
+// (`--approve-for-me`), which also drops its own filesystem restriction. So
+// Tandem enforces the Reviewer's read-only boundary itself: the whole codex
+// process tree runs inside a bubblewrap namespace where the project — plus
+// Tandem's own code and database — are bind-mounted read-only. Writes fail with
+// EROFS at the kernel level, no matter what the model or Codex decides.
+
+let bwrapOk: boolean | null = null;
+
+/** One-time real probe: bwrap present AND usable unprivileged here. */
+function bwrapAvailable(): boolean {
+  if (bwrapOk !== null) return bwrapOk;
+  try {
+    const r = spawnSync('bwrap', ['--dev-bind', '/', '/', '--ro-bind', '/tmp', '/tmp', '--', 'true'], { timeout: 10_000 });
+    bwrapOk = !r.error && r.status === 0;
+  } catch {
+    bwrapOk = false;
+  }
+  return bwrapOk;
+}
+
+/** bwrap arguments placing the reviewer's process tree in a read-only jail. */
+function readOnlyJailArgs(projectPath: string, cwd: string): string[] {
+  const args = ['--dev-bind', '/', '/'];
+  const ro = (p: string) => {
+    if (p && fs.existsSync(p)) args.push('--ro-bind', p, p);
+  };
+  const rw = (p: string) => {
+    if (p && fs.existsSync(p)) args.push('--bind', p, p);
+  };
+  ro(projectPath);                                    // the work under review
+  ro(path.dirname(process.argv[1] ?? ''));            // Tandem's own code
+  ro(config.dataDir);                                 // chats, events, credentials
+  rw(shotsDir);                                       // browser screenshots stay writable
+  rw(path.join(config.dataDir, 'tmp'));
+  args.push('--die-with-parent', '--chdir', cwd, '--');
+  return args;
 }
 
 /** Write the per-run profile; returns its name, or null if it cannot be written. */
@@ -157,7 +198,18 @@ export async function runCodexReview(h: RunHandle, opts: {
   if (opts.model.trim()) args.push('-m', opts.model.trim());
   args.push('-c', `model_reasoning_effort="${opts.effort}"`);
 
-  const cliShown = `${config.codexBin} ${args.join(' ')}`;
+  // Tandem's own read-only enforcement around the whole codex process tree.
+  const jailed = !!profileName && bwrapAvailable();
+  const spawnBin = jailed ? 'bwrap' : config.codexBin;
+  const spawnArgs = jailed
+    ? [...readOnlyJailArgs(h.project.rootPath, opts.cwd), config.codexBin, ...args]
+    : args;
+  if (profileName && !jailed) {
+    // honest: tools are on, but the read-only boundary is not OS-enforced here
+    h.status('bubblewrap is unavailable on this host — the Reviewer runs with tools but without Tandem\'s OS-enforced read-only boundary.');
+  }
+
+  const cliShown = `${jailed ? 'bwrap … ' : ''}${config.codexBin} ${args.join(' ')}`;
   const startedAt = Date.now();
   const servedTools = profileName
     ? [
@@ -233,8 +285,8 @@ export async function runCodexReview(h: RunHandle, opts: {
 
   const proc = await spawnStreaming({
     ctx: h.ctx,
-    bin: config.codexBin,
-    args,
+    bin: spawnBin,
+    args: spawnArgs,
     cwd: opts.cwd,
     env: {
       OPENAI_API_KEY: '',

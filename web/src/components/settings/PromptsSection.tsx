@@ -110,7 +110,7 @@ export function PromptsSection() {
         <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-dim">
           Every static instruction Tandem itself sends to Claude or Codex — the runtime values in{' '}
           <code className="mono text-[11px] text-mut">{'{{placeholders}}'}</code> are filled in by the application at
-          call time. Editing wording never weakens code-enforced boundaries (per-tool role permissions stay enforced, the
+          call time. Editing wording never weakens code-enforced boundaries (the Reviewer's read-only jail and per-tool role permissions stay enforced, the
           review loop stays capped, Stop still kills processes). The exact assembled request of every call remains
           inspectable in the chat timeline.
         </p>

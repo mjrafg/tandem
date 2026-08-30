@@ -35,17 +35,17 @@ export interface CodexResult {
  * Reviewer prompt, and Tandem's own per-tool role permissions, which are
  * enforced server-side in the integration execution layer.
  */
-const REVIEWER_PROFILE_NAME = 'tandem-reviewer';
-const REVIEWER_PROFILE = `# Written by Tandem (server/src/engine/codex.ts); regenerated before each review.
+const PERMISSIONS_NAME = 'tandem-reviewer';
+const BASE_PROFILE = `# Written by Tandem (server/src/engine/codex.ts) per review; deleted afterwards.
 # Base posture: filesystem read-only, network enabled. Escalations are
 # auto-approved (--approve-for-me) so the Reviewer can call MCP tools.
 approval_policy = "never"
-default_permissions = "${REVIEWER_PROFILE_NAME}"
+default_permissions = "${PERMISSIONS_NAME}"
 
-[permissions.${REVIEWER_PROFILE_NAME}]
+[permissions.${PERMISSIONS_NAME}]
 filesystem."/" = "read"
 
-[permissions.${REVIEWER_PROFILE_NAME}.network]
+[permissions.${PERMISSIONS_NAME}.network]
 enabled = true
 mode = "full"
 domains."*" = "allow"
@@ -55,18 +55,53 @@ allow_local_binding = true
 enabled = true
 `;
 
-function ensureReviewerProfile(): boolean {
+/** TOML basic string — JSON escaping is a valid subset. */
+function tomlStr(s: string): string {
+  return JSON.stringify(s);
+}
+
+/**
+ * An MCP server declaration for the profile file.
+ *
+ * Codex does NOT inherit this process's environment into MCP servers (verified:
+ * a probe server sees the variable as missing when it is only exported by the
+ * parent, and sees it when declared here). Tandem's servers need their internal
+ * URL/token/chat id at startup, so the values must be declared per server.
+ * Keeping them in the profile file — rather than `-c` flags — also keeps the
+ * internal token off the command line and out of the recorded transcript.
+ */
+function mcpBlock(name: string, command: string, args: string[], env: Record<string, string>): string {
+  return [
+    `[mcp_servers.${name}]`,
+    `command = ${tomlStr(command)}`,
+    `args = ${JSON.stringify(args)}`,
+    'tool_timeout_sec = 120',
+    `[mcp_servers.${name}.env]`,
+    ...Object.entries(env).map(([k, v]) => `${k} = ${tomlStr(v)}`),
+    '',
+  ].join('\n');
+}
+
+function codexHomeDir(): string {
+  return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
+/** Write the per-run profile; returns its name, or null if it cannot be written. */
+function writeReviewerProfile(runId: string, blocks: string[]): string | null {
   try {
-    const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-    fs.mkdirSync(codexHome, { recursive: true });
-    const file = path.join(codexHome, `${REVIEWER_PROFILE_NAME}.config.toml`);
-    if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== REVIEWER_PROFILE) {
-      fs.writeFileSync(file, REVIEWER_PROFILE);
-    }
-    return true;
+    const home = codexHomeDir();
+    fs.mkdirSync(home, { recursive: true });
+    const name = `tandem-reviewer-${runId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 12)}`;
+    fs.writeFileSync(path.join(home, `${name}.config.toml`), [BASE_PROFILE, ...blocks].join('\n'), { mode: 0o600 });
+    return name;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function removeReviewerProfile(name: string | null): void {
+  if (!name) return;
+  try { fs.rmSync(path.join(codexHomeDir(), `${name}.config.toml`), { force: true }); } catch { /* best effort */ }
 }
 
 /**
@@ -79,7 +114,35 @@ export async function runCodexReview(h: RunHandle, opts: {
   cwd: string;
   timeoutMs: number;
 }): Promise<CodexResult> {
-  const haveProfile = ensureReviewerProfile();
+  const distDir = path.dirname(process.argv[1] ?? '.');
+  const browserScript = path.resolve(distDir, 'mcp-browser.cjs');
+  const extScript = path.resolve(distDir, 'mcp-integrations.cjs');
+  // integration tools the admin has allowed for the reviewer role (the gateway
+  // executes nothing itself — Tandem's execution layer enforces role access
+  // again server-side, so this stays true even if the config were tampered with)
+  const serveExt = fs.existsSync(extScript) && hasIntegrationTools('reviewer');
+
+  const blocks: string[] = [];
+  if (fs.existsSync(browserScript)) {
+    blocks.push(mcpBlock('tandem_browser', process.execPath, [browserScript], {
+      TANDEM_INTERNAL_URL: internalBase(),
+      TANDEM_CHAT_ID: h.chat.id,
+      TANDEM_INTERNAL_TOKEN: config.internalToken,
+      TANDEM_SHOTS_DIR: shotsDir,
+      TANDEM_BROWSER_ROLE: 'reviewer',
+      TANDEM_TOOL_TEXT: toolTextEnv(),
+    }));
+  }
+  if (serveExt) {
+    blocks.push(mcpBlock('tandem_ext', process.execPath, [extScript], {
+      TANDEM_INTERNAL_URL: internalBase(),
+      TANDEM_CHAT_ID: h.chat.id,
+      TANDEM_INTERNAL_TOKEN: config.internalToken,
+      TANDEM_ROLE: 'reviewer',
+    }));
+  }
+  const profileName = writeReviewerProfile(h.ctx.runId, blocks);
+
   const args = [
     'exec',
     '--json',
@@ -88,41 +151,20 @@ export async function runCodexReview(h: RunHandle, opts: {
   // Permission profile + automatic approval. `--approve-for-me` is the only
   // way this Codex version permits MCP tool calls in exec mode (without it the
   // Reviewer is served tools it can never call); it cannot be combined with
-  // `--sandbox`, so the legacy fallback stays strictly read-only and toolless.
-  if (haveProfile) args.push('-p', REVIEWER_PROFILE_NAME, '--approve-for-me');
+  // `--sandbox`, so the fallback path stays strictly read-only and toolless.
+  if (profileName) args.push('-p', profileName, '--approve-for-me');
   else args.push('--sandbox', 'read-only');
   if (opts.model.trim()) args.push('-m', opts.model.trim());
   args.push('-c', `model_reasoning_effort="${opts.effort}"`);
-  // the internal browser tool (MCP servers run outside the shell sandbox; the
-  // browser writes only screenshots into Tandem's shots dir — the Reviewer's
-  // project access stays read-only)
-  const browserScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'mcp-browser.cjs');
-  if (fs.existsSync(browserScript)) {
-    args.push(
-      '-c', `mcp_servers.tandem_browser.command="${process.execPath}"`,
-      '-c', `mcp_servers.tandem_browser.args=["${browserScript}"]`,
-      '-c', 'mcp_servers.tandem_browser.tool_timeout_sec=120',
-    );
-  }
-  // integration tools the admin has allowed for the reviewer role (the gateway
-  // executes nothing itself — Tandem's execution layer enforces role access
-  // again server-side, so this stays true even if the flag were tampered with)
-  const extScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'mcp-integrations.cjs');
-  const serveExt = fs.existsSync(extScript) && hasIntegrationTools('reviewer');
-  if (serveExt) {
-    args.push(
-      '-c', `mcp_servers.tandem_ext.command="${process.execPath}"`,
-      '-c', `mcp_servers.tandem_ext.args=["${extScript}"]`,
-      '-c', 'mcp_servers.tandem_ext.tool_timeout_sec=120',
-    );
-  }
 
   const cliShown = `${config.codexBin} ${args.join(' ')}`;
   const startedAt = Date.now();
-  const servedTools = [
-    ...(fs.existsSync(browserScript) ? await servedToolRecord(['tandem_browser']) : []),
-    ...(serveExt ? catalogForRole('reviewer').map((t) => ({ name: t.name, description: t.description })) : []),
-  ];
+  const servedTools = profileName
+    ? [
+      ...(fs.existsSync(browserScript) ? await servedToolRecord(['tandem_browser']) : []),
+      ...(serveExt ? catalogForRole('reviewer').map((t) => ({ name: t.name, description: t.description })) : []),
+    ]
+    : []; // fallback path serves no MCP servers at all
   const aiCall = addEvent(h.chat.id, 'ai_call', {
     role: 'reviewer',
     provider: 'codex',
@@ -211,6 +253,7 @@ export async function runCodexReview(h: RunHandle, opts: {
     onLine,
   });
 
+  removeReviewerProfile(profileName); // the per-run profile carries the internal token
   const durationMs = Date.now() - startedAt;
   const stopped = h.ctx.stopped;
   let error: string | undefined;

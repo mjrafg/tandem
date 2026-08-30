@@ -36,12 +36,12 @@ export function GitChip({ projectId, gitState }: { projectId: string; gitState?:
   const dirty = (status.changedFiles ?? 0) > 0;
 
   return (
-    <div className="relative" ref={ref}>
-      <button className="chip cursor-pointer rounded-lg py-1 transition-colors hover:bg-bg3" onClick={() => setOpen((o) => !o)}>
+    <div className="relative min-w-0 shrink sm:shrink-0" ref={ref}>
+      <button className="chip min-w-0 max-w-full cursor-pointer rounded-lg py-1 transition-colors hover:bg-bg3" onClick={() => setOpen((o) => !o)}>
         <GitBranch size={12.5} />
-        <span className="max-w-[80px] truncate sm:max-w-[140px]">{status.branch}</span>
+        <span className="min-w-0 truncate sm:max-w-[140px]">{status.branch}</span>
         {dirty && (
-          <span className="tabular-nums">
+          <span className="hidden shrink-0 tabular-nums sm:inline">
             <span className="text-ok">+{status.additions}</span>{' '}
             <span className="text-err">−{status.deletions}</span>
           </span>

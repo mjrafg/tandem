@@ -121,14 +121,14 @@ function TopBar({ chat, project, onCompact }: { chat: Chat; project: Project; on
   const [copied, setCopied] = useState(false);
   return (
     <header className="flex h-[50px] shrink-0 items-center justify-between gap-2 border-b border-linesoft px-2 sm:gap-3 sm:px-4">
-      <div className="flex min-w-0 items-center gap-2 sm:gap-2.5">
+      <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-2.5">
         <MenuButton />
-        <span className="inline-flex max-w-[45vw] shrink-0 items-center gap-1.5 text-[13.5px] font-medium">
+        <span className="inline-flex min-w-0 max-w-[40vw] shrink items-center gap-1.5 text-[13.5px] font-medium sm:max-w-[45vw] sm:shrink-0">
           <FolderOpen size={14} className="shrink-0 text-dim" />
           <span className="truncate">{project.name}</span>
         </span>
         <button
-          className="group hidden min-w-0 items-center gap-1 sm:flex"
+          className="group hidden min-w-0 flex-1 items-center gap-1 sm:flex"
           title="Copy path"
           onClick={() => {
             void navigator.clipboard.writeText(project.rootPath);

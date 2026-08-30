@@ -62,7 +62,10 @@ export function ContextMeter({ usage, onCompact }: { usage: ContextUsage | undef
           )}
         </svg>
         <span className="tabular-nums" style={{ color: tone === 'ok' ? undefined : color }}>
-          {total == null ? '—' : `${approx ? '~' : ''}${fmtTokens(total)}`} / {usage.windowTokens ? fmtTokens(usage.windowTokens) : '?'}
+          {total == null ? '—' : `${approx ? '~' : ''}${fmtTokens(total)}`}
+          {/* the window is dropped on narrow screens so the project name and
+              branch keep their space; the popover always states it in full */}
+          <span className="hidden sm:inline"> / {usage.windowTokens ? fmtTokens(usage.windowTokens) : '?'}</span>
         </span>
       </button>
 

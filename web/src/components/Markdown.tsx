@@ -65,12 +65,39 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
   );
 }
 
+/**
+ * Block elements carry dir="auto" so each paragraph, heading, list and table
+ * takes its direction from its own first strong character: Persian and Arabic
+ * render right-to-left (markers, indent and punctuation included) while English
+ * blocks in the same message stay left-to-right. Code keeps the document
+ * direction — source is not prose.
+ *
+ * Containers only — items (li, td, th) inherit deliberately. HTML excludes
+ * descendants that carry their own dir from the auto computation, so marking
+ * both the list and its items would leave the list itself with no text to
+ * judge, silently falling back to LTR and flipping markers to the wrong side.
+ */
+const autoDir = (Tag: keyof React.JSX.IntrinsicElements) =>
+  function AutoDirBlock({ node: _node, ...props }: any) {
+    return <Tag dir="auto" {...props} />;
+  };
+
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          p: autoDir('p'),
+          ul: autoDir('ul'),
+          ol: autoDir('ol'),
+          table: autoDir('table'),
+          h1: autoDir('h1'),
+          h2: autoDir('h2'),
+          h3: autoDir('h3'),
+          h4: autoDir('h4'),
+          h5: autoDir('h5'),
+          h6: autoDir('h6'),
           code: (props) => {
             const { className, children } = props as { className?: string; children?: React.ReactNode };
             const isBlock = /language-/.test(className ?? '') || String(children ?? '').includes('\n');

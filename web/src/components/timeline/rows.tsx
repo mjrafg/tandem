@@ -282,13 +282,13 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
               <span className={`rounded-full px-2 py-[1px] text-[10.5px] font-semibold uppercase tracking-wide ${
                 f.severity === 'major' ? 'bg-err/15 text-err' : 'bg-warn/15 text-warn'
               }`}>{f.severity}</span>
-              <span className="font-medium text-ink">{f.title}</span>
+              <span dir="auto" className="font-medium text-ink">{f.title}</span>
               {f.file && (
                 <span className="mono text-[11.5px] text-accent/90">{f.file}{f.line ? `:${f.line}` : ''}</span>
               )}
             </div>
-            <p className="mt-1 leading-relaxed text-mut">{f.detail}</p>
-            {f.recommendation && <p className="mt-0.5 text-[12.5px] italic text-dim">Recommendation: {f.recommendation}</p>}
+            <p dir="auto" className="mt-1 leading-relaxed text-mut">{f.detail}</p>
+            {f.recommendation && <p dir="auto" className="mt-0.5 text-[12.5px] italic text-dim">Recommendation: {f.recommendation}</p>}
           </div>
         ))}
       </div>
@@ -515,14 +515,14 @@ export function ErrorRow({ ev }: { ev: ChatEvent }) {
         <span className="text-[13px] font-medium text-[#ffb3ae]">{p.message}</span>
         {p.source && <span className="ml-auto text-[11px] uppercase tracking-wide text-dim">{p.source}</span>}
       </div>
-      {p.detail && <p className="mt-1 pl-[22px] text-[12.5px] leading-relaxed text-mut">{p.detail}</p>}
+      {p.detail && <p dir="auto" className="mt-1 pl-[22px] text-[12.5px] leading-relaxed text-mut">{p.detail}</p>}
     </div>
   );
 }
 
 export function StatusLine({ ev }: { ev: ChatEvent }) {
   return (
-    <div className="fade-up px-2 py-[3px] pl-[47px] text-[12.5px] italic text-dim">
+    <div dir="auto" className="fade-up px-2 py-[3px] pl-[47px] text-[12.5px] italic text-dim">
       {(ev.payload as StatusPayload).text}
     </div>
   );

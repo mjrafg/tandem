@@ -74,7 +74,7 @@ function UserMessage({ ev }: { ev: ChatEvent }) {
   return (
     <div className="fade-up group flex justify-end pb-3 pt-6 first:pt-2">
       <div className="relative max-w-[85%] rounded-2xl rounded-br-md border border-[#2a3550]/60 bg-[#1a2233] px-4 py-2.5">
-        {p.text && <div className="whitespace-pre-wrap text-[14px] leading-relaxed text-[#dee5f2]">{p.text}</div>}
+        {p.text && <div dir="auto" className="whitespace-pre-wrap text-[14px] leading-relaxed text-[#dee5f2]">{p.text}</div>}
         {p.attachments && p.attachments.length > 0 && (
           <div className={`flex flex-wrap gap-1.5 ${p.text ? 'mt-2' : ''}`}>
             {p.attachments.map((a) => (

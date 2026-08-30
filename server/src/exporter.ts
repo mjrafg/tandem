@@ -242,6 +242,10 @@ export function toHtml(b: ExportBundle): string {
   .sev { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 99px; padding: 1px 8px; margin-right: 6px; }
   .sev.major { background: #3d2222; color: #ff8f8a; } .sev.minor { background: #3a3222; color: #e0c26a; }
   h4 { margin: 10px 0 4px; font-size: 13px; }
+  /* per-block direction: RTL content (Persian/Arabic) reads correctly,
+     while code and English blocks stay left-to-right */
+  .body, .kv, .msg, h1, h2, h3, h4, li, summary { unicode-bidi: plaintext; }
+  pre, code { unicode-bidi: embed; }
 </style>
 </head>
 <body>

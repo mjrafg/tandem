@@ -145,6 +145,7 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
         <textarea
           ref={ref}
           rows={1}
+          dir="auto"
           value={text}
           disabled={chat.running}
           placeholder={

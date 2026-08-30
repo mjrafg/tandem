@@ -32,19 +32,61 @@ let shotSeq = 0;
 const consoleBuf = [];
 let ariaRefWorks = true;
 
+/** set when a crashed browser had to be relaunched, so the AI is told state was lost */
+const CRASH_NOTE = ' (note: the browser had crashed and was restarted — page state, cookies and history were reset)';
+let recoveredNote = '';
+
+function dropBrowserState() {
+  browser = null;
+  context = null;
+  page = null;
+  ariaRefWorks = true;
+}
+
+async function launchBrowser() {
+  const { chromium } = require('playwright');
+  browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+  });
+  // Chromium can die on its own (renderer crash, heavy pages, external kill).
+  // Forget the dead handle immediately — otherwise every later call fails with
+  // "Target page, context or browser has been closed" for the rest of the run.
+  browser.on('disconnected', () => {
+    dropBrowserState();
+    recoveredNote = CRASH_NOTE;
+  });
+}
+
 async function ensurePage() {
-  if (page && !page.isClosed()) return page;
-  if (!browser) {
-    const { chromium } = require('playwright');
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (browser && !browser.isConnected()) {
+        // whichever notices first — this check or the disconnected event — the
+        // relaunch must be reported, so set the note here too
+        dropBrowserState();
+        recoveredNote = CRASH_NOTE;
+      }
+      if (page && !page.isClosed()) return page;
+      if (!browser) await launchBrowser();
+      context = await browser.newContext({ viewport, deviceScaleFactor: dsr });
+      context.on('page', (p) => wirePage(p));
+      page = await context.newPage();
+      return page;
+    } catch (err) {
+      // a browser that died between the check and the call lands here
+      dropBrowserState();
+      if (attempt >= 1) throw err;
+      recoveredNote = CRASH_NOTE;
+    }
   }
-  context = await browser.newContext({ viewport, deviceScaleFactor: dsr });
-  context.on('page', (p) => wirePage(p));
-  page = await context.newPage();
-  return page;
+}
+
+/** consume the pending recovery note, if any */
+function takeRecoveredNote() {
+  const note = recoveredNote;
+  recoveredNote = '';
+  return note;
 }
 
 function wirePage(p) {
@@ -443,9 +485,19 @@ async function callTool(name, args) {
   const t0 = Date.now();
   try {
     const out = await handler(args || {});
-    if (out.report) report({ ...out.report, durationMs: Date.now() - t0, status: 'done' });
-    if (out.content) return { content: out.content };
-    return { content: [{ type: 'text', text: out.text ?? 'ok' }] };
+    // a crash-and-relaunch during this call is stated plainly: the AI must know
+    // the page it was working with is gone rather than silently starting over
+    const note = takeRecoveredNote();
+    if (out.report) {
+      report({ ...out.report, detail: `${out.report.detail}${note ? ' · browser restarted after a crash' : ''}`, durationMs: Date.now() - t0, status: 'done' });
+    }
+    if (out.content) {
+      if (note && out.content[0] && out.content[0].type === 'text') {
+        out.content[0] = { type: 'text', text: `${out.content[0].text}${note}` };
+      }
+      return { content: out.content };
+    }
+    return { content: [{ type: 'text', text: `${out.text ?? 'ok'}${note}` }] };
   } catch (err) {
     const message = String(err && err.message ? err.message : err).split('\n')[0].slice(0, 400);
     let info = {};

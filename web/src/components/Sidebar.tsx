@@ -1,4 +1,4 @@
-import { Check, LogOut, MoreHorizontal, Pencil, Plus, Settings, Trash2, X } from 'lucide-react';
+import { Boxes, Check, LogOut, MoreHorizontal, Pencil, Plus, Settings, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Chat, Project } from '@shared/types';
@@ -31,10 +31,17 @@ export function Sidebar() {
         </Link>
       </div>
 
-      <div className="px-3 pb-1 pt-1">
+      <div className="space-y-1.5 px-3 pb-1 pt-1">
         <button
           className="btn-outline w-full justify-start gap-2 border-dashed py-[7px] text-mut hover:text-ink"
-          onClick={() => setNewProjectOpen(true)}
+          onClick={() => setNewProjectOpen(true, 'project')}
+        >
+          <Boxes size={15} />
+          New project
+        </button>
+        <button
+          className="btn-outline w-full justify-start gap-2 border-dashed py-[7px] text-mut hover:text-ink"
+          onClick={() => setNewProjectOpen(true, 'chat')}
         >
           <Plus size={15} />
           New chat

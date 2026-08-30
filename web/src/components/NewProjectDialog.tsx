@@ -12,11 +12,13 @@ import { Modal, Spinner } from './ui';
 
 export function NewProjectDialog() {
   const open = useStore((s) => s.newProjectOpen);
+  const mode = useStore((s) => s.newProjectMode);
   const setOpen = useStore((s) => s.setNewProjectOpen);
   const projects = useStore((s) => s.projects);
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isProject = mode === 'project';
 
   async function startChat(project: Project) {
     const chat = await api.newChat(project.id);
@@ -32,7 +34,18 @@ export function NewProjectDialog() {
     setBusy(true);
     setError(null);
     try {
-      await startChat(await api.addDirectory(dirPath));
+      if (isProject) {
+        // a Project Director chat — its own dedicated chat, directed from above
+        const { run, chat } = await api.createProjectRun(dirPath);
+        useStore.setState((s) => ({
+          chats: [chat, ...s.chats.filter((c) => c.id !== chat.id)],
+          projectRuns: { ...s.projectRuns, [run.id]: run },
+          newProjectOpen: false,
+        }));
+        navigate(`/c/${chat.id}`);
+      } else {
+        await startChat(await api.addDirectory(dirPath));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not open that directory.');
     } finally {
@@ -41,10 +54,11 @@ export function NewProjectDialog() {
   }
 
   return (
-    <Modal open={open} onClose={() => !busy && setOpen(false)} title="New chat" width={620}>
+    <Modal open={open} onClose={() => !busy && setOpen(false)} title={isProject ? 'New project' : 'New chat'} width={620}>
       <p className="-mt-1 mb-4 text-[12.5px] text-dim">
-        Choose where this conversation starts working. Everything else — cloning a repository,
-        opening an attached ZIP, the actual task — happens in the chat itself.
+        {isProject
+          ? 'Choose the folder for this project. A Project Director will plan it into milestones, run normal Tandem sessions to build each one, and coordinate the whole thing from the chat.'
+          : 'Choose where this conversation starts working. Everything else — cloning a repository, opening an attached ZIP, the actual task — happens in the chat itself.'}
       </p>
 
       {projects.length > 0 && (

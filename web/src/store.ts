@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type {
+  ProjectRun,
   AppSettings, Chat, ChatEvent, ContextUsage, Project, ServerMsg,
 } from '@shared/types';
 import { api, ApiError } from './api';
@@ -22,10 +23,14 @@ interface State {
   settings: AppSettings | null;
   toasts: Toast[];
   newProjectOpen: boolean;
+  /** New chat vs New project — which flow the shared dialog is running */
+  newProjectMode: 'chat' | 'project';
+  projectRuns: Record<string, ProjectRun>;
   /** mobile drawer state; ignored by the static desktop sidebar */
   sidebarOpen: boolean;
 
-  setNewProjectOpen: (open: boolean) => void;
+  setNewProjectOpen: (open: boolean, mode?: 'chat' | 'project') => void;
+  loadProjectRun: (id: string) => Promise<void>;
   setSidebarOpen: (open: boolean) => void;
   init: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
@@ -54,10 +59,16 @@ export const useStore = create<State>((set, get) => ({
   settings: null,
   toasts: [],
   newProjectOpen: false,
+  newProjectMode: 'chat',
+  projectRuns: {},
   sidebarOpen: false,
 
   // opening the project dialog dismisses the mobile drawer beneath it
-  setNewProjectOpen: (open) => set(open ? { newProjectOpen: open, sidebarOpen: false } : { newProjectOpen: open }),
+  setNewProjectOpen: (open, mode = 'chat') => set(open ? { newProjectOpen: open, newProjectMode: mode, sidebarOpen: false } : { newProjectOpen: open }),
+  loadProjectRun: async (id) => {
+    try { const { run } = await api.projectRun(id); set((s) => ({ projectRuns: { ...s.projectRuns, [run.id]: run } })); }
+    catch { /* ignore */ }
+  },
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
 
   init: async () => {
@@ -192,6 +203,11 @@ function applyMsg(msg: ServerMsg): void {
     case 'project': {
       const s = getState();
       setState({ projects: upsert(s.projects, msg.project) });
+      break;
+    }
+    case 'project_run': {
+      const s = getState();
+      setState({ projectRuns: { ...s.projectRuns, [msg.run.id]: msg.run } });
       break;
     }
   }

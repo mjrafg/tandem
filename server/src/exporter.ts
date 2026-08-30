@@ -167,6 +167,16 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       lines.push('', '</details>');
       return lines;
     }
+    case 'sessions': {
+      const p = e.payload as any;
+      const done = (p.sessions ?? []).filter((s: any) => s.status === 'completed').length;
+      const lines = [`<details><summary><b>Project sessions</b> · ${p.milestoneKey} ${p.milestoneName} · ${done}/${(p.sessions ?? []).length} completed</summary>`, ''];
+      for (const s of p.sessions ?? []) {
+        lines.push(`- **${s.key} ${s.name}** — ${s.status}${s.builderState ? ` · builder ${s.builderState}` : ''}${s.reviewerState ? ` · reviewer ${s.reviewerState}` : ''}${s.note ? ` · ${s.note}` : ''}${s.chatId ? ` · session \`${s.chatId}\`` : ''}`);
+      }
+      lines.push('', '</details>');
+      return lines;
+    }
     case 'error': {
       const p = e.payload as any;
       return [`🛑 **Error** (${p.source ?? 'app'}): ${p.message}${p.detail ? `\n\n> ${p.detail}` : ''}`];
@@ -346,6 +356,11 @@ ${p.summary ? `<h4>Compacted context (legacy Compactor call)</h4><pre>${escapeHt
 ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
 ${p.resultPreview ? `<h4>Result${(p.resultBytes ?? 0) > p.resultPreview.length ? ` (preview of ${p.resultBytes} chars)` : ''}</h4><pre>${escapeHtml(p.resultPreview)}</pre>` : ''}
 </div></details></div>`;
+    }
+    case 'sessions': {
+      const p = e.payload as any;
+      const done = (p.sessions ?? []).filter((s: any) => s.status === 'completed').length;
+      return `<div class="ev"><details><summary>Project sessions · ${escapeHtml(p.milestoneKey ?? '')} ${escapeHtml(p.milestoneName ?? '')} · ${done}/${(p.sessions ?? []).length} completed</summary><div class="body"><ul>${(p.sessions ?? []).map((sx: any) => `<li><b>${escapeHtml(sx.key)} ${escapeHtml(sx.name)}</b> — ${escapeHtml(sx.status)}${sx.note ? ` · ${escapeHtml(sx.note)}` : ''}</li>`).join('')}</ul></div></details></div>`;
     }
     case 'error': {
       const p = e.payload as any;

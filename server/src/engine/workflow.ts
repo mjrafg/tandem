@@ -61,7 +61,7 @@ export async function startRun(
   chatId: string,
   userText: string,
   attachments: AttachmentMeta[] = [],
-  runOpts: { review: boolean } = { review: true },
+  runOpts: { review: boolean; timeoutMs?: number } = { review: true },
 ): Promise<void> {
   const chat = getChat(chatId);
   if (!chat || isRunning(chatId)) return;
@@ -104,7 +104,10 @@ export async function startRun(
   }
 }
 
-async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean }): Promise<boolean> {
+async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean; timeoutMs?: number }): Promise<boolean> {
+  // per-run override so an orchestrator (or a recovery decision) can grant
+  // more time; the default stays the module constant
+  const builderTimeout = Math.min(runOpts.timeoutMs ?? BUILDER_TIMEOUT, 90 * 60_000);
   const builderCfg = h.settings.roles.builder;
   const startDir = h.project.rootPath;
   const before = captureWorktree(startDir);
@@ -120,7 +123,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     cwd: startDir,
     resumeSessionId: resume,
     withTandemTools: true,
-    timeoutMs: BUILDER_TIMEOUT,
+    timeoutMs: builderTimeout,
   });
   if (first.sessionId) setBuilderSession(h.chat.id, first.sessionId, 'claude-code');
   if (h.stopped) return false;
@@ -165,7 +168,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     cwd: endDir,
     resumeSessionId: getBuilderSession(h.chat.id),
     withTandemTools: true,
-    timeoutMs: BUILDER_TIMEOUT,
+    timeoutMs: builderTimeout,
   });
   if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId, 'claude-code');
   if (h.stopped) return false;
@@ -198,7 +201,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     cwd: h.project.rootPath,
     resumeSessionId: getBuilderSession(h.chat.id),
     withTandemTools: true,
-    timeoutMs: BUILDER_TIMEOUT,
+    timeoutMs: builderTimeout,
   });
   if (final.sessionId) setBuilderSession(h.chat.id, final.sessionId, 'claude-code');
   if (!h.stopped && final.ok) {

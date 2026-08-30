@@ -55,6 +55,9 @@ try { db.exec('ALTER TABLE chats ADD COLUMN builder_session_id TEXT'); } catch {
 try { db.exec('ALTER TABLE chats ADD COLUMN git_state TEXT'); } catch { /* exists */ }
 // which provider created the stored session (pre-existing sessions are Claude's)
 try { db.exec("ALTER TABLE chats ADD COLUMN builder_session_provider TEXT DEFAULT 'claude-code'"); } catch { /* exists */ }
+// Project Director: a chat is either a normal session or a project chat
+try { db.exec("ALTER TABLE chats ADD COLUMN kind TEXT DEFAULT 'chat'"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE chats ADD COLUMN project_run_id TEXT'); } catch { /* exists */ }
 
 export function getGitStateRow(chatId: string): import('../../shared/types').GitFlowState | null {
   const row = db.prepare('SELECT git_state AS s FROM chats WHERE id = ?').get(chatId) as any;
@@ -117,6 +120,7 @@ export function rowToChat(r: any): Chat {
     createdAt: r.created_at, updatedAt: r.updated_at,
     running: !!r.running, lastCompactionEventId: r.last_compaction_event_id ?? null,
     gitState,
+    ...(r.kind === 'project' ? { kind: 'project' as const, projectRunId: r.project_run_id ?? null } : {}),
   };
 }
 

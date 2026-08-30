@@ -32,7 +32,7 @@ const EFFORT_THINKING: Record<Effort, string> = { low: '', medium: '12000', high
  * process-level boundaries (timeout, stop, environment).
  */
 export async function runClaudeTurn(h: RunHandle, opts: {
-  role: 'builder' | 'final_repair';
+  role: 'builder' | 'final_repair' | 'director';
   model: string;
   effort: Effort;
   systemAppendix: string;
@@ -40,6 +40,8 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   cwd: string;
   resumeSessionId?: string | null;
   withTandemTools?: boolean;
+  /** the Project Director's orchestration tool server (instead of the builder tool set) */
+  withDirectorTools?: boolean;
   emitActivity?: boolean;
   timeoutMs: number;
 }): Promise<ClaudeTurnResult> {
@@ -79,6 +81,15 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     if (Object.keys(mcpServers).length > 0) {
       mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
       fs.writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers }));
+      args.push('--mcp-config', mcpConfigFile, '--strict-mcp-config');
+    }
+  } else if (opts.withDirectorTools) {
+    const directorScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'mcp-director.cjs');
+    if (fs.existsSync(directorScript)) {
+      mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
+      fs.writeFileSync(mcpConfigFile, JSON.stringify({
+        mcpServers: { tandem_director: { type: 'stdio', command: process.execPath, args: [directorScript] } },
+      }));
       args.push('--mcp-config', mcpConfigFile, '--strict-mcp-config');
     }
   }

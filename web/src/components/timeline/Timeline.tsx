@@ -4,7 +4,7 @@ import { fmtBytes, fmtTime } from '../../lib/format';
 import { attachmentIcon } from '../Composer';
 import { Markdown } from '../Markdown';
 import {
-  AiCallRow, BrowserGroupRow, ChangeGroupRow, CheckpointRow, CommandGroupRow, CompactionRow, ErrorRow, FindingsRow, ReadGroupRow, RunMarker, SearchGroupRow, StatusLine, ToolCallRow,
+  AiCallRow, BrowserGroupRow, ChangeGroupRow, CheckpointRow, CommandGroupRow, CompactionRow, ErrorRow, FindingsRow, ReadGroupRow, RunMarker, SearchGroupRow, SessionsRow, StatusLine, ToolCallRow,
 } from './rows';
 
 type Item =
@@ -60,6 +60,7 @@ export const Timeline = memo(function Timeline({ events }: { events: ChatEvent[]
           case 'compaction': return <CompactionRow key={item.key} ev={ev} />;
           case 'checkpoint': return <CheckpointRow key={item.key} ev={ev} />;
           case 'tool_call': return <ToolCallRow key={item.key} ev={ev} />;
+          case 'sessions': return <SessionsRow key={item.key} ev={ev} />;
           case 'error': return <ErrorRow key={item.key} ev={ev} />;
           case 'run': return <RunMarker key={item.key} ev={ev} />;
           default: return null;

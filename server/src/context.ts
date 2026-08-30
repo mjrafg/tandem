@@ -75,6 +75,8 @@ export function estimateEventTokens(e: ChatEvent): number {
       return 30 + Math.min((p.files?.length ?? 0) * 4, 200);
     case 'tool_call':
       return 60 + estimateTokens(JSON.stringify(p.args ?? {})) + estimateTokens(p.resultPreview);
+    case 'sessions':
+      return 0; // UI-only live block; never fed back into a prompt
     default:
       return 0;
   }

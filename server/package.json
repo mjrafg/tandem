@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/index.js && cp src/mcp-workdir.cjs dist/mcp-workdir.cjs && cp src/mcp-browser.cjs dist/mcp-browser.cjs && cp src/mcp-integrations.cjs dist/mcp-integrations.cjs",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/index.js && cp src/mcp-workdir.cjs dist/mcp-workdir.cjs && cp src/mcp-browser.cjs dist/mcp-browser.cjs && cp src/mcp-integrations.cjs dist/mcp-integrations.cjs && cp src/mcp-director.cjs dist/mcp-director.cjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

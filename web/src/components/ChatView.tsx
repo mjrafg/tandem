@@ -1,4 +1,4 @@
-import { ArrowDown, Check, Copy, FolderOpen } from 'lucide-react';
+import { ArrowDown, Boxes, Check, Copy, FolderOpen } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { Chat, Project } from '@shared/types';
@@ -9,6 +9,7 @@ import { ContextBanner, ContextMeter } from './ContextMeter';
 import { ExportMenu } from './ExportMenu';
 import { GitChip } from './GitChip';
 import { ProjectMemoryMenu } from './ProjectMemoryMenu';
+import { ProjectDrawer } from './ProjectDrawer';
 import { Timeline } from './timeline/Timeline';
 import { MenuButton, Spinner } from './ui';
 
@@ -25,6 +26,8 @@ export function ChatView() {
   const settings = useStore((s) => s.settings);
   const [compactOpen, setCompactOpen] = useState(false);
   const [prefill, setPrefill] = useState<string | undefined>();
+  const isProject = chat?.kind === 'project';
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
     if (chatId && !loaded) void loadChat(chatId);
@@ -33,6 +36,11 @@ export function ChatView() {
   useEffect(() => {
     if (!settings) void loadSettings();
   }, [settings, loadSettings]);
+
+  // on wide screens a project chat opens its drawer beside the conversation
+  useEffect(() => {
+    setDrawerOpen(isProject && window.matchMedia('(min-width: 1024px)').matches);
+  }, [isProject, chatId]);
 
   // ---- scroll pinning
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -80,8 +88,10 @@ export function ChatView() {
   }
 
   return (
-    <>
-      <TopBar chat={chat} project={project} onCompact={() => setCompactOpen(true)} />
+    <div className="flex min-h-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col">
+      <TopBar chat={chat} project={project} onCompact={() => setCompactOpen(true)}
+        isProject={isProject} onToggleDrawer={() => setDrawerOpen((o) => !o)} />
       <ContextBanner usage={usage} onCompact={() => setCompactOpen(true)} />
 
       <div ref={scrollRef} onScroll={onScroll} className="relative min-h-0 flex-1 overflow-y-auto">
@@ -112,11 +122,17 @@ export function ChatView() {
 
       <Composer chat={chat} prefill={prefill} onUsedPrefill={() => setPrefill(undefined)} />
       <CompactDialog chatId={chat.id} open={compactOpen} onClose={() => setCompactOpen(false)} />
-    </>
+      </div>
+      {isProject && chat.projectRunId && (
+        <ProjectDrawer runId={chat.projectRunId} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+      )}
+    </div>
   );
 }
 
-function TopBar({ chat, project, onCompact }: { chat: Chat; project: Project; onCompact: () => void }) {
+function TopBar({ chat, project, onCompact, isProject, onToggleDrawer }: {
+  chat: Chat; project: Project; onCompact: () => void; isProject?: boolean; onToggleDrawer?: () => void;
+}) {
   const usage = useStore((s) => s.usage[chat.id]);
   const [copied, setCopied] = useState(false);
   return (
@@ -147,6 +163,11 @@ function TopBar({ chat, project, onCompact }: { chat: Chat; project: Project; on
         <ContextMeter usage={usage} onCompact={onCompact} />
         <ProjectMemoryMenu projectId={project.id} />
         <ExportMenu chatId={chat.id} />
+        {isProject && (
+          <button className="btn-ghost px-2 py-1.5" onClick={onToggleDrawer} title="Project structure">
+            <Boxes size={15} />
+          </button>
+        )}
       </div>
     </header>
   );

@@ -1,12 +1,13 @@
 import {
   AlertTriangle, Archive, Braces, Camera, CircleCheck, CircleSlash, Clock, CloudUpload, FileDiff, FileText,
   GitBranch, GitCommitHorizontal, GitMerge, Globe, Keyboard, ListTree, MousePointerClick, MoveVertical,
-  OctagonX, Plug, Scan, Search as SearchIcon, Sparkles, SquareTerminal, Terminal,
+  Boxes, OctagonX, Plug, Scan, Search as SearchIcon, Sparkles, SquareTerminal, Terminal,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useState } from 'react';
 import type {
   AiCallPayload, BrowserActionPayload, ChatEvent, CheckpointPayload, CommandPayload, CompactionPayload, ErrorPayload,
-  FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, StatusPayload, ToolCallPayload,
+  FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, SessionsPayload, StatusPayload, ToolCallPayload,
 } from '@shared/types';
 import { fmtDuration, fmtTokens, plural } from '../../lib/format';
 import { DiffView } from '../DiffView';
@@ -323,6 +324,68 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
         ))}
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- project sessions (live block)
+
+const SESSION_TONE: Record<string, string> = {
+  running: 'text-accent', completed: 'text-ok', paused: 'text-dim',
+  timeout: 'text-warn', failed: 'text-err', needs_attention: 'text-warn', planned: 'text-dim', abandoned: 'text-dim',
+};
+
+export function SessionsRow({ ev }: { ev: ChatEvent }) {
+  const p = ev.payload as SessionsPayload;
+  const total = p.sessions.length;
+  const done = p.sessions.filter((s) => s.status === 'completed').length;
+  const running = p.sessions.filter((s) => s.status === 'running').length;
+  const attention = p.sessions.some((s) => s.status === 'timeout' || s.status === 'needs_attention' || s.status === 'failed');
+
+  const label = p.done
+    ? <span className="text-ok">{done === total ? `${total} sessions completed` : `Sessions settled · ${done}/${total} completed`}</span>
+    : attention
+      ? <span>{running} running · <span className="text-warn">needs attention</span></span>
+      : <span>{running} session{running === 1 ? '' : 's'} running{done > 0 ? ` · ${done} completed` : ''}</span>;
+
+  return (
+    <ActivityRow
+      icon={attention ? <AlertTriangle size={14} /> : <Boxes size={14} />}
+      running={!p.done}
+      tone={attention ? 'warn' : 'default'}
+      label={<span className="inline-flex items-center gap-2">{p.milestoneKey && <span className="text-dim">{p.milestoneKey} —</span>}{label}</span>}
+      meta={p.milestoneName || undefined}
+      defaultOpen={!p.done}
+    >
+      <div className="space-y-1.5">
+        {p.sessions.map((s) => {
+          const tone = SESSION_TONE[s.status] ?? 'text-mut';
+          const dot = s.status === 'running' ? '●' : s.status === 'completed' ? '✓' : s.status === 'planned' ? '○' : s.status === 'paused' ? '⏸' : '⚠';
+          const inner = (
+            <div className="flex items-start gap-2.5 rounded-md px-2 py-1.5">
+              <span className={`shrink-0 ${tone}`}>{dot}</span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="mono shrink-0 text-[12px] text-ink">{s.key}</span>
+                  <span className="min-w-0 truncate text-[12.5px] text-mut">{s.name}</span>
+                  {s.startedAt && s.status === 'running' && <span className="shrink-0 text-[11px] text-dim">{fmtDuration(Date.now() - s.startedAt)}</span>}
+                  <span className={`ml-auto shrink-0 text-[11px] ${tone}`}>{s.status}</span>
+                </div>
+                {(s.builderState || s.reviewerState) && (
+                  <div className="mt-0.5 flex flex-wrap gap-x-4 text-[11px] text-dim">
+                    {s.builderState && <span>Builder <span className="text-mut">{s.builderState}</span></span>}
+                    {s.reviewerState && <span>Reviewer <span className="text-mut">{s.reviewerState}</span></span>}
+                  </div>
+                )}
+                {s.note && <div className="mt-0.5 truncate text-[11.5px] text-dim">{s.note}</div>}
+              </div>
+            </div>
+          );
+          return s.chatId
+            ? <Link key={s.key} to={`/c/${s.chatId}`} className="block transition-colors hover:bg-bg2" title="Open this session">{inner}</Link>
+            : <div key={s.key} className="opacity-80">{inner}</div>;
+        })}
+      </div>
+    </ActivityRow>
   );
 }
 

@@ -26,6 +26,7 @@ interface ServerDef {
 const SERVERS: ServerDef[] = [
   { key: 'tandem_browser', label: 'Tandem Browser', script: 'mcp-browser.cjs', roles: ['builder', 'final repair', 'reviewer'] },
   { key: 'tandem', label: 'Tandem Working Directory', script: 'mcp-workdir.cjs', roles: ['builder', 'final repair'] },
+  { key: 'tandem_director', label: 'Project Director', script: 'mcp-director.cjs', roles: ['director'] },
 ];
 
 interface RawTool {

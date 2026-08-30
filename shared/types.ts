@@ -66,6 +66,10 @@ export interface Chat {
   running: boolean;
   lastCompactionEventId: string | null;
   gitState?: GitFlowState | null;
+  /** 'project' = a Project Director chat; absent/'chat' = a normal session */
+  kind?: 'chat' | 'project';
+  /** for kind='project': the run this chat directs */
+  projectRunId?: string | null;
 }
 
 // ---------------------------------------------------------------- events
@@ -85,7 +89,8 @@ export type EventKind =
   | 'error'
   | 'browser'
   | 'checkpoint'
-  | 'tool_call';
+  | 'tool_call'
+  | 'sessions';
 
 export type StepStatus = 'running' | 'done' | 'failed' | 'stopped';
 
@@ -142,7 +147,7 @@ export interface AiUsage {
 
 export interface AiCallPayload {
   /** 'compactor' appears only in historical events from the removed Compactor role */
-  role: RoleName | 'final_repair' | 'compactor';
+  role: RoleName | 'final_repair' | 'compactor' | 'director';
   provider: Provider;
   model: string;
   effort: Effort;
@@ -277,6 +282,7 @@ export type EventPayloadMap = {
   browser: BrowserActionPayload;
   checkpoint: CheckpointPayload;
   tool_call: ToolCallPayload;
+  sessions: SessionsPayload;
 };
 
 export interface ChatEvent<K extends EventKind = EventKind> {
@@ -353,7 +359,7 @@ export interface DirListing {
 
 // ---------------------------------------------------------------- prompts
 
-export type PromptGroup = 'builder' | 'reviewer' | 'repair';
+export type PromptGroup = 'builder' | 'reviewer' | 'repair' | 'director';
 
 export interface PromptEntry {
   key: string;
@@ -512,6 +518,102 @@ export interface Integration {
   tools: IntegrationTool[];
 }
 
+// ---------------------------------------------------------------- project director
+
+export type ProjectRunState =
+  | 'PLANNING' | 'RUNNING' | 'PAUSING' | 'PAUSED' | 'RESUMING'
+  | 'COMPLETED' | 'NEEDS_USER' | 'FAILED';
+
+export type PdMilestoneStatus = 'planned' | 'ready' | 'running' | 'integrating' | 'completed' | 'blocked';
+
+export type PdSessionStatus =
+  | 'planned'      // defined, dependencies not yet satisfied or not started
+  | 'running'      // its underlying chat run is active
+  | 'completed'    // run finished ok (review policy included)
+  | 'failed'       // run failed and no recovery has superseded it
+  | 'timeout'      // run hit its time limit — awaiting a Director decision
+  | 'needs_attention' // failure surfaced, Director analyzing/deciding
+  | 'paused'       // stopped by project pause; work preserved
+  | 'abandoned';   // Director decided (reviewed) the session is no longer needed
+
+export interface PdSession {
+  id: string;
+  runId: string;
+  milestoneId: string;
+  key: string;             // e.g. "S3.1"
+  name: string;
+  purpose: string;         // short human description
+  prompt: string;          // the contract given to the session's Builder
+  chatId: string | null;   // the EXISTING Tandem chat executing this session
+  status: PdSessionStatus;
+  dependsOn: string[];     // session keys within the run
+  branch: string | null;   // pd/<key> when isolated
+  cwd: string | null;      // worktree dir or the project root
+  resultSummary: string | null;
+  reviewVerdict: 'pass' | 'findings' | null;
+  /** live sub-state derived from the underlying chat (display only) */
+  builderState?: 'working' | 'finished' | 'failed' | null;
+  reviewerState?: 'waiting' | 'reviewing' | 'accepted' | 'findings' | null;
+  startedAt: number | null;
+  endedAt: number | null;
+}
+
+export interface PdMilestone {
+  id: string;
+  runId: string;
+  key: string;             // e.g. "M2"
+  name: string;
+  goal: string;
+  acceptance: string;
+  status: PdMilestoneStatus;
+  orderIdx: number;
+  dependsOn: string[];     // milestone keys
+  sessions: PdSession[];
+}
+
+export interface PdActivity {
+  id: string;
+  runId: string;
+  ts: number;
+  kind: 'plan' | 'decision' | 'session' | 'integration' | 'recovery' | 'state' | 'review';
+  text: string;
+  detail?: string | null;
+}
+
+export interface ProjectRun {
+  id: string;
+  projectId: string;       // the anchor Tandem project (existing projects row)
+  chatId: string;          // the Project Chat (an existing chats row, kind='project')
+  title: string;
+  goal: string;
+  state: ProjectRunState;
+  integrationBranch: string | null;
+  planSummary: string | null;
+  createdAt: number;
+  updatedAt: number;
+  milestones: PdMilestone[];
+}
+
+/** live project execution block in the Project Chat — ONE event, updated in place */
+export interface SessionsPayload {
+  runId: string;
+  milestoneKey: string;
+  milestoneName: string;
+  /** snapshot of the sessions this wave tracks */
+  sessions: {
+    key: string;
+    name: string;
+    chatId: string | null;
+    status: PdSessionStatus;
+    builderState?: string | null;
+    reviewerState?: string | null;
+    note?: string | null;       // e.g. "Waiting for S2.3" / current activity line
+    startedAt?: number | null;
+    endedAt?: number | null;
+  }[];
+  done: boolean;
+}
+
 // ---------------------------------------------------------------- project memory
 
 /**
@@ -549,4 +651,5 @@ export type ServerMsg =
   | { type: 'chat'; chat: Chat }
   | { type: 'chat_deleted'; chatId: string }
   | { type: 'context'; chatId: string; usage: ContextUsage }
-  | { type: 'project'; project: Project };
+  | { type: 'project'; project: Project }
+  | { type: 'project_run'; run: ProjectRun };

@@ -16,6 +16,10 @@ import {
 import { toHtml, toMarkdown, type ExportBundle } from './exporter';
 import { performNativeCompaction } from './engine/providerContext';
 import {
+  createProjectRun, directorUserMessage, handleDirectorTool, pauseProject, resumeProject,
+} from './director/engine';
+import { getRun, listActivity, runForChat } from './director/store';
+import {
   allMemories, createMemory, getMemory, listMemories, searchMemories, toToolShape,
   toJson as toMemoryJson, toMarkdown as toMemoryMarkdown, toPlainText as toMemoryText,
 } from './projectMemory';
@@ -123,12 +127,88 @@ export function registerRoutes(app: FastifyInstance): void {
 
     const isFirst = !db.prepare("SELECT id FROM events WHERE chat_id = ? AND kind = 'user_message' LIMIT 1").get(chat.id);
     addEvent(chat.id, 'user_message', attachments.length > 0 ? { text: clean, attachments } : { text: clean });
-    if (isFirst || chat.title === 'New chat') {
+    if (isFirst || chat.title === 'New chat' || chat.title === 'New project') {
       setChatTitle(chat.id, deriveTitle(clean || attachments[0]?.name || 'New chat'));
     }
-    void startRun(chat.id, clean, attachments, { review: review !== false });
+    // a Project Chat message goes to the Project Director; everything else is
+    // the unchanged normal-session path
+    if (chat.kind === 'project') directorUserMessage(chat, clean);
+    else void startRun(chat.id, clean, attachments, { review: review !== false });
     return { ok: true };
   });
+
+  // ------------------------------------------------- project director
+
+  app.post('/api/project-runs', async (req, reply) => {
+    const { dirPath } = (req.body ?? {}) as { dirPath?: string };
+    if (!dirPath?.trim()) return reply.code(400).send({ error: 'A target directory is required.' });
+    if (!path.isAbsolute(dirPath) || !fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+      return reply.code(400).send({ error: 'The target must be an existing absolute directory.' });
+    }
+    try {
+      return createProjectRun(dirPath);
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : 'Could not create the project run.' });
+    }
+  });
+
+  app.get('/api/project-runs/:id', async (req, reply) => {
+    const run = getRun((req.params as any).id);
+    if (!run) return reply.code(404).send({ error: 'Project run not found.' });
+    return { run, activity: listActivity(run.id) };
+  });
+
+  app.post('/api/project-runs/:id/pause', async (req, reply) => {
+    try {
+      pauseProject((req.params as any).id);
+      return { ok: true, run: getRun((req.params as any).id) };
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : 'Pause failed.' });
+    }
+  });
+
+  app.post('/api/project-runs/:id/resume', async (req, reply) => {
+    try {
+      resumeProject((req.params as any).id);
+      return { ok: true, run: getRun((req.params as any).id) };
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : 'Resume failed.' });
+    }
+  });
+
+  app.post('/api/internal/director', async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, any>;
+    if (b.token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const chat = getChat(String(b.chatId ?? ''));
+    if (!chat || chat.kind !== 'project') return reply.code(403).send({ ok: false, error: 'Not a Project Director chat.' });
+    const out = await handleDirectorTool(chat.id, String(b.op ?? ''), b.args ?? {});
+    // record the orchestration call in the project chat like any other tool
+    const run = runForChat(chat.id);
+    addEvent(chat.id, 'tool_call', {
+      tool: `director_${String(b.op ?? '')}`,
+      integration: 'Project Director',
+      role: 'director',
+      args: summarizeToolArgs(b.args ?? {}),
+      status: out.ok ? 'done' : 'failed',
+      resultPreview: (out.text ?? out.error ?? '').slice(0, 1_000),
+      ...(out.error ? { error: out.error } : {}),
+      startedAt: Date.now(),
+      durationMs: 0,
+    });
+    if (run) { /* run broadcast happens inside the store on mutation */ }
+    return out.ok ? { ok: true, text: out.text } : reply.code(400).send({ ok: false, error: out.error });
+  });
+
+  /** compact, non-flooding record of a director tool call's arguments */
+  function summarizeToolArgs(args: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(args)) {
+      if (Array.isArray(v)) out[k] = v.length <= 8 && v.every((x) => typeof x === 'string') ? v : `[${v.length} items]`;
+      else if (typeof v === 'string') out[k] = v.length > 300 ? `${v.slice(0, 300)}…` : v;
+      else out[k] = v;
+    }
+    return out;
+  }
 
   // ---------------------------------------------------------------- attachments
 

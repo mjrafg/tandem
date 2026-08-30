@@ -11,6 +11,7 @@ import { registerProjectRoutes } from './projectRoutes';
 import { registerIntegrationRoutes } from './integrationRoutes';
 import { recoverInterruptedRuns } from './engine/run';
 import { backfillModelWindows } from './context';
+import { recoverDirectorRuns } from './director/engine';
 import { seedIfEmpty } from './mock/seed';
 
 // ---------------------------------------------------------------- CLI mode
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
   ensureUser();
   seedIfEmpty();
   recoverInterruptedRuns();
+  recoverDirectorRuns();
   backfillModelWindows();
 
   const app = Fastify({

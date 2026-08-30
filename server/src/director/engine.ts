@@ -1,0 +1,882 @@
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { Chat, PdSession, ProjectRun, SessionsPayload } from '../../../shared/types';
+import { config } from '../config';
+import { db, getBuilderSession, getChat, getProject, rowToChat, setGitStateRow } from '../db';
+import { addEvent, broadcastChat, deriveTitle, setChatRunning, setChatTitle, updateEvent } from '../events';
+import { directorSystemText, getPrompt, renderPrompt } from '../prompts';
+import { getSettings } from '../settings';
+import { findOrCreateProject } from '../projectRoutes';
+import { runClaudeTurn } from '../engine/claude';
+import { runCodexReview } from '../engine/codex';
+import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, stopRun } from '../engine/run';
+import { parseVerdict, startRun } from '../engine/workflow';
+import {
+  addActivity, broadcastRun, createRun, depsSatisfied, getRun, getRunRaw, getSession, listRuns,
+  milestoneByKey, patchMilestone, patchRun, patchSession, planSessions, runForChat, sessionsByStatus,
+  setPlan, setRunState, stateSnapshot, type MilestoneInput, type SessionInput,
+} from './store';
+
+/**
+ * The Project Director engine.
+ *
+ * The Director is an AI (a Claude session on the Project Chat) that operates
+ * Tandem's EXISTING session system from above — it defines work, launches
+ * ordinary chats through the same startRun used by a human's message, watches
+ * their outcomes, and reacts. This engine enforces the deterministic
+ * invariants (dependencies, cycles, branch isolation, serialized shared
+ * directories, the two-review policy) and executes the Director's tool calls;
+ * every judgment call stays with the AI.
+ */
+
+const DIRECTOR_TIMEOUT = 15 * 60_000;
+const REVIEW_TIMEOUT = 15 * 60_000;
+const DEFAULT_SESSION_TIMEOUT_MIN = 30;
+const MAX_SESSION_TIMEOUT_MIN = 90;
+const POLL_MS = 5_000;
+
+// ---------------------------------------------------------------- run creation
+
+export function createProjectRun(dirPath: string): { run: ProjectRun; chat: Chat } {
+  const project = findOrCreateProject(dirPath, 'directory');
+  const chatId = randomUUID();
+  const now = Date.now();
+  db.prepare(`INSERT INTO chats (id, project_id, title, created_at, updated_at, running, kind) VALUES (?, ?, 'New project', ?, ?, 0, 'project')`)
+    .run(chatId, project.id, now, now);
+  const run = createRun(project.id, chatId, '');
+  db.prepare('UPDATE chats SET project_run_id = ? WHERE id = ?').run(run.id, chatId);
+  addActivity(run.id, 'state', 'Project run created');
+  const chat = rowToChat(db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId));
+  broadcastChat(chatId);
+  return { run, chat };
+}
+
+// ---------------------------------------------------------------- director turns
+
+interface TurnState { busy: boolean; queued: string[] }
+const turns = new Map<string, TurnState>();
+
+function turnState(runId: string): TurnState {
+  let t = turns.get(runId);
+  if (!t) { t = { busy: false, queued: [] }; turns.set(runId, t); }
+  return t;
+}
+
+/** A user message in the Project Chat — the same entry point as normal chats. */
+export function directorUserMessage(chat: Chat, text: string): void {
+  const run = runForChat(chat.id);
+  if (!run) return;
+  if (!getRunRaw(run.id).goal) patchRun(run.id, { goal: text.slice(0, 2_000) });
+  if (run.state === 'NEEDS_USER') setRunState(run.id, 'RUNNING', 'User replied — continuing');
+  void pumpDirector(run.id, text, 'user');
+}
+
+export function queueObservation(runId: string, text: string): void {
+  void pumpDirector(runId, text, 'observation');
+}
+
+/**
+ * Serialize Director turns per run: concurrent triggers queue up and are
+ * delivered together in the next turn.
+ */
+async function pumpDirector(runId: string, message: string, kind: 'user' | 'observation'): Promise<void> {
+  const t = turnState(runId);
+  const wrapped = kind === 'observation' ? `- ${message}` : message;
+  if (t.busy) {
+    t.queued.push(wrapped);
+    return;
+  }
+  t.busy = true;
+  try {
+    let next: { text: string; isObservation: boolean } | null = {
+      text: kind === 'observation' ? renderPrompt('director.observation', { observations: wrapped }) : message,
+      isObservation: kind === 'observation',
+    };
+    while (next) {
+      await runDirectorTurn(runId, next.text);
+      await processAfterTurn(runId);
+      const queued = t.queued.splice(0);
+      next = queued.length > 0
+        ? { text: renderPrompt('director.observation', { observations: queued.join('\n') }), isObservation: true }
+        : null;
+    }
+  } finally {
+    t.busy = false;
+  }
+}
+
+/** One real Claude turn for the Director on the Project Chat. */
+async function runDirectorTurn(runId: string, message: string): Promise<void> {
+  const run = getRun(runId);
+  if (!run) return;
+  const chat = getChat(run.chatId);
+  const project = getProject(chat?.projectId ?? '');
+  if (!chat || !project) return;
+  if (isRunning(chat.id)) return; // a turn is already live (belt and braces)
+
+  const settings = getSettings();
+  // no rootPath: the Director never switches branches, so it must not trip the
+  // same-directory concurrency guard that protects real sessions
+  const ctx: RunCtx = { chatId: chat.id, runId: randomUUID(), stopped: false };
+  registerCtx(ctx);
+  setChatRunning(chat.id, true);
+  try {
+    const state = renderPrompt('director.state', { project_state: stateSnapshot(runId) });
+    const result = await runClaudeTurn(new RunHandle(ctx, chat, project, []), {
+      role: 'director',
+      model: settings.roles.builder.model,
+      effort: settings.roles.builder.effort,
+      systemAppendix: directorSystemText(settings),
+      message: `${state}\n\n${message}`,
+      cwd: project.rootPath,
+      resumeSessionId: getBuilderSession(chat.id),
+      withDirectorTools: true,
+      timeoutMs: DIRECTOR_TIMEOUT,
+    });
+    if (result.sessionId) {
+      db.prepare('UPDATE chats SET builder_session_id = ?, builder_session_provider = ? WHERE id = ?')
+        .run(result.sessionId, 'claude-code', chat.id);
+    }
+    if (!result.ok && !result.stopped) {
+      addEvent(chat.id, 'error', { message: 'Director call failed', detail: result.error, source: 'director', retryable: true });
+    }
+  } finally {
+    releaseCtx(ctx);
+    setChatRunning(chat.id, false);
+  }
+}
+
+// ---------------------------------------------------------------- review plumbing
+
+/** Run one independent review (the SAME Codex reviewer) on an orchestration artifact. */
+async function reviewArtifact(runId: string, prompt: string): Promise<{ verdict: 'pass' | 'findings'; findingsText: string } | null> {
+  const run = getRun(runId);
+  if (!run) return null;
+  const chat = getChat(run.chatId);
+  const project = getProject(chat?.projectId ?? '');
+  if (!chat || !project) return null;
+  const settings = getSettings();
+  const ctx: RunCtx = { chatId: chat.id, runId: randomUUID(), stopped: false, phase: 'reviewer' };
+  registerCtx(ctx);
+  setChatRunning(chat.id, true);
+  try {
+    const h = new RunHandle(ctx, chat, project, []);
+    h.status('Reviewer is checking the Director\'s plan/decision…');
+    const result = await runCodexReview(h, {
+      model: settings.roles.reviewer.model,
+      effort: settings.roles.reviewer.effort,
+      prompt: `${prompt}\n\n${getPrompt('reviewer.output_format')}`,
+      cwd: project.rootPath,
+      timeoutMs: REVIEW_TIMEOUT,
+    });
+    if (!result.ok) {
+      addEvent(chat.id, 'error', { message: 'Reviewer could not run', detail: result.error, source: 'reviewer', retryable: true });
+      return null;
+    }
+    const { verdict, items } = parseVerdict(result.text);
+    addEvent(chat.id, 'findings', { verdict, round: 0, items }, { runId: ctx.runId });
+    const findingsText = items.map((f, i) => `${i + 1}. [${f.severity}] ${f.title}\n   ${f.detail}${f.recommendation ? `\n   Recommendation: ${f.recommendation}` : ''}`).join('\n');
+    return { verdict, findingsText };
+  } finally {
+    releaseCtx(ctx);
+    setChatRunning(chat.id, false);
+  }
+}
+
+/**
+ * Post-turn processing: the review loops for plans and recovery decisions.
+ * Same policy as sessions — at most two reviews, at most two repairs, and the
+ * second repair proceeds WITHOUT a third review.
+ */
+async function processAfterTurn(runId: string): Promise<void> {
+  const raw = getRunRaw(runId);
+  if (!raw) return;
+
+  // ---- master plan review loop
+  if (raw.plan_review_round > 0 && raw.plan_review_round <= 3) {
+    const run = getRun(runId)!;
+    if (run.milestones.length === 0) return; // plan withdrawn; nothing to review
+    const round = raw.plan_review_round as number;
+    if (round === 3) {
+      // second repair: proceeds without a third review — the policy's hard cap
+      patchRun(runId, { plan_review_round: 0 });
+      addActivity(runId, 'review', 'Plan revised twice — proceeding without a third review (review policy cap)');
+      acceptPlan(runId);
+      return;
+    }
+    const planDoc = stateSnapshot(runId);
+    const review = await reviewArtifact(runId, renderPrompt('director.plan_review_request', {
+      project_goal: run.goal, plan: planDoc,
+    }));
+    if (!review) {
+      addActivity(runId, 'review', 'Plan review could not run — plan proceeds unreviewed (reviewer unavailable)');
+      patchRun(runId, { plan_review_round: 0 });
+      acceptPlan(runId);
+      return;
+    }
+    if (review.verdict === 'pass') {
+      patchRun(runId, { plan_review_round: 0 });
+      addActivity(runId, 'review', `Plan accepted by the independent reviewer (round ${round})`);
+      acceptPlan(runId);
+      return;
+    }
+    addActivity(runId, 'review', `Plan review round ${round}: findings returned`);
+    patchRun(runId, { plan_review_round: round + 1 });
+    const key = round === 1 ? 'director.plan_findings_message' : 'director.plan_final_message';
+    await runDirectorTurn(runId, renderPrompt(key, { findings: review.findingsText }));
+    await processAfterTurn(runId); // the resubmission bumped state; continue the loop
+    return;
+  }
+
+  // ---- recovery decision review loop
+  if (raw.pending_recovery) {
+    let pending: any;
+    try { pending = JSON.parse(raw.pending_recovery); } catch { patchRun(runId, { pending_recovery: null }); return; }
+    const round = pending.round as number;
+    if (round >= 3) {
+      patchRun(runId, { pending_recovery: null });
+      addActivity(runId, 'review', `Recovery for ${pending.sessionKey} revised twice — applying without a third review (review policy cap)`);
+      await applyRecovery(runId, pending);
+      return;
+    }
+    const review = await reviewArtifact(runId, renderPrompt('director.recovery_review_request', {
+      session_context: pending.context ?? '(context unavailable)',
+      decision: `Action: ${pending.action}\nReasoning: ${pending.reasoning}${pending.newPrompt ? `\nNew/updated session instructions:\n${pending.newPrompt}` : ''}${pending.extraMinutes ? `\nAdditional time: ${pending.extraMinutes} minutes` : ''}`,
+    }));
+    if (!review || review.verdict === 'pass') {
+      patchRun(runId, { pending_recovery: null });
+      addActivity(runId, 'review', review
+        ? `Recovery decision for ${pending.sessionKey} accepted by the reviewer (round ${round})`
+        : `Recovery review could not run — decision for ${pending.sessionKey} applied unreviewed (reviewer unavailable)`);
+      await applyRecovery(runId, pending);
+      return;
+    }
+    addActivity(runId, 'review', `Recovery review round ${round} for ${pending.sessionKey}: findings returned`);
+    pending.round = round + 1;
+    pending.awaitingRevision = true;
+    patchRun(runId, { pending_recovery: JSON.stringify(pending) });
+    const key = round === 1 ? 'director.recovery_findings_message' : 'director.recovery_final_message';
+    await runDirectorTurn(runId, renderPrompt(key, { findings: review.findingsText }));
+    await processAfterTurn(runId);
+  }
+}
+
+function acceptPlan(runId: string): void {
+  const raw = getRunRaw(runId);
+  if (raw.state === 'PLANNING') {
+    setRunState(runId, 'RUNNING', 'Master plan accepted — project is running');
+    queueObservation(runId, 'The master plan passed the independent review. Tell the user, then begin: inspect the repository, plan the first ready milestone into sessions, and start the ones you judge ready.');
+  } else {
+    addActivity(runId, 'plan', 'Milestone plan revised');
+    queueObservation(runId, 'Your revised milestone plan is accepted. Continue orchestration.');
+  }
+}
+
+// ---------------------------------------------------------------- git helpers
+
+function git(dir: string, args: string[], timeoutMs = 20_000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile('git', ['-C', dir, ...args], { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ ok: !err, stdout: String(stdout ?? '').trim(), stderr: String(stderr ?? '').trim() });
+    });
+  });
+}
+
+async function isRepo(dir: string): Promise<boolean> {
+  return (await git(dir, ['rev-parse', '--git-dir'], 8_000)).ok;
+}
+
+/** Ensure the run's integration branch exists (created at current HEAD, no switch). */
+async function ensureIntegrationBranch(runId: string, rootPath: string): Promise<string> {
+  const raw = getRunRaw(runId);
+  if (raw.integration_branch) return raw.integration_branch;
+  if (!(await isRepo(rootPath))) {
+    throw new Error('The project directory is not a Git repository yet — first run a scaffolding session whose prompt initializes the repository (git init, baseline commit).');
+  }
+  const head = await git(rootPath, ['rev-parse', '--verify', 'HEAD']);
+  if (!head.ok) throw new Error('The repository has no commits yet — the scaffolding session must create a baseline commit first.');
+  const name = 'pd/integration';
+  const exists = await git(rootPath, ['rev-parse', '--verify', `refs/heads/${name}`]);
+  if (!exists.ok) {
+    const made = await git(rootPath, ['branch', name]);
+    if (!made.ok) throw new Error(`Could not create the integration branch: ${made.stderr}`);
+  }
+  patchRun(runId, { integration_branch: name });
+  addActivity(runId, 'integration', `Integration branch ${name} established`);
+  return name;
+}
+
+// ---------------------------------------------------------------- session launching
+
+function worktreeDir(runId: string, key: string): string {
+  const dir = path.join(config.dataDir, 'worktrees', runId.slice(0, 8), key.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  return dir;
+}
+
+/** Another launched session (or integration) already occupying this directory? */
+function dirBusyWithin(runId: string, cwd: string, exceptKey?: string): PdSession | null {
+  const running = sessionsByStatus(runId, ['running']);
+  return running.find((s) => s.cwd === cwd && s.key !== exceptKey) ?? null;
+}
+
+export async function launchSession(runId: string, key: string, timeoutMin?: number): Promise<string> {
+  const run = getRun(runId);
+  if (!run) throw new Error('Unknown project run.');
+  if (!['RUNNING', 'RESUMING', 'PLANNING'].includes(run.state)) {
+    throw new Error(`Sessions cannot start while the project is ${run.state}.`);
+  }
+  const session = getSession(runId, key);
+  if (!session) throw new Error(`Unknown session: ${key}`);
+  if (session.status === 'running') throw new Error(`Session ${key} is already running.`);
+  if (session.status === 'completed') throw new Error(`Session ${key} is already completed.`);
+  const deps = depsSatisfied(runId, key);
+  if (!deps.ok) throw new Error(`Session ${key} cannot start: unfinished dependencies ${deps.missing.join(', ')}.`);
+
+  const rootProject = getProject(run.projectId)!;
+  let cwd = rootProject.rootPath;
+  let chatProjectId = run.projectId;
+
+  if (session.branch) {
+    // isolated: its own worktree on its own pd/ branch, off the integration branch
+    const integration = await ensureIntegrationBranch(runId, rootProject.rootPath);
+    const dir = session.cwd ?? worktreeDir(runId, key);
+    if (!fs.existsSync(path.join(dir, '.git'))) {
+      const branchExists = (await git(rootProject.rootPath, ['rev-parse', '--verify', `refs/heads/${session.branch}`])).ok;
+      const wt = branchExists
+        ? await git(rootProject.rootPath, ['worktree', 'add', dir, session.branch], 30_000)
+        : await git(rootProject.rootPath, ['worktree', 'add', dir, '-b', session.branch, integration], 30_000);
+      if (!wt.ok) throw new Error(`Could not create the session worktree: ${wt.stderr}`);
+    }
+    const wtProject = findOrCreateProject(dir, 'directory');
+    cwd = wtProject.rootPath;
+    chatProjectId = wtProject.id;
+  } else if (await isRepo(rootProject.rootPath)) {
+    // shared directory: work lands directly on the integration branch;
+    // hard invariant — one session at a time in a shared directory
+    const busy = dirBusyWithin(runId, rootProject.rootPath, key);
+    if (busy) throw new Error(`Session ${busy.key} is already working in the shared project directory — mark ${key} isolated to run it in parallel, or start it after ${busy.key} finishes.`);
+    await ensureIntegrationBranch(runId, rootProject.rootPath);
+  } else {
+    const busy = dirBusyWithin(runId, rootProject.rootPath, key);
+    if (busy) throw new Error(`Session ${busy.key} is already working in the project directory.`);
+  }
+
+  // the session is a NORMAL Tandem chat — the same primitive a human's New chat uses
+  const chatId = randomUUID();
+  const now = Date.now();
+  db.prepare('INSERT INTO chats (id, project_id, title, created_at, updated_at, running) VALUES (?, ?, ?, ?, ?, 0)')
+    .run(chatId, chatProjectId, `${key} · ${session.name}`.slice(0, 80), now, now);
+  broadcastChat(chatId);
+
+  // pre-seed the chat's persistent Git policy so its checkpoints land on the
+  // right branch (repoPath must string-equal the chat's project rootPath)
+  if (session.branch) {
+    setGitStateRow(chatId, { mode: 'direct', workBranch: session.branch, targetBranch: session.branch, push: 'never', repoPath: cwd });
+  } else if (getRunRaw(runId).integration_branch) {
+    const ib = getRunRaw(runId).integration_branch as string;
+    setGitStateRow(chatId, { mode: 'direct', workBranch: ib, targetBranch: ib, push: 'never', repoPath: cwd });
+  }
+
+  patchSession(runId, key, { chatId, cwd, status: 'running', startedAt: Date.now() });
+  addActivity(runId, 'session', `${key} ${session.name} started`, `chat ${chatId}`);
+  refreshLiveBlock(runId);
+  ensurePoller(runId);
+
+  const timeoutMs = Math.min(timeoutMin ?? DEFAULT_SESSION_TIMEOUT_MIN, MAX_SESSION_TIMEOUT_MIN) * 60_000;
+  const baseline = chatMaxSeq(chatId);
+  addEvent(chatId, 'user_message', { text: session.prompt });
+  setChatTitle(chatId, deriveTitle(session.prompt));
+  void monitorSession(runId, key, chatId, baseline, startRun(chatId, session.prompt, [], { review: true, timeoutMs }));
+  return chatId;
+}
+
+/** Resume a paused session: a continuation message on the SAME chat — the existing resume primitive. */
+export async function resumeSession(runId: string, key: string, note?: string): Promise<void> {
+  const session = getSession(runId, key);
+  if (!session) throw new Error(`Unknown session: ${key}`);
+  if (!session.chatId) { await launchSession(runId, key); return; }
+  if (session.status === 'running') throw new Error(`Session ${key} is already running.`);
+  if (!['paused', 'timeout', 'failed', 'needs_attention'].includes(session.status)) {
+    throw new Error(`Session ${key} is ${session.status} and has nothing to resume.`);
+  }
+  const deps = depsSatisfied(runId, key);
+  if (!deps.ok) throw new Error(`Session ${key} cannot resume: unfinished dependencies ${deps.missing.join(', ')}.`);
+  const busy = session.cwd ? dirBusyWithin(runId, session.cwd, key) : null;
+  if (busy) throw new Error(`Session ${busy.key} is already working in that directory.`);
+  const text = renderPrompt('director.session_continuation', { note: note ?? '' }).trim();
+  patchSession(runId, key, { status: 'running', startedAt: Date.now() });
+  addActivity(runId, 'session', `${key} resumed`);
+  refreshLiveBlock(runId);
+  ensurePoller(runId);
+  const baseline = chatMaxSeq(session.chatId);
+  addEvent(session.chatId, 'user_message', { text });
+  void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true }));
+}
+
+// ---------------------------------------------------------------- monitoring
+
+/** Max event seq currently in a chat — the baseline for reading a run's outcome. */
+function chatMaxSeq(chatId: string): number {
+  const r = db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM events WHERE chat_id = ?').get(chatId) as any;
+  return r.s as number;
+}
+
+
+/** Await the ordinary run and translate its outcome into orchestration state. */
+async function monitorSession(runId: string, key: string, chatId: string, baselineSeq: number, running: Promise<void>): Promise<void> {
+  try { await running; } catch { /* startRun handles its own errors */ }
+
+  const outcome = readOutcome(chatId, baselineSeq);
+  const run = getRunRaw(runId);
+  const pausing = run && (run.state === 'PAUSING' || run.state === 'PAUSED');
+  let status: PdSession['status'];
+  if (pausing || outcome.phase === 'stopped') status = 'paused';
+  else if (outcome.timedOut) status = 'timeout';
+  else if (outcome.failed || outcome.phase === 'failed') status = 'failed';
+  else if (outcome.phase === 'finished') status = 'completed';
+  else status = 'failed';
+
+  patchSession(runId, key, {
+    status,
+    endedAt: Date.now(),
+    resultSummary: outcome.summary.slice(0, 1_000),
+    ...(outcome.reviewVerdict ? { reviewVerdict: outcome.reviewVerdict } : {}),
+  });
+  addActivity(runId, 'session',
+    status === 'completed' ? `${key} completed${outcome.reviewVerdict ? ` · reviewer: ${outcome.reviewVerdict}` : ''}`
+      : status === 'paused' ? `${key} stopped and preserved`
+        : status === 'timeout' ? `${key} timed out`
+          : `${key} failed`);
+  refreshLiveBlock(runId);
+
+  if (pausing) {
+    finishPauseIfDone(runId);
+    return;
+  }
+  if (status === 'completed') {
+    const ready = readySessions(runId);
+    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict ? ` Reviewer verdict: ${outcome.reviewVerdict}.` : ''} Result summary: ${outcome.summary.slice(0, 600) || '(no summary)'}${ready.length ? ` Sessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
+  } else {
+    patchSession(runId, key, { status: 'needs_attention' });
+    const context = await failureContext(runId, key, chatId, outcome);
+    queueObservation(runId, `Session ${key} ${status === 'timeout' ? 'TIMED OUT' : 'FAILED'} and needs your decision. Do NOT mechanically retry — analyze and decide with recover_session (the decision will be independently reviewed).\n${context}`);
+  }
+}
+
+interface Outcome { phase: string; failed: boolean; timedOut: boolean; summary: string; reviewVerdict: 'pass' | 'findings' | null; errorText: string }
+
+function readOutcome(chatId: string, sinceSeq: number): Outcome {
+  const rows = db.prepare('SELECT kind, payload FROM events WHERE chat_id = ? AND seq > ? ORDER BY seq').all(chatId, sinceSeq) as any[];
+  let phase = 'failed';
+  let failed = false;
+  let timedOut = false;
+  let summary = '';
+  let reviewVerdict: Outcome['reviewVerdict'] = null;
+  let errorText = '';
+  const FAIL_MESSAGES = new Set(['Builder call failed', 'Builder repair call failed', 'Final repair call failed', 'The run failed unexpectedly']);
+  for (const r of rows) {
+    const p = JSON.parse(r.payload);
+    // NOTE: the run phase is 'finished' even when the builder errored (only an
+    // unexpected throw yields 'failed', and a Stop yields 'stopped'), so the
+    // error events below — not the phase — are the authoritative failure signal.
+    if (r.kind === 'run' && ['finished', 'stopped', 'failed'].includes(p.phase)) phase = p.phase;
+    if (r.kind === 'assistant_message' && (p.text ?? '').trim()) summary = p.text.trim();
+    if (r.kind === 'findings') reviewVerdict = p.verdict;
+    if (r.kind === 'error') {
+      const text = `${p.message}${p.detail ? ` — ${p.detail}` : ''}`.slice(0, 400);
+      if (FAIL_MESSAGES.has(p.message)) { failed = true; errorText = text; }
+      if (/timed out/i.test(text)) { timedOut = true; if (!errorText) errorText = text; }
+    }
+  }
+  return { phase, failed, timedOut, summary: summary || errorText, reviewVerdict, errorText };
+}
+
+/** Enough real context for an intelligent recovery decision — never a bare "it failed". */
+async function failureContext(runId: string, key: string, chatId: string, outcome: Outcome): Promise<string> {
+  const session = getSession(runId, key)!;
+  const lines = [
+    `Original session contract:\n${session.prompt.slice(0, 1_200)}`,
+    `Elapsed: ${session.startedAt ? Math.round((Date.now() - session.startedAt) / 60_000) : '?'} minutes.`,
+    outcome.errorText ? `Error: ${outcome.errorText}` : '',
+    outcome.summary ? `Last Builder message: ${outcome.summary.slice(0, 600)}` : '',
+  ];
+  const recent = (db.prepare("SELECT kind, payload FROM events WHERE chat_id = ? ORDER BY seq DESC LIMIT 14").all(chatId) as any[])
+    .reverse()
+    .map((r) => {
+      const p = JSON.parse(r.payload);
+      if (r.kind === 'command') return `ran: ${String(p.command).slice(0, 90)} (exit ${p.exitCode})`;
+      if (r.kind === 'file_change') return `changed: ${(p.files ?? []).map((f: any) => f.path).join(', ').slice(0, 120)}`;
+      if (r.kind === 'status') return `status: ${String(p.text).slice(0, 100)}`;
+      if (r.kind === 'checkpoint') return `checkpoint: ${p.action} on ${p.branch}`;
+      return null;
+    })
+    .filter(Boolean);
+  if (recent.length) lines.push(`Recent session activity:\n${recent.map((l) => `  ${l}`).join('\n')}`);
+  if (session.cwd && await isRepo(session.cwd)) {
+    const dirty = await git(session.cwd, ['status', '--porcelain']);
+    const log = await git(session.cwd, ['log', '--oneline', '-5']);
+    const diff = await git(session.cwd, ['diff', '--stat', 'HEAD']);
+    lines.push(`Worktree: ${dirty.stdout ? `${dirty.stdout.split('\n').length} uncommitted files` : 'clean'}${session.branch ? ` on ${session.branch}` : ''}.`);
+    if (log.ok && log.stdout) lines.push(`Recent commits:\n${log.stdout.split('\n').slice(0, 5).map((l) => `  ${l}`).join('\n')}`);
+    if (diff.ok && diff.stdout) lines.push(`Uncommitted diff stat:\n${diff.stdout.split('\n').slice(-3).join('\n')}`);
+  }
+  lines.push(`Preserved: the session's chat, its Claude session, and all work on disk. Options include: continue with more time, resume with guidance, restart with a better contract, split the remaining work, reduce scope, wait for a dependency, or abandon (work stays recoverable).`);
+  return lines.filter(Boolean).join('\n');
+}
+
+function readySessions(runId: string): string[] {
+  return sessionsByStatus(runId, ['planned'])
+    .filter((s) => depsSatisfied(runId, s.key).ok)
+    .map((s) => s.key);
+}
+
+// ---------------------------------------------------------------- live block
+
+const pollers = new Map<string, NodeJS.Timeout>();
+
+function ensurePoller(runId: string): void {
+  if (pollers.has(runId)) return;
+  const timer = setInterval(() => {
+    const running = sessionsByStatus(runId, ['running']);
+    refreshLiveBlock(runId);
+    if (running.length === 0) {
+      clearInterval(timer);
+      pollers.delete(runId);
+    }
+  }, POLL_MS);
+  timer.unref?.();
+  pollers.set(runId, timer);
+}
+
+function deriveLive(chatId: string): { builder: string | null; reviewer: string | null; note: string | null } {
+  const rows = db.prepare("SELECT kind, payload FROM events WHERE chat_id = ? ORDER BY seq DESC LIMIT 20").all(chatId) as any[];
+  let builder: string | null = null;
+  let reviewer: string | null = null;
+  let note: string | null = null;
+  for (const r of rows) {
+    const p = JSON.parse(r.payload);
+    if (!note && r.kind === 'status') note = String(p.text).slice(0, 80);
+    if (!note && r.kind === 'command') note = `$ ${String(p.command).slice(0, 70)}`;
+    if (r.kind === 'ai_call') {
+      if ((p.role === 'builder' || p.role === 'final_repair') && builder == null) {
+        builder = p.status === 'running' ? 'working' : p.status === 'done' ? 'finished' : p.status;
+      }
+      if (p.role === 'reviewer' && reviewer == null) reviewer = p.status === 'running' ? 'reviewing' : p.status;
+    }
+    if (r.kind === 'findings' && reviewer == null) reviewer = p.verdict === 'pass' ? 'accepted' : 'findings';
+  }
+  return { builder, reviewer, note };
+}
+
+/**
+ * The "N sessions running" block — ONE event in the Project Chat per wave,
+ * updated in place exactly like the existing command-group rows.
+ */
+export function refreshLiveBlock(runId: string): void {
+  const run = getRun(runId);
+  if (!run) return;
+  const launched = run.milestones.flatMap((m) => m.sessions.filter((s) => s.chatId))
+    .filter((s) => ['running', 'completed', 'paused', 'timeout', 'failed', 'needs_attention'].includes(s.status));
+  if (launched.length === 0) return;
+  const currentMs = run.milestones.find((m) => m.sessions.some((s) => s.status === 'running'))
+    ?? run.milestones.find((m) => m.sessions.some((s) => s.chatId));
+  // waiting sessions of the current milestone appear too ("○ Integration · Waiting")
+  const waiting = (currentMs?.sessions ?? []).filter((s) => s.status === 'planned' && !s.chatId);
+  const tracked = [...launched, ...waiting];
+  const active = tracked.filter((s) => s.status === 'running');
+
+  const payload: SessionsPayload = {
+    runId,
+    milestoneKey: currentMs?.key ?? '',
+    milestoneName: currentMs?.name ?? '',
+    sessions: tracked.slice(-12).map((s) => {
+      const live = s.status === 'running' && s.chatId ? deriveLive(s.chatId) : { builder: null, reviewer: null, note: null };
+      return {
+        key: s.key, name: s.name, chatId: s.chatId, status: s.status,
+        builderState: live.builder, reviewerState: live.reviewer,
+        note: live.note ?? (s.status === 'planned' ? `Waiting for ${s.dependsOn.join(', ')}` : s.resultSummary?.slice(0, 80) ?? null),
+        startedAt: s.startedAt, endedAt: s.endedAt,
+      };
+    }),
+    done: active.length === 0,
+  };
+
+  const raw = getRunRaw(runId);
+  if (raw.live_event_id) {
+    const updated = updateEvent(raw.live_event_id, payload as unknown as Record<string, unknown>);
+    if (updated) {
+      if (payload.done) patchRun(runId, { live_event_id: null });
+      return;
+    }
+  }
+  if (!payload.done) {
+    const ev = addEvent(run.chatId, 'sessions', payload);
+    patchRun(runId, { live_event_id: ev.id });
+  }
+}
+
+// ---------------------------------------------------------------- recovery
+
+export async function applyRecovery(runId: string, pending: any): Promise<void> {
+  const key = pending.sessionKey as string;
+  const session = getSession(runId, key);
+  if (!session) return;
+  addActivity(runId, 'recovery', `Recovery applied for ${key}: ${pending.action}`, pending.reasoning?.slice(0, 1_500));
+  try {
+    if (pending.action === 'continue') {
+      const note = pending.newPrompt ? `\nUpdated guidance from the Project Director:\n${pending.newPrompt}` : '';
+      await resumeSessionWithTimeout(runId, key, note, pending.extraMinutes);
+    } else if (pending.action === 'restart') {
+      if (pending.newPrompt) patchSession(runId, key, { prompt: pending.newPrompt });
+      patchSession(runId, key, { status: 'planned' });
+      await launchSession(runId, key, pending.extraMinutes);
+    } else if (pending.action === 'abandon') {
+      patchSession(runId, key, { status: 'abandoned' });
+      refreshLiveBlock(runId);
+      queueObservation(runId, `Session ${key} is abandoned per your reviewed decision; its work remains on disk${session.branch ? ` (branch ${session.branch})` : ''}. Replan the remaining milestone work if needed.`);
+    } else if (pending.action === 'wait') {
+      patchSession(runId, key, { status: 'paused' });
+      refreshLiveBlock(runId);
+      queueObservation(runId, `Session ${key} is set to wait per your reviewed decision. Resume it when its blockers clear.`);
+    }
+  } catch (err) {
+    queueObservation(runId, `Applying the recovery for ${key} failed: ${err instanceof Error ? err.message : err}. Decide again.`);
+  }
+}
+
+async function resumeSessionWithTimeout(runId: string, key: string, note: string, extraMinutes?: number): Promise<void> {
+  const session = getSession(runId, key);
+  if (!session?.chatId) throw new Error(`Session ${key} has no chat to continue.`);
+  const busy = session.cwd ? dirBusyWithin(runId, session.cwd, key) : null;
+  if (busy) throw new Error(`Session ${busy.key} is working in that directory.`);
+  const text = renderPrompt('director.session_continuation', { note }).trim();
+  patchSession(runId, key, { status: 'running', startedAt: Date.now() });
+  addActivity(runId, 'session', `${key} resumed`);
+  refreshLiveBlock(runId);
+  ensurePoller(runId);
+  const baseline = chatMaxSeq(session.chatId);
+  addEvent(session.chatId, 'user_message', { text });
+  const timeoutMs = Math.min(extraMinutes ?? DEFAULT_SESSION_TIMEOUT_MIN, MAX_SESSION_TIMEOUT_MIN) * 60_000;
+  void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true, timeoutMs }));
+}
+
+// ---------------------------------------------------------------- pause / resume
+
+export function pauseProject(runId: string): void {
+  const run = getRun(runId);
+  if (!run) throw new Error('Unknown project run.');
+  if (['PAUSED', 'COMPLETED', 'FAILED'].includes(run.state)) return;
+  setRunState(runId, 'PAUSING', 'Pause requested — stopping active sessions');
+  const active = sessionsByStatus(runId, ['running']);
+  if (active.length === 0) {
+    setRunState(runId, 'PAUSED', 'Project paused');
+    return;
+  }
+  for (const s of active) {
+    if (s.chatId) stopRun(s.chatId); // the EXISTING stop primitive; monitors mark them paused
+  }
+  addActivity(runId, 'state', `Stopping ${active.length} active session${active.length === 1 ? '' : 's'}`);
+}
+
+function finishPauseIfDone(runId: string): void {
+  const raw = getRunRaw(runId);
+  if (raw?.state !== 'PAUSING') return;
+  if (sessionsByStatus(runId, ['running']).length === 0) {
+    const preserved = sessionsByStatus(runId, ['paused']).length;
+    setRunState(runId, 'PAUSED', `Project paused — ${preserved} session${preserved === 1 ? '' : 's'} preserved`);
+    refreshLiveBlock(runId);
+  }
+}
+
+export function resumeProject(runId: string): void {
+  const run = getRun(runId);
+  if (!run) throw new Error('Unknown project run.');
+  if (run.state !== 'PAUSED' && run.state !== 'NEEDS_USER') throw new Error(`The project is ${run.state}, not paused.`);
+  setRunState(runId, 'RESUMING', 'Resume requested');
+  const paused = sessionsByStatus(runId, ['paused', 'timeout', 'needs_attention']).map((s) => s.key);
+  queueObservation(runId, `The user resumed the project. Paused/interrupted sessions: ${paused.join(', ') || '(none)'}. Inspect the current state and decide what should resume NOW (resume_sessions / start_sessions) — do not mechanically restart everything; dependencies may have changed. Completed sessions must not be rerun.`);
+}
+
+// ---------------------------------------------------------------- boot recovery
+
+/** Server restart: interrupted sessions become paused, running projects pause honestly. */
+export function recoverDirectorRuns(): void {
+  for (const run of listRuns()) {
+    const interrupted = sessionsByStatus(run.id, ['running']);
+    for (const s of interrupted) patchSession(run.id, s.key, { status: 'paused', endedAt: Date.now() });
+    if (['RUNNING', 'PAUSING', 'RESUMING'].includes(run.state)) {
+      setRunState(run.id, 'PAUSED', `Tandem restarted — ${interrupted.length ? `${interrupted.length} active session${interrupted.length === 1 ? '' : 's'} preserved and paused` : 'project paused'}; resume to continue`);
+      refreshLiveBlock(run.id);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- director tools
+
+export interface ToolReply { ok: boolean; text?: string; error?: string }
+
+export async function handleDirectorTool(chatId: string, op: string, args: Record<string, any>): Promise<ToolReply> {
+  const run = runForChat(chatId);
+  if (!run) return { ok: false, error: 'This chat is not a Project Director chat.' };
+  const runId = run.id;
+  try {
+    switch (op) {
+      case 'get_state':
+        return { ok: true, text: stateSnapshot(runId) };
+
+      case 'set_plan': {
+        const milestones: MilestoneInput[] = (args.milestones ?? []).map((m: any) => ({
+          key: String(m.key ?? '').trim(), name: String(m.name ?? '').trim(),
+          goal: String(m.goal ?? ''), acceptance: String(m.acceptance ?? ''),
+          dependsOn: Array.isArray(m.depends_on) ? m.depends_on.map(String) : [],
+        }));
+        if (milestones.length === 0) return { ok: false, error: 'A plan needs at least one milestone.' };
+        if (milestones.length > 20) return { ok: false, error: 'Keep the master plan to at most 20 milestones.' };
+        setPlan(runId, milestones, String(args.summary ?? ''));
+        if (args.title) patchRun(runId, { title: String(args.title).slice(0, 80) });
+        const raw = getRunRaw(runId);
+        const round = raw.plan_review_round > 0 ? raw.plan_review_round : 1;
+        patchRun(runId, { plan_review_round: round });
+        addActivity(runId, 'plan', `Master plan ${round > 1 ? 'revised' : 'proposed'}: ${milestones.length} milestones`);
+        return { ok: true, text: `Plan recorded (${milestones.length} milestones). The independent review runs next — you will receive its verdict.` };
+      }
+
+      case 'plan_sessions': {
+        const sessions: SessionInput[] = (args.sessions ?? []).map((s: any) => ({
+          key: String(s.key ?? '').trim(), name: String(s.name ?? '').trim(),
+          purpose: String(s.purpose ?? ''), prompt: String(s.prompt ?? ''),
+          dependsOn: Array.isArray(s.depends_on) ? s.depends_on.map(String) : [],
+          isolated: !!s.isolated,
+        }));
+        if (sessions.length === 0) return { ok: false, error: 'Provide at least one session.' };
+        if (sessions.some((s) => !s.prompt.trim())) return { ok: false, error: 'Every session needs a full self-contained prompt.' };
+        const ms = planSessions(runId, String(args.milestone ?? ''), sessions);
+        patchMilestone(runId, ms.key, { status: 'running' });
+        addActivity(runId, 'decision', `${ms.key} planned into ${ms.sessions.length} sessions`, String(args.reasoning ?? '').slice(0, 1_500));
+        return { ok: true, text: `Milestone ${ms.key} now has ${ms.sessions.length} sessions. Start the ready ones with start_sessions.` };
+      }
+
+      case 'start_sessions': {
+        const keys: string[] = (args.keys ?? []).map(String);
+        if (keys.length === 0) return { ok: false, error: 'Provide session keys to start.' };
+        const started: string[] = [];
+        const errors: string[] = [];
+        for (const key of keys) {
+          try {
+            await launchSession(runId, key, args.timeout_minutes ? Number(args.timeout_minutes) : undefined);
+            started.push(key);
+          } catch (err) {
+            errors.push(`${key}: ${err instanceof Error ? err.message : err}`);
+          }
+        }
+        return {
+          ok: errors.length === 0 || started.length > 0,
+          text: `${started.length ? `Started: ${started.join(', ')}. Each is a normal Tandem session with its own Builder and independent Reviewer; you will be woken when they finish.` : ''}${errors.length ? `\nNot started — ${errors.join('; ')}` : ''}`.trim(),
+          ...(started.length === 0 ? { error: errors.join('; ') } : {}),
+        };
+      }
+
+      case 'resume_sessions': {
+        const keys: string[] = (args.keys ?? []).map(String);
+        const resumed: string[] = [];
+        const errors: string[] = [];
+        for (const key of keys) {
+          try { await resumeSession(runId, key, args.note ? String(args.note) : undefined); resumed.push(key); }
+          catch (err) { errors.push(`${key}: ${err instanceof Error ? err.message : err}`); }
+        }
+        if (resumed.length > 0 && ['RESUMING', 'PAUSED'].includes(getRunRaw(runId).state)) setRunState(runId, 'RUNNING', 'Project resumed');
+        return { ok: errors.length === 0 || resumed.length > 0, text: `${resumed.length ? `Resumed: ${resumed.join(', ')}.` : ''}${errors.length ? ` Not resumed — ${errors.join('; ')}` : ''}`.trim() };
+      }
+
+      case 'recover_session': {
+        const key = String(args.key ?? '');
+        const session = getSession(runId, key);
+        if (!session) return { ok: false, error: `Unknown session: ${key}` };
+        const action = String(args.action ?? '');
+        if (!['continue', 'restart', 'abandon', 'wait'].includes(action)) {
+          return { ok: false, error: 'action must be one of: continue, restart, abandon, wait.' };
+        }
+        const raw = getRunRaw(runId);
+        let round = 1;
+        if (raw.pending_recovery) {
+          try {
+            const prev = JSON.parse(raw.pending_recovery);
+            if (prev.sessionKey === key && prev.awaitingRevision) round = prev.round;
+          } catch { /* fresh decision */ }
+        }
+        const context = await failureContext(runId, key, session.chatId ?? '', readOutcome(session.chatId ?? '', session.startedAt ?? 0));
+        patchRun(runId, {
+          pending_recovery: JSON.stringify({
+            sessionKey: key, action,
+            reasoning: String(args.reasoning ?? ''),
+            newPrompt: args.new_prompt ? String(args.new_prompt) : undefined,
+            extraMinutes: args.extra_minutes ? Number(args.extra_minutes) : undefined,
+            round, context,
+          }),
+        });
+        addActivity(runId, 'recovery', `Recovery ${round > 1 ? 'revised' : 'proposed'} for ${key}: ${action}`);
+        return { ok: true, text: round >= 3
+          ? 'Final revision recorded — it will be applied without further review (review policy cap).'
+          : 'Recovery decision recorded. It is significant, so the independent reviewer evaluates it next; you will receive the verdict.' };
+      }
+
+      case 'integrate_milestone': {
+        const msKey = String(args.milestone ?? '');
+        const ms = milestoneByKey(runId, msKey);
+        if (!ms) return { ok: false, error: `Unknown milestone: ${msKey}` };
+        const unfinished = ms.sessions.filter((s) => !['completed', 'abandoned'].includes(s.status));
+        if (unfinished.length > 0) return { ok: false, error: `Sessions still open: ${unfinished.map((s) => s.key).join(', ')} — integration needs every session completed or abandoned.` };
+        const rootProject = getProject(run.projectId)!;
+        const integration = await ensureIntegrationBranch(runId, rootProject.rootPath);
+        const busy = dirBusyWithin(runId, rootProject.rootPath);
+        if (busy) return { ok: false, error: `Session ${busy.key} is working in the project directory — integrate after it finishes.` };
+        const branches = ms.sessions.filter((s) => s.branch && s.status === 'completed').map((s) => s.branch as string);
+        const sKey = `${msKey}.INT`;
+        planSessions(runId, msKey, [{
+          key: sKey, name: `${ms.name} integration`, purpose: `Integrate and validate milestone ${msKey}`,
+          prompt: renderPrompt('director.integration_wrapper', {
+            instructions: String(args.instructions ?? ''),
+            integration_branch: integration,
+            session_branches: branches.length ? branches.join(', ') : '(work is already on the integration branch)',
+          }),
+          dependsOn: [], isolated: false,
+        }]);
+        patchMilestone(runId, msKey, { status: 'integrating' });
+        await launchSession(runId, sKey, args.timeout_minutes ? Number(args.timeout_minutes) : undefined);
+        addActivity(runId, 'integration', `${msKey} integration session started`);
+        return { ok: true, text: `Integration session ${sKey} started on ${integration}. You will be woken with its outcome.` };
+      }
+
+      case 'complete_milestone': {
+        const msKey = String(args.milestone ?? '');
+        const ms = milestoneByKey(runId, msKey);
+        if (!ms) return { ok: false, error: `Unknown milestone: ${msKey}` };
+        const open = ms.sessions.filter((s) => !['completed', 'abandoned'].includes(s.status));
+        if (open.length > 0) return { ok: false, error: `Cannot complete ${msKey}: sessions still open (${open.map((s) => s.key).join(', ')}).` };
+        patchMilestone(runId, msKey, { status: 'completed' });
+        addActivity(runId, 'session', `${msKey} completed: ${String(args.summary ?? '').slice(0, 300)}`);
+        return { ok: true, text: `Milestone ${msKey} is complete. Revise later milestones if what you learned changes them, then plan the next ready milestone.` };
+      }
+
+      case 'complete_project': {
+        const open = sessionsByStatus(runId, ['running', 'planned', 'timeout', 'needs_attention']);
+        if (open.length > 0) return { ok: false, error: `Sessions still open: ${open.map((s) => s.key).join(', ')}.` };
+        setRunState(runId, 'COMPLETED', `Project completed: ${String(args.summary ?? '').slice(0, 300)}`);
+        return { ok: true, text: 'Project marked complete. Summarize the delivered result for the user.' };
+      }
+
+      case 'need_user': {
+        setRunState(runId, 'NEEDS_USER', `Waiting for the user: ${String(args.question ?? '').slice(0, 300)}`);
+        return { ok: true, text: 'State set to NEEDS_USER. Ask the user the question in your reply.' };
+      }
+
+      default:
+        return { ok: false, error: `Unknown director operation: ${op}` };
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}

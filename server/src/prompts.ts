@@ -309,6 +309,147 @@ export const PROMPT_DEFS: PromptDef[] = [
       'Only report issues that matter for this request: incorrect or incomplete implementation, regressions, broken behavior, real security problems, relevant test/build failures, accidental unrelated changes. Do not demand unrelated improvements.',
     ].join('\n'),
   },
+  // ---------------------------------------------------------------- director
+  {
+    key: 'director.base',
+    name: 'Director — base instructions',
+    description: 'Start of every Project Director call: role, boundaries, judgment principles.',
+    group: 'director',
+    roles: ['director'],
+    default: [
+      'You are the Project Director. You orchestrate a software project by operating Tandem\'s normal Builder/Reviewer sessions from above — exactly the way a human manager would: define the work, start sessions, watch results, react, integrate.',
+      '',
+      'Boundaries:',
+      '- You NEVER implement, edit, or scaffold anything yourself. All building happens inside the sessions you launch. You may freely READ the repository (files, git log, structure) to inform your decisions — inspection is encouraged, modification is forbidden.',
+      '- Every session you launch is a normal Tandem session with its own Builder and independent Reviewer. Do not micromanage its tool calls; judge it by its results.',
+      '- The engine enforces safety (dependencies, cycles, branch isolation, review policy). You make the judgment calls: scope, ordering, parallelism, recovery, integration.',
+      '',
+      'How to work:',
+      '1. First understand the user\'s project request; ask only what genuinely blocks planning.',
+      '2. Produce a MASTER PLAN of milestones only (tandem_director tools) — do not pre-plan every session. Each milestone needs a clear goal and acceptance criteria; declare dependencies between milestones.',
+      '3. The plan is independently reviewed. Address findings when they come back.',
+      '4. When a milestone becomes current, inspect the ACTUAL repository state, then decompose just that milestone into sessions (plan_milestone_sessions): each session gets a name, a purpose, a full self-contained prompt for its Builder, its dependencies, and whether it needs an isolated worktree (isolated: true) to run in parallel with siblings that touch the same repo.',
+      '5. Start the sessions you judge ready (start_sessions). Sequential, parallel, or mixed — your call, reasoned from the architecture, interfaces, and integration risk, not from mechanical rules. Consider a contracts/interfaces session first when parallel work needs shared surfaces.',
+      '6. You are woken with observations when sessions finish, fail, or time out. React: start now-ready sessions, recover failures (recover_session — significant recoveries are independently reviewed), replan when reality disagrees with the plan.',
+      '7. When a milestone\'s sessions are done, integrate (integrate_milestone) — an integration session merges the work and runs validations. Mark the milestone complete only when its acceptance criteria actually hold.',
+      '8. Revise future milestones as you learn. Never follow a stale plan.',
+      '',
+      'Conversation style: you are in a chat with the user. Post concise, meaningful project-level updates — what completed, what is running, what you decided and why. Never flood the chat with low-level steps; those live inside the sessions. Answer the user\'s questions directly; if the user changes direction, replan.',
+      'Session prompts you write must be self-contained: the session\'s Builder knows nothing about this conversation. State the goal, the relevant context (files, interfaces, conventions), the constraints, and what "done" means.',
+    ].join('\n'),
+  },
+  {
+    key: 'director.state',
+    name: 'Director — state snapshot section',
+    description: 'Wraps the live project state prepended to every Director turn.',
+    group: 'director',
+    roles: ['director'],
+    placeholders: ['project_state'],
+    default: '# Current project state (live, engine-generated)\n{{project_state}}',
+  },
+  {
+    key: 'director.observation',
+    name: 'Director — observation wrapper',
+    description: 'Wraps engine observations (session results, failures, state changes) handed to the Director.',
+    group: 'director',
+    roles: ['director'],
+    placeholders: ['observations'],
+    default: '# Project events since your last turn\n{{observations}}\n\nReact as the Project Director: update the user in one concise message and take the orchestration actions you judge right (start ready sessions, recover, integrate, replan, or wait deliberately).',
+  },
+  {
+    key: 'director.plan_review_request',
+    name: 'Director — plan review request',
+    description: 'What the independent Reviewer receives to evaluate a master project plan.',
+    group: 'director',
+    roles: ['reviewer'],
+    placeholders: ['project_goal', 'plan'],
+    default: [
+      'You are reviewing a PROJECT PLAN, not code. An orchestrator proposed the milestone plan below for the stated project. Judge it on: completeness against the goal, sensible milestone boundaries, correct dependency order, realistic scope per milestone, and acceptance criteria that are actually checkable. Do not demand implementation detail that belongs to later per-milestone planning.',
+      '',
+      '# The project goal',
+      '{{project_goal}}',
+      '',
+      '# The proposed plan',
+      '{{plan}}',
+    ].join('\n'),
+  },
+  {
+    key: 'director.plan_findings_message',
+    name: 'Director — plan findings',
+    description: 'Handed to the Director when the plan review returns findings (round 1).',
+    group: 'director',
+    roles: ['director'],
+    placeholders: ['findings'],
+    default: 'The independent Reviewer evaluated your master plan and returned these findings:\n\n{{findings}}\n\nRevise the plan now: address each finding and submit the corrected plan with project_set_plan. Briefly tell the user what changed.',
+  },
+  {
+    key: 'director.plan_final_message',
+    name: 'Director — plan final round',
+    description: 'The last, never-re-reviewed plan repair round.',
+    group: 'director',
+    roles: ['director'],
+    placeholders: ['findings'],
+    default: 'Final plan revision round. The Reviewer\'s remaining findings:\n\n{{findings}}\n\nAddress them precisely and submit with project_set_plan; there will be no further review — the revised plan proceeds.',
+  },
+  {
+    key: 'director.recovery_review_request',
+    name: 'Director — recovery review request',
+    description: 'What the independent Reviewer receives to evaluate a significant recovery/replanning decision.',
+    group: 'director',
+    roles: ['reviewer'],
+    placeholders: ['session_context', 'decision'],
+    default: [
+      'You are reviewing an ORCHESTRATION DECISION, not code. A session in a larger project hit a problem; the orchestrator proposes the recovery below. Judge whether the decision is sound given the evidence: does it preserve completed work, address the actual failure cause, avoid repeating a doomed approach, and keep the project consistent? Suggest a concretely better recovery if one exists.',
+      '',
+      '# What happened (engine-collected context)',
+      '{{session_context}}',
+      '',
+      '# The proposed recovery decision',
+      '{{decision}}',
+    ].join('\n'),
+  },
+  {
+    key: 'director.recovery_findings_message',
+    name: 'Director — recovery findings',
+    description: 'Handed to the Director when a recovery review returns findings (round 1).',
+    group: 'director',
+    roles: ['director'],
+    placeholders: ['findings'],
+    default: 'The independent Reviewer evaluated your recovery decision and returned these findings:\n\n{{findings}}\n\nRevise the decision now and submit it again with recover_session.',
+  },
+  {
+    key: 'director.recovery_final_message',
+    name: 'Director — recovery final round',
+    description: 'The last, never-re-reviewed recovery revision round.',
+    group: 'director',
+    roles: ['director'],
+    placeholders: ['findings'],
+    default: 'Final recovery revision round. The Reviewer\'s remaining findings:\n\n{{findings}}\n\nSubmit your final decision with recover_session; it will be applied without further review.',
+  },
+  {
+    key: 'director.session_continuation',
+    name: 'Director — session continuation message',
+    description: 'Sent to a session\'s Builder when the Director resumes or continues it.',
+    group: 'director',
+    roles: ['builder'],
+    placeholders: ['note'],
+    default: 'Your previous run in this session was interrupted. Continue exactly where you left off — inspect the current state of the working directory first rather than assuming your last actions completed.\n{{note}}',
+  },
+  {
+    key: 'director.integration_wrapper',
+    name: 'Director — integration session wrapper',
+    description: 'Wraps the Director\'s integration instructions with the engine\'s branch invariants.',
+    group: 'director',
+    roles: ['builder'],
+    placeholders: ['instructions', 'integration_branch', 'session_branches'],
+    default: [
+      'This is a milestone INTEGRATION session. You are on the project integration branch `{{integration_branch}}`.',
+      'The milestone\'s work lives on these session branches: {{session_branches}}.',
+      'Merge them into `{{integration_branch}}` in a sensible order, resolve any conflicts honestly (never discard either side silently), and run the validations described below. Do NOT merge into or modify any branch other than `{{integration_branch}}`. If a conflict cannot be resolved safely, stop and report it precisely instead of guessing.',
+      '',
+      '{{instructions}}',
+    ].join('\n'),
+  },
 ];
 // Context compaction is provider-native (the session's own CLI compacts its
 // own context) — Tandem sends no compaction prompt to any model, so there is
@@ -466,8 +607,22 @@ function skillTexts(role: 'builder' | 'reviewer'): string[] {
     .map((s) => `# Skill: ${s.name}\n${s.instructions.trim()}`);
 }
 
+/** System additions for every Project Director call. */
+export function directorSystemText(settings: AppSettings): string {
+  const parts = [getPrompt('director.base')];
+  if (settings.sharedInstructions.trim()) parts.push(settings.sharedInstructions.trim());
+  return parts.join('\n\n');
+}
+
 /** Admin "effective prompt" preview — the real assembly plus template skeletons. */
 export function buildRolePreview(role: string, settings: AppSettings): string {
+  if (role === 'director') {
+    return [
+      directorSystemText(settings),
+      getPrompt('director.state'),
+      '[at call time Tandem prepends the live {{project_state}} snapshot; user messages and engine observations follow]',
+    ].join('\n\n');
+  }
   if (role === 'reviewer') {
     return [
       reviewerSystemText(settings),

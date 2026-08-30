@@ -1,6 +1,6 @@
 import type {
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
-  DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, PromptEntry, RoleName, Skill, ToolInfo,
+  DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -114,6 +114,13 @@ export const api = {
   projectMemoryText: (projectId: string) =>
     fetch(`/api/projects/${projectId}/memories/export?format=text`, { credentials: 'same-origin' })
       .then((r) => { if (!r.ok) throw new Error(`Export failed (${r.status})`); return r.text(); }),
+
+  // project director
+  createProjectRun: (dirPath: string) =>
+    j<{ run: ProjectRun; chat: Chat }>('/api/project-runs', { method: 'POST', body: JSON.stringify({ dirPath }) }),
+  projectRun: (id: string) => j<{ run: ProjectRun; activity: PdActivity[] }>(`/api/project-runs/${id}`),
+  pauseProjectRun: (id: string) => j<{ ok: true; run: ProjectRun }>(`/api/project-runs/${id}/pause`, { method: 'POST' }),
+  resumeProjectRun: (id: string) => j<{ ok: true; run: ProjectRun }>(`/api/project-runs/${id}/resume`, { method: 'POST' }),
 
   // skills
   skills: () => j<Skill[]>('/api/skills'),

@@ -22,13 +22,42 @@ const roleMeta: Record<string, { label: string; dot: string }> = {
 
 const providerName = (p: string) => (p === 'claude-code' ? 'Claude' : p === 'codex' ? 'Codex' : p);
 
+/**
+ * How long a grouped step actually occupied the timeline: first action start to
+ * last action end. Summing the individual durations instead would hide the
+ * gaps where the model is deciding what to do next, reporting a few seconds for
+ * a stretch the user watched for half a minute.
+ */
+function groupElapsed(events: ChatEvent[], running: boolean): number {
+  const starts = events.map((e) => e.ts);
+  const ends = events.map((e) => e.ts + (((e.payload as { durationMs?: number }).durationMs) ?? 0));
+  const end = running ? Date.now() : Math.max(...ends);
+  return Math.max(0, end - Math.min(...starts));
+}
+
+/** total time actually spent executing, shown when it differs from the elapsed span */
+function groupBusy(events: ChatEvent[]): number {
+  return events.reduce((n, e) => n + ((((e.payload as { durationMs?: number }).durationMs) ?? 0)), 0);
+}
+
+function ElapsedNote({ events, running }: { events: ChatEvent[]; running: boolean }) {
+  const elapsed = groupElapsed(events, running);
+  const busy = groupBusy(events);
+  if (events.length < 2 || elapsed <= 0 || busy >= elapsed * 0.8) return null;
+  return (
+    <div className="pb-1 text-[11.5px] text-dim">
+      {fmtDuration(busy)} spent running · {fmtDuration(elapsed)} elapsed including the time between steps
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- commands
 
 export function CommandGroupRow({ events }: { events: ChatEvent[] }) {
   const cmds = events.map((e) => e.payload as CommandPayload);
   const running = cmds.some((c) => c.status === 'running');
   const failed = cmds.filter((c) => c.status === 'done' && (c.exitCode ?? 0) !== 0).length;
-  const total = cmds.reduce((n, c) => n + (c.durationMs || 0), 0);
+  const elapsed = groupElapsed(events, running);
   const label = cmds.length === 1
     ? <>Ran <code className="mono text-[12px] text-mut">{truncate(cmds[0].command, 60)}</code></>
     : <>Ran {plural(cmds.length, 'command')}</>;
@@ -37,11 +66,12 @@ export function CommandGroupRow({ events }: { events: ChatEvent[] }) {
     <ActivityRow
       icon={<Terminal size={14} />}
       label={<>{label}{failed > 0 && <span className="ml-2 text-err">{failed} failed</span>}</>}
-      meta={fmtDuration(total)}
+      meta={fmtDuration(elapsed)}
       running={running}
       tone={failed > 0 ? 'error' : 'default'}
     >
       <div className="space-y-2">
+        <ElapsedNote events={events} running={running} />
         {events.map((e) => <CommandDetail key={e.id} p={e.payload as CommandPayload} />)}
       </div>
     </ActivityRow>
@@ -404,7 +434,7 @@ const BROWSER_ICONS: Record<string, typeof Globe> = {
 export function BrowserGroupRow({ events }: { events: ChatEvent[] }) {
   const acts = events.map((e) => ({ id: e.chatId, ev: e, p: e.payload as BrowserActionPayload }));
   const failed = acts.filter((a) => a.p.status === 'failed').length;
-  const total = acts.reduce((n, a) => n + (a.p.durationMs ?? 0), 0);
+  const elapsed = groupElapsed(events, false);
   const reviewer = acts[0].p.role === 'reviewer';
   const label = acts.length === 1
     ? <>Browser · {truncate(acts[0].p.detail, 62)}</>
@@ -421,9 +451,10 @@ export function BrowserGroupRow({ events }: { events: ChatEvent[] }) {
           {failed > 0 && <span className="text-err">{failed} failed</span>}
         </span>
       }
-      meta={fmtDuration(total)}
+      meta={fmtDuration(elapsed)}
     >
       <div className="space-y-1.5">
+        <ElapsedNote events={events} running={false} />
         {acts.map(({ ev, p }) => <BrowserActionDetail key={ev.id} chatId={ev.chatId} p={p} />)}
       </div>
     </ActivityRow>

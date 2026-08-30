@@ -12,6 +12,8 @@ import { findOrCreateProject } from '../projectRoutes';
 import { runClaudeTurn } from '../engine/claude';
 import { runCodexReview } from '../engine/codex';
 import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, stopRun } from '../engine/run';
+import { computeUsage } from '../context';
+import { performNativeCompaction } from '../engine/providerContext';
 import { parseVerdict, startRun } from '../engine/workflow';
 import {
   addActivity, broadcastRun, createRun, depsSatisfied, getRun, getRunRaw, getSession, listRuns,
@@ -97,6 +99,9 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
     while (next) {
       await runDirectorTurn(runId, next.text);
       await processAfterTurn(runId);
+      // compact only when nothing is waiting — a queued observation (a failed
+      // session needing a decision) must never sit behind a multi-minute compact
+      if (t.queued.length === 0) await directorAutoCompact(runId);
       const queued = t.queued.splice(0);
       next = queued.length > 0
         ? { text: renderPrompt('director.observation', { observations: queued.join('\n') }), isObservation: true }
@@ -104,6 +109,40 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
     }
   } finally {
     t.busy = false;
+  }
+}
+
+/** chats whose last native compaction failed → don't hammer it every turn */
+const compactFailedAt = new Map<string, number>();
+const COMPACT_RETRY_COOLDOWN = 15 * 60_000;
+
+/**
+ * The Director chat follows the same threshold/auto-compact policy as every
+ * other chat (settings.context), run between serialized turns — the only point
+ * where nothing can race the Director's own resumed session. Runs inside the
+ * pump, so it stays awaited; a failed attempt backs off instead of repeating
+ * (and re-erroring) after every subsequent turn.
+ */
+async function directorAutoCompact(runId: string): Promise<void> {
+  try {
+    const settings = getSettings();
+    if (!settings.context.autoCompact) return;
+    const chatId = getRunRaw(runId)?.chat_id as string | undefined;
+    if (!chatId) return;
+    const chat = getChat(chatId);
+    if (!chat || isRunning(chatId)) return;
+    const usage = computeUsage(chat);
+    if (usage.pct == null || usage.pct < settings.context.compactPct) return;
+    if ((compactFailedAt.get(chatId) ?? 0) > Date.now() - COMPACT_RETRY_COOLDOWN) return;
+    const outcome = await performNativeCompaction(chat, 'auto'); // emits its own compaction/error events
+    if (outcome.ok) compactFailedAt.delete(chatId);
+    else compactFailedAt.set(chatId, Date.now());
+  } catch (err) {
+    const chatId = getRunRaw(runId)?.chat_id as string | undefined;
+    if (chatId) {
+      compactFailedAt.set(chatId, Date.now());
+      addEvent(chatId, 'error', { message: 'Automatic native compaction failed', detail: String(err), source: 'context' });
+    }
   }
 }
 
@@ -117,8 +156,9 @@ async function runDirectorTurn(runId: string, message: string): Promise<void> {
   if (isRunning(chat.id)) return; // a turn is already live (belt and braces)
 
   const settings = getSettings();
-  // no rootPath: the Director never switches branches, so it must not trip the
-  // same-directory concurrency guard that protects real sessions
+  // no rootPath in the ctx: Director turns may run while sessions hold the
+  // repository. That is safe because the turn is ENFORCED read-only (mutation
+  // tools denied; bwrap jail where available) — it observes, it cannot write.
   const ctx: RunCtx = { chatId: chat.id, runId: randomUUID(), stopped: false };
   registerCtx(ctx);
   setChatRunning(chat.id, true);
@@ -133,6 +173,7 @@ async function runDirectorTurn(runId: string, message: string): Promise<void> {
       cwd: project.rootPath,
       resumeSessionId: getBuilderSession(chat.id),
       withDirectorTools: true,
+      readOnly: true,
       timeoutMs: DIRECTOR_TIMEOUT,
     });
     if (result.sessionId) {
@@ -387,6 +428,7 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
 
   const timeoutMs = Math.min(timeoutMin ?? DEFAULT_SESSION_TIMEOUT_MIN, MAX_SESSION_TIMEOUT_MIN) * 60_000;
   const baseline = chatMaxSeq(chatId);
+  patchSession(runId, key, { lastBaselineSeq: baseline });
   addEvent(chatId, 'user_message', { text: session.prompt });
   setChatTitle(chatId, deriveTitle(session.prompt));
   void monitorSession(runId, key, chatId, baseline, startRun(chatId, session.prompt, [], { review: true, timeoutMs }));
@@ -412,6 +454,7 @@ export async function resumeSession(runId: string, key: string, note?: string): 
   refreshLiveBlock(runId);
   ensurePoller(runId);
   const baseline = chatMaxSeq(session.chatId);
+  patchSession(runId, key, { lastBaselineSeq: baseline });
   addEvent(session.chatId, 'user_message', { text });
   void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true }));
 }
@@ -422,6 +465,18 @@ export async function resumeSession(runId: string, key: string, note?: string): 
 function chatMaxSeq(chatId: string): number {
   const r = db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM events WHERE chat_id = ?').get(chatId) as any;
   return r.s as number;
+}
+
+/**
+ * Fallback for sessions launched before last_baseline_seq existed: reconstruct
+ * the baseline of the chat's most recent run as the seq just before its last
+ * user_message. Imprecise if a human posted into the session chat afterwards —
+ * new launches persist the exact baseline instead. readOutcome takes a SEQ.
+ */
+function lastRunBaseline(chatId: string): number {
+  if (!chatId) return 0;
+  const r = db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM events WHERE chat_id = ? AND kind = 'user_message'").get(chatId) as any;
+  return Math.max(0, (r.s as number) - 1);
 }
 
 
@@ -658,6 +713,7 @@ async function resumeSessionWithTimeout(runId: string, key: string, note: string
   refreshLiveBlock(runId);
   ensurePoller(runId);
   const baseline = chatMaxSeq(session.chatId);
+  patchSession(runId, key, { lastBaselineSeq: baseline });
   addEvent(session.chatId, 'user_message', { text });
   const timeoutMs = Math.min(extraMinutes ?? DEFAULT_SESSION_TIMEOUT_MIN, MAX_SESSION_TIMEOUT_MIN) * 60_000;
   void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true, timeoutMs }));
@@ -807,7 +863,8 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
             if (prev.sessionKey === key && prev.awaitingRevision) round = prev.round;
           } catch { /* fresh decision */ }
         }
-        const context = await failureContext(runId, key, session.chatId ?? '', readOutcome(session.chatId ?? '', session.startedAt ?? 0));
+        const context = await failureContext(runId, key, session.chatId ?? '',
+          readOutcome(session.chatId ?? '', session.lastBaselineSeq ?? lastRunBaseline(session.chatId ?? '')));
         patchRun(runId, {
           pending_recovery: JSON.stringify({
             sessionKey: key, action,

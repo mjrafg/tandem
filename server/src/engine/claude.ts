@@ -9,6 +9,7 @@ import {
 import { spawnStreaming } from './procs';
 import { recordModelWindow } from '../context';
 import { catalogForRole, hasIntegrationTools } from '../integrations/exec';
+import { bwrapAvailable, readOnlyJailArgs } from './sandbox';
 import { servedToolRecord, toolTextEnv } from '../toolText';
 import type { RunHandle } from './run';
 
@@ -26,6 +27,9 @@ export interface ClaudeTurnResult {
 
 const EFFORT_THINKING: Record<Effort, string> = { low: '', medium: '12000', high: '30000' };
 
+/** chats already told (once) that the read-only boundary is degraded here */
+const readOnlyNoteShown = new Set<string>();
+
 /**
  * One real Claude Code CLI invocation. The CLI is the agent: it decides which
  * tools to use; this adapter only records what actually happens and enforces
@@ -42,10 +46,18 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   withTandemTools?: boolean;
   /** the Project Director's orchestration tool server (instead of the builder tool set) */
   withDirectorTools?: boolean;
+  /**
+   * ENFORCED read-only boundary (not a prompt instruction): mutation tools are
+   * denied at the CLI level, and where bubblewrap is available the whole
+   * process tree additionally runs in the shared read-only jail so even shell
+   * commands cannot write the project, Tandem's code, or its data.
+   */
+  readOnly?: boolean;
   emitActivity?: boolean;
   timeoutMs: number;
 }): Promise<ClaudeTurnResult> {
   const emitActivity = opts.emitActivity !== false;
+  const jailed = !!opts.readOnly && bwrapAvailable();
   const args = [
     '-p',
     '--output-format', 'stream-json',
@@ -54,6 +66,13 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     '--model', opts.model,
     '--permission-mode', 'bypassPermissions',
   ];
+  if (opts.readOnly) {
+    // deny-list beats bypassPermissions (verified on CLI 2.1.233); without the
+    // jail, shell access goes too — inspection then uses Read/Grep/Glob only
+    const denied = ['Write', 'Edit', 'NotebookEdit'];
+    if (!jailed) denied.push('Bash', 'Task');
+    args.push('--disallowedTools', ...denied);
+  }
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
   args.push('--append-system-prompt', opts.systemAppendix);
 
@@ -94,7 +113,13 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     }
   }
 
-  const cliShown = `${config.claudeBin} ${args.map((a) => (a.length > 60 ? `${a.slice(0, 57)}…` : a)).join(' ')}`;
+  const cliShown = `${jailed ? 'bwrap … ' : ''}${config.claudeBin} ${args.map((a) => (a.length > 60 ? `${a.slice(0, 57)}…` : a)).join(' ')}`;
+  if (opts.readOnly && !jailed && !readOnlyNoteShown.has(h.chat.id)) {
+    // honest: mutation tools and the shell are denied, but without bubblewrap
+    // the boundary around remaining tools is CLI-enforced, not OS-enforced
+    readOnlyNoteShown.add(h.chat.id);
+    h.status('bubblewrap is unavailable on this host — this role runs without shell access (read-only file tools only) instead of the OS-enforced read-only boundary.');
+  }
   const startedAt = Date.now();
   const servedTools = opts.withTandemTools
     ? [
@@ -247,13 +272,15 @@ export async function runClaudeTurn(h: RunHandle, opts: {
 
   const proc = await spawnStreaming({
     ctx: h.ctx,
-    bin: config.claudeBin,
-    args,
+    bin: jailed ? 'bwrap' : config.claudeBin,
+    args: jailed ? [...readOnlyJailArgs(h.project.rootPath, opts.cwd), config.claudeBin, ...args] : args,
     cwd: opts.cwd,
     env: {
       ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: '',
       ...(EFFORT_THINKING[opts.effort] ? { MAX_THINKING_TOKENS: EFFORT_THINKING[opts.effort] } : {}),
+      // read-only turns: git must not take optional locks in the ro-bound repo
+      ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: '0' } : {}),
       // inherited by the tandem MCP stdio servers (workdir + browser)
       TANDEM_INTERNAL_URL: internalBase(),
       TANDEM_CHAT_ID: h.chat.id,

@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +6,7 @@ import { config, internalBase, shotsDir } from '../config';
 import { addEvent, updateEvent } from '../events';
 import { catalogForRole, hasIntegrationTools } from '../integrations/exec';
 import { spawnStreaming } from './procs';
+import { bwrapAvailable, readOnlyJailArgs } from './sandbox';
 import { servedToolRecord, toolTextEnv } from '../toolText';
 import type { RunHandle } from './run';
 
@@ -91,41 +91,8 @@ function codexHomeDir(): string {
 // Codex only permits MCP tool calls when approvals are escalated
 // (`--approve-for-me`), which also drops its own filesystem restriction. So
 // Tandem enforces the Reviewer's read-only boundary itself: the whole codex
-// process tree runs inside a bubblewrap namespace where the project — plus
-// Tandem's own code and database — are bind-mounted read-only. Writes fail with
-// EROFS at the kernel level, no matter what the model or Codex decides.
-
-let bwrapOk: boolean | null = null;
-
-/** One-time real probe: bwrap present AND usable unprivileged here. */
-function bwrapAvailable(): boolean {
-  if (bwrapOk !== null) return bwrapOk;
-  try {
-    const r = spawnSync('bwrap', ['--dev-bind', '/', '/', '--ro-bind', '/tmp', '/tmp', '--', 'true'], { timeout: 10_000 });
-    bwrapOk = !r.error && r.status === 0;
-  } catch {
-    bwrapOk = false;
-  }
-  return bwrapOk;
-}
-
-/** bwrap arguments placing the reviewer's process tree in a read-only jail. */
-function readOnlyJailArgs(projectPath: string, cwd: string): string[] {
-  const args = ['--dev-bind', '/', '/'];
-  const ro = (p: string) => {
-    if (p && fs.existsSync(p)) args.push('--ro-bind', p, p);
-  };
-  const rw = (p: string) => {
-    if (p && fs.existsSync(p)) args.push('--bind', p, p);
-  };
-  ro(projectPath);                                    // the work under review
-  ro(path.dirname(process.argv[1] ?? ''));            // Tandem's own code
-  ro(config.dataDir);                                 // chats, events, credentials
-  rw(shotsDir);                                       // browser screenshots stay writable
-  rw(path.join(config.dataDir, 'tmp'));
-  args.push('--die-with-parent', '--chdir', cwd, '--');
-  return args;
-}
+// process tree runs inside the shared bubblewrap jail (./sandbox.ts). Writes
+// fail with EROFS at the kernel level, no matter what the model or Codex decides.
 
 /** Write the per-run profile; returns its name, or null if it cannot be written. */
 function writeReviewerProfile(runId: string, blocks: string[]): string | null {

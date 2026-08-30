@@ -107,7 +107,8 @@ export function computeUsage(chat: Chat): ContextUsage {
     const e = events[i];
     if (e.kind !== 'ai_call') continue;
     const p = e.payload as AiCallPayload;
-    if ((p.role === 'builder' || p.role === 'final_repair') && p.response?.usage?.contextTokens != null) {
+    // director: the Project Chat's conversation session is the Director's own
+    if ((p.role === 'builder' || p.role === 'final_repair' || p.role === 'director') && p.response?.usage?.contextTokens != null) {
       lastCall = e;
       break;
     }

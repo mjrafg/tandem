@@ -69,6 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_pd_milestones_run ON pd_milestones(run_id);
 CREATE INDEX IF NOT EXISTS idx_pd_sessions_run ON pd_sessions(run_id);
 CREATE INDEX IF NOT EXISTS idx_pd_activity_run ON pd_activity(run_id, ts);
 `);
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN last_baseline_seq INTEGER'); } catch { /* exists */ }
 
 // ---------------------------------------------------------------- mapping
 
@@ -79,6 +80,7 @@ function rowToSession(r: any): PdSession {
     chatId: r.chat_id ?? null, status: r.status,
     dependsOn: JSON.parse(r.depends_on || '[]'),
     branch: r.branch ?? null, cwd: r.cwd ?? null,
+    lastBaselineSeq: r.last_baseline_seq ?? null,
     resultSummary: r.result_summary ?? null,
     reviewVerdict: (r.review_verdict as PdSession['reviewVerdict']) ?? null,
     startedAt: r.started_at ?? null, endedAt: r.ended_at ?? null,
@@ -249,11 +251,13 @@ export function sessionForChat(chatId: string): PdSession | null {
 export function patchSession(runId: string, key: string, patch: Partial<{
   chatId: string; status: PdSessionStatus; branch: string | null; cwd: string;
   resultSummary: string; reviewVerdict: string; startedAt: number; endedAt: number; prompt: string;
+  lastBaselineSeq: number;
 }>): void {
   const map: Record<string, string> = {
     chatId: 'chat_id', status: 'status', branch: 'branch', cwd: 'cwd',
     resultSummary: 'result_summary', reviewVerdict: 'review_verdict',
     startedAt: 'started_at', endedAt: 'ended_at', prompt: 'prompt',
+    lastBaselineSeq: 'last_baseline_seq',
   };
   const sets = Object.keys(patch).filter((k) => k in map);
   if (sets.length === 0) return;

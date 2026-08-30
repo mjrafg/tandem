@@ -549,6 +549,8 @@ export interface PdSession {
   dependsOn: string[];     // session keys within the run
   branch: string | null;   // pd/<key> when isolated
   cwd: string | null;      // worktree dir or the project root
+  /** event seq just before the latest run's trigger — the outcome window base */
+  lastBaselineSeq?: number | null;
   resultSummary: string | null;
   reviewVerdict: 'pass' | 'findings' | null;
   /** live sub-state derived from the underlying chat (display only) */

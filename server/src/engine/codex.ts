@@ -19,18 +19,26 @@ export interface CodexResult {
 }
 
 /**
- * The Reviewer's permission boundary, expressed in Codex's current
- * permission-profile model (one consistent mechanism — no legacy
- * `--sandbox`/`sandbox_mode` mixing):
- *   - filesystem: read-only everywhere (OS-enforced; writes fail with EROFS)
- *   - network: enabled through Codex's sandbox proxy — public internet, name
- *     resolution, and local services (local/private addresses route through
- *     the proxy when the client is told not to bypass it)
- *   - approvals: never (read-only verification must not stall on prompts)
+ * The Reviewer's Codex permission profile.
+ *
+ * Base posture: filesystem read-only, network enabled through Codex's sandbox
+ * proxy (public internet, DNS, and local services).
+ *
+ * IMPORTANT — this base is NOT an OS-enforced boundary any more. Codex 0.147
+ * auto-denies every MCP tool call in non-interactive `exec` ("user cancelled
+ * MCP tool call") under every approval policy, including its own defaults; the
+ * only mechanism that permits them is `--approve-for-me`, which routes
+ * approvals through automatic review and escalates to a workspace-write
+ * sandbox. Tandem is configured (by explicit operator choice) to give the
+ * Reviewer real tools, so the Reviewer CAN write to the project. What still
+ * constrains it: the instruction-level "inspect, do not modify" rule in the
+ * Reviewer prompt, and Tandem's own per-tool role permissions, which are
+ * enforced server-side in the integration execution layer.
  */
 const REVIEWER_PROFILE_NAME = 'tandem-reviewer';
 const REVIEWER_PROFILE = `# Written by Tandem (server/src/engine/codex.ts); regenerated before each review.
-# Reviewer boundary: filesystem read-only everywhere, network enabled.
+# Base posture: filesystem read-only, network enabled. Escalations are
+# auto-approved (--approve-for-me) so the Reviewer can call MCP tools.
 approval_policy = "never"
 default_permissions = "${REVIEWER_PROFILE_NAME}"
 
@@ -77,9 +85,11 @@ export async function runCodexReview(h: RunHandle, opts: {
     '--json',
     '--skip-git-repo-check',
   ];
-  // permission profile (read-only FS + network); hard fallback to the legacy
-  // preset only if the profile file cannot be written at all
-  if (haveProfile) args.push('-p', REVIEWER_PROFILE_NAME);
+  // Permission profile + automatic approval. `--approve-for-me` is the only
+  // way this Codex version permits MCP tool calls in exec mode (without it the
+  // Reviewer is served tools it can never call); it cannot be combined with
+  // `--sandbox`, so the legacy fallback stays strictly read-only and toolless.
+  if (haveProfile) args.push('-p', REVIEWER_PROFILE_NAME, '--approve-for-me');
   else args.push('--sandbox', 'read-only');
   if (opts.model.trim()) args.push('-m', opts.model.trim());
   args.push('-c', `model_reasoning_effort="${opts.effort}"`);

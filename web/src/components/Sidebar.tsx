@@ -16,7 +16,9 @@ export function Sidebar() {
     .filter((p) => !p.hidden)
     .map((p) => ({
       project: p,
-      chats: chats.filter((c) => c.projectId === p.id).sort((a, b) => b.updatedAt - a.updatedAt),
+      // Director session chats live in the Project Drawer, not the sidebar —
+      // a project run shows only its user-facing Project Chat here
+      chats: chats.filter((c) => c.projectId === p.id && c.kind !== 'pd-session').sort((a, b) => b.updatedAt - a.updatedAt),
     }))
     .sort((a, b) => {
       const la = Math.max(a.project.lastOpenedAt, a.chats[0]?.updatedAt ?? 0);

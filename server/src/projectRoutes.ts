@@ -20,12 +20,13 @@ export function findOrCreateProject(rootPath: string, source: Project['source'])
     return project;
   }
   const now = Date.now();
-  const project: Project = {
-    id: randomUUID(), name: path.basename(resolved) || resolved, rootPath: resolved,
-    source, createdAt: now, lastOpenedAt: now,
-  };
+  const id = randomUUID();
   db.prepare('INSERT INTO projects (id, name, root_path, source, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(project.id, project.name, project.rootPath, source, now, now);
+    .run(id, path.basename(resolved) || resolved, resolved, source, now, now);
+  // serialize through rowToProject like every other path — it alone computes
+  // `hidden`, and a create-path literal once leaked worktree projects into
+  // connected sidebars until the next full fetch re-filtered them
+  const project = rowToProject(db.prepare('SELECT * FROM projects WHERE id = ?').get(id));
   broadcast({ type: 'project', project });
   return project;
 }

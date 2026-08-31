@@ -16,6 +16,15 @@ const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
   codex: ['gpt-5.6-sol'],
 };
 
+// TODO(provider-swap): provider selection is intentionally disabled — the
+// execution layer only implements Builder = Claude Code and Reviewer = Codex
+// (dispatch, resume/compaction, and MCP wiring are per-provider and not yet
+// interchangeable). The server locks stored settings to the same pair
+// (settings.ts lockProviders). Show a fixed label until real provider-aware
+// dispatch exists, so the UI never implies cross-provider execution works.
+const FIXED_PROVIDER: Record<RoleName, Provider> = { builder: 'claude-code', reviewer: 'codex' };
+const PROVIDER_LABEL: Record<Provider, string> = { 'claude-code': 'Claude Code CLI', codex: 'Codex CLI' };
+
 const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }> = {
   builder: { title: 'Builder', blurb: 'Understands each request and does the actual work — investigates, edits, runs, verifies.', dot: 'bg-builder' },
   reviewer: { title: 'Reviewer', blurb: 'Independently evaluates each result against your request — changed files when there are any, otherwise the answer itself. Verifies with its own tools inside a read-only jail; max two rounds.', dot: 'bg-reviewer' },
@@ -249,18 +258,12 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
       </div>
       <p className="mb-3 text-[12px] leading-relaxed text-dim">{info.blurb}</p>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Field label="Provider / CLI">
-          <SelectBox
-            ariaLabel={`${info.title} provider`}
-            value={cfg.provider}
-            onChange={(v) => {
-              const provider = v as Provider;
-              onChange({ provider, model: MODEL_SUGGESTIONS[provider][0] });
-            }}
-            options={[
-              { value: 'claude-code', label: 'Claude Code CLI' },
-              { value: 'codex', label: 'Codex CLI' },
-            ]}
+        <Field label="Provider / CLI" hint="fixed">
+          <input
+            className="input mono text-[12.5px] opacity-60"
+            value={PROVIDER_LABEL[FIXED_PROVIDER[role]]}
+            disabled
+            aria-label={`${info.title} provider (fixed)`}
           />
         </Field>
         <Field label="Model">
@@ -272,7 +275,7 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
               onChange={(e) => onChange({ model: e.target.value })}
             />
             <datalist id={`models-${role}`}>
-              {MODEL_SUGGESTIONS[cfg.provider].map((m) => <option key={m} value={m} />)}
+              {MODEL_SUGGESTIONS[FIXED_PROVIDER[role]].map((m) => <option key={m} value={m} />)}
             </datalist>
           </>
         </Field>

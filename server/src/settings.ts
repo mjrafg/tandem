@@ -54,7 +54,33 @@ export function getSettings(): AppSettings {
   const merged = structuredClone(DEFAULT_SETTINGS);
   deepMerge(merged as any, stored as any);
   stripObsolete(merged);
+  lockProviders(merged);
   return merged;
+}
+
+/**
+ * TODO(provider-swap): Builder/Reviewer providers are intentionally LOCKED to
+ * the only combination the execution layer implements (Builder = Claude Code,
+ * Reviewer = Codex). The workflow dispatches to runClaudeTurn/runCodexReview
+ * unconditionally, while compaction and the context meter follow this
+ * configured provider — so a stored swap produced a split-brain (wrong CLI
+ * given the other provider's model, meter/compaction describing a session that
+ * doesn't exist). Locking here keeps every reader coherent. Re-enable the
+ * selector only once the engine has provider-aware dispatch, session
+ * resume/compaction for both providers, per-provider MCP wiring for both
+ * roles, and a reviewer-failure policy that doesn't silently skip review.
+ * A role whose stored provider was swapped also gets its model reset to the
+ * locked provider's default — the old model name belongs to the other CLI.
+ */
+function lockProviders(s: AppSettings): void {
+  if (s.roles.builder.provider !== 'claude-code') {
+    s.roles.builder.provider = 'claude-code';
+    s.roles.builder.model = DEFAULT_SETTINGS.roles.builder.model;
+  }
+  if (s.roles.reviewer.provider !== 'codex') {
+    s.roles.reviewer.provider = 'codex';
+    s.roles.reviewer.model = DEFAULT_SETTINGS.roles.reviewer.model;
+  }
 }
 
 /** Configuration for the removed Compactor role no longer affects runtime — drop it. */
@@ -69,6 +95,7 @@ export function putSettings(patch: Partial<AppSettings>): AppSettings {
   const merged = getSettings();
   deepMerge(merged as any, patch as any);
   stripObsolete(merged);
+  lockProviders(merged);
   const c = merged.context;
   c.warnPct = clamp(c.warnPct, 10, 99);
   c.compactPct = clamp(c.compactPct, 10, 99);

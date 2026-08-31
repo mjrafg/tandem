@@ -1,4 +1,4 @@
-import type { AppSettings } from '../../shared/types';
+import type { AppSettings, DirectorRoleConfig } from '../../shared/types';
 import { kvGet, kvSet } from './db';
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -28,6 +28,22 @@ export const DEFAULT_SETTINGS: AppSettings = {
     preserveRecentTokens: 12_000,
   },
 };
+
+/**
+ * The Project Director's effective model settings. Installs without
+ * roles.director follow the Builder's model + effort — but the Director runs
+ * on the Claude Code adapter ALWAYS, so a Codex-configured Builder never
+ * leaks its model name into the Director: the fallback then uses the stock
+ * Claude model instead. Once a Director model is saved, it stands on its own.
+ */
+export function resolveDirectorRole(s: AppSettings): DirectorRoleConfig {
+  const d = s.roles.director;
+  const b = s.roles.builder;
+  const model = d?.model?.trim()
+    ? d.model.trim()
+    : b.provider === 'claude-code' && b.model.trim() ? b.model : DEFAULT_SETTINGS.roles.builder.model;
+  return { model, effort: d?.effort ?? b.effort };
+}
 
 // All built-in instruction text lives in prompts.ts (Admin → AI Prompts).
 

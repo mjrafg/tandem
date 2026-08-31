@@ -83,8 +83,14 @@ async function runNativeCompact(provider: Provider, ref: SessionRef): Promise<{ 
  * compact natively, read again, record one honest compaction event.
  * On failure: one honest error event, session untouched, nothing simulated.
  */
-export async function performNativeCompaction(chat: Chat, reason: 'manual' | 'auto'): Promise<CompactOutcome> {
-  const { provider, model } = sessionProvider();
+export async function performNativeCompaction(
+  chat: Chat,
+  reason: 'manual' | 'auto',
+  /** compaction target when the chat's conversation is NOT the Builder's —
+   * the Project Chat's session belongs to the Director (always claude-code) */
+  override?: { provider: Provider; model: string },
+): Promise<CompactOutcome> {
+  const { provider, model } = override ?? sessionProvider();
   const providerLabel = provider === 'claude-code' ? 'Claude' : 'Codex';
   const startedAt = Date.now();
 

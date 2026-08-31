@@ -26,7 +26,7 @@ import {
 import { activeCtx } from './engine/run';
 import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
-import { getSettings, putSettings } from './settings';
+import { getSettings, putSettings, resolveDirectorRole } from './settings';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
 import { listTools, resetToolText, setToolText } from './toolText';
 
@@ -279,7 +279,10 @@ export function registerRoutes(app: FastifyInstance): void {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
     if (isRunning(chat.id)) return reply.code(409).send({ error: 'Wait for the current run to finish before compacting.' });
-    const outcome = await performNativeCompaction(chat, 'manual');
+    // a Project Chat's session belongs to the Director (always claude-code)
+    const outcome = chat.kind === 'project'
+      ? await performNativeCompaction(chat, 'manual', { provider: 'claude-code', model: resolveDirectorRole(getSettings()).model })
+      : await performNativeCompaction(chat, 'manual');
     if (!outcome.ok) return reply.code(502).send({ error: outcome.error ?? 'Native compaction failed.', outcome });
     return outcome;
   });

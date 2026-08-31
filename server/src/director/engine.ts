@@ -7,7 +7,7 @@ import { config } from '../config';
 import { db, getBuilderSession, getChat, getEvent, getProject, rowToChat, setGitStateRow } from '../db';
 import { addEvent, broadcastChat, deriveTitle, setChatRunning, setChatTitle, updateEvent } from '../events';
 import { directorSystemText, getPrompt, renderPrompt } from '../prompts';
-import { getSettings } from '../settings';
+import { getSettings, resolveDirectorRole } from '../settings';
 import { findOrCreateProject } from '../projectRoutes';
 import { runClaudeTurn } from '../engine/claude';
 import { runCodexReview } from '../engine/codex';
@@ -147,7 +147,10 @@ async function directorAutoCompact(runId: string): Promise<void> {
     const usage = computeUsage(chat);
     if (usage.pct == null || usage.pct < settings.context.compactPct) return;
     if ((compactFailedAt.get(chatId) ?? 0) > Date.now() - COMPACT_RETRY_COOLDOWN) return;
-    const outcome = await performNativeCompaction(chat, 'auto'); // emits its own compaction/error events
+    // the Project Chat's session belongs to the DIRECTOR (always claude-code),
+    // so compaction targets the Director's model — not the Builder provider
+    const director = resolveDirectorRole(settings);
+    const outcome = await performNativeCompaction(chat, 'auto', { provider: 'claude-code', model: director.model }); // emits its own compaction/error events
     if (outcome.ok) compactFailedAt.delete(chatId);
     else compactFailedAt.set(chatId, Date.now());
   } catch (err) {
@@ -176,11 +179,14 @@ async function runDirectorTurn(runId: string, message: string): Promise<void> {
   registerCtx(ctx);
   setChatRunning(chat.id, true);
   try {
+    // the Director has its OWN model settings — never the Builder's, whose
+    // provider/model may change (even to Codex) without touching the Director
+    const director = resolveDirectorRole(settings);
     const state = renderPrompt('director.state', { project_state: stateSnapshot(runId) });
     const result = await runClaudeTurn(new RunHandle(ctx, chat, project, []), {
       role: 'director',
-      model: settings.roles.builder.model,
-      effort: settings.roles.builder.effort,
+      model: director.model,
+      effort: director.effort,
       systemAppendix: directorSystemText(settings),
       message: `${state}\n\n${message}`,
       cwd: project.rootPath,

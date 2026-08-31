@@ -91,6 +91,15 @@ export function SettingsView() {
             />
           ))}
 
+          <DirectorCard
+            cfg={draft.roles.director}
+            builder={draft.roles.builder}
+            onChange={(patch) => set((d) => {
+              d.roles.director = { model: d.roles.director?.model ?? '', effort: d.roles.director?.effort ?? d.roles.builder.effort, ...patch };
+            })}
+            onPreview={() => setPromptRole('director')}
+          />
+
           <div className="card px-4 py-3.5">
             <div className="mb-2 text-[13.5px] font-semibold">Final repair</div>
             <p className="mb-2.5 text-[12px] leading-relaxed text-dim">
@@ -287,6 +296,66 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
             placeholder={role === 'builder' ? 'e.g. Prefer minimal diffs. Always run the test suite after changes.' : 'e.g. Treat missing tests for changed code as a minor finding.'}
             value={cfg.instructions}
             onChange={(e) => onChange({ instructions: e.target.value })}
+          />
+        </Field>
+      </div>
+      <button className="btn-ghost -ml-2 mt-1.5 text-[12px]" onClick={onPreview}>
+        <Eye size={13} /> Preview effective prompt
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The Project Director's own model settings. The provider is fixed: the
+ * Director runtime depends on the tandem_director MCP tools, Claude session
+ * resume/continuity, and the read-only sandbox — all Claude Code.
+ */
+function DirectorCard({ cfg, builder, onChange, onPreview }: {
+  cfg: AppSettings['roles']['director'];
+  builder: AppSettings['roles']['builder'];
+  onChange: (patch: Partial<{ model: string; effort: Effort }>) => void;
+  onPreview: () => void;
+}) {
+  return (
+    <div className="card px-4 py-3.5">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="h-[8px] w-[8px] shrink-0 rounded-full bg-accent" />
+        <span className="min-w-0 truncate text-[13.5px] font-semibold">Director</span>
+      </div>
+      <p className="mb-3 text-[12px] leading-relaxed text-dim">
+        Plans projects into milestones and orchestrates normal sessions from the Project Chat, read-only, on its own model —
+        project sessions keep using the Builder settings. The provider is fixed to Claude Code: the Director&apos;s
+        orchestration tools, session continuity, and sandbox depend on it.
+      </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <Field label="Provider / CLI" hint="fixed">
+          <input className="input mono text-[12.5px] opacity-60" value="Claude Code CLI" disabled />
+        </Field>
+        <Field label="Model" hint={`empty follows the Builder model${builder.provider !== 'claude-code' ? ' (Builder is Codex → stock Claude model is used instead)' : ''}`}>
+          <>
+            <input
+              className="input mono text-[12.5px]"
+              list="models-director"
+              placeholder={builder.provider === 'claude-code' ? builder.model : 'claude-opus-5'}
+              value={cfg?.model ?? ''}
+              onChange={(e) => onChange({ model: e.target.value })}
+            />
+            <datalist id="models-director">
+              {MODEL_SUGGESTIONS['claude-code'].map((m) => <option key={m} value={m} />)}
+            </datalist>
+          </>
+        </Field>
+        <Field label="Reasoning effort">
+          <SelectBox
+            ariaLabel="Director effort"
+            value={cfg?.effort ?? builder.effort}
+            onChange={(v) => onChange({ effort: v as Effort })}
+            options={[
+              { value: 'low', label: 'Low' },
+              { value: 'medium', label: 'Medium' },
+              { value: 'high', label: 'High' },
+            ]}
           />
         </Field>
       </div>

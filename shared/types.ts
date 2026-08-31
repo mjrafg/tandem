@@ -29,8 +29,16 @@ export interface ContextConfig {
   preserveRecentTokens: number;
 }
 
+/** The Project Director's own model settings. Provider is fixed to Claude
+ * Code (tandem_director MCP, session resume, and the read-only sandbox all
+ * depend on it), so only model + effort are configurable. */
+export interface DirectorRoleConfig {
+  model: string;
+  effort: Effort;
+}
+
 export interface AppSettings {
-  roles: { builder: RoleConfig; reviewer: RoleConfig };
+  roles: { builder: RoleConfig; reviewer: RoleConfig; director?: DirectorRoleConfig };
   finalRepairInstructions: string;
   sharedInstructions: string;
   context: ContextConfig;

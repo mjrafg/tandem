@@ -71,6 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_pd_activity_run ON pd_activity(run_id, ts);
 `);
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN last_baseline_seq INTEGER'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE project_runs ADD COLUMN base_branch TEXT'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN stop_reason TEXT'); } catch { /* exists */ }
 
 // ---------------------------------------------------------------- mapping
 
@@ -82,6 +83,7 @@ function rowToSession(r: any): PdSession {
     dependsOn: JSON.parse(r.depends_on || '[]'),
     branch: r.branch ?? null, cwd: r.cwd ?? null,
     lastBaselineSeq: r.last_baseline_seq ?? null,
+    stopReason: (r.stop_reason as PdSession['stopReason']) ?? null,
     resultSummary: r.result_summary ?? null,
     reviewVerdict: (r.review_verdict as PdSession['reviewVerdict']) ?? null,
     startedAt: r.started_at ?? null, endedAt: r.ended_at ?? null,
@@ -274,13 +276,13 @@ export function sessionTitlePrefix(session: PdSession): string {
 export function patchSession(runId: string, key: string, patch: Partial<{
   chatId: string; status: PdSessionStatus; branch: string | null; cwd: string;
   resultSummary: string; reviewVerdict: string; startedAt: number; endedAt: number; prompt: string;
-  lastBaselineSeq: number;
+  lastBaselineSeq: number; stopReason: 'user_stop' | 'project_pause' | null;
 }>): void {
   const map: Record<string, string> = {
     chatId: 'chat_id', status: 'status', branch: 'branch', cwd: 'cwd',
     resultSummary: 'result_summary', reviewVerdict: 'review_verdict',
     startedAt: 'started_at', endedAt: 'ended_at', prompt: 'prompt',
-    lastBaselineSeq: 'last_baseline_seq',
+    lastBaselineSeq: 'last_baseline_seq', stopReason: 'stop_reason',
   };
   const sets = Object.keys(patch).filter((k) => k in map);
   if (sets.length === 0) return;
@@ -395,6 +397,7 @@ export function stateSnapshot(runId: string): string {
       const dep = s.dependsOn.length ? ` deps:[${s.dependsOn.join(',')}]` : '';
       const extras = [
         s.branch ? `branch ${s.branch}` : 'shared dir',
+        s.status === 'paused' && s.stopReason ? (s.stopReason === 'user_stop' ? 'stopped by the user' : 'stopped by project pause') : '',
         s.resultSummary ? `result: ${s.resultSummary.slice(0, 120)}` : '',
         s.reviewVerdict ? `review: ${s.reviewVerdict}` : '',
       ].filter(Boolean).join(' · ');

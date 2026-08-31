@@ -58,7 +58,7 @@ export function createProjectRun(dirPath: string): { run: ProjectRun; chat: Chat
 
 // ---------------------------------------------------------------- director turns
 
-interface TurnState { busy: boolean; queued: string[] }
+interface TurnState { busy: boolean; queued: { text: string; isObservation: boolean }[] }
 const turns = new Map<string, TurnState>();
 
 function turnState(runId: string): TurnState {
@@ -80,6 +80,10 @@ export function directorUserMessage(chat: Chat, text: string): void {
 }
 
 export function queueObservation(runId: string, text: string): void {
+  // a paused project gets NO automatic orchestration wake — everything the
+  // Director needs is in the persisted state it reads when the user resumes
+  const state = getRunRaw(runId)?.state;
+  if (state === 'PAUSING' || state === 'PAUSED') return;
   void pumpDirector(runId, text, 'observation');
 }
 
@@ -91,7 +95,7 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
   const t = turnState(runId);
   const wrapped = kind === 'observation' ? `- ${message}` : message;
   if (t.busy) {
-    t.queued.push(wrapped);
+    t.queued.push({ text: wrapped, isObservation: kind === 'observation' });
     return;
   }
   t.busy = true;
@@ -107,8 +111,13 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
       // session needing a decision) must never sit behind a multi-minute compact
       if (t.queued.length === 0) await directorAutoCompact(runId);
       const queued = t.queued.splice(0);
-      next = queued.length > 0
-        ? { text: renderPrompt('director.observation', { observations: queued.join('\n') }), isObservation: true }
+      // the enqueue-time pause guard cannot see items parked behind a busy
+      // turn — re-check at DRAIN time and drop stale auto-wakes, keeping only
+      // the user's own words for the Director to answer
+      const frozen = ['PAUSING', 'PAUSED'].includes(getRunRaw(runId)?.state);
+      const keep = frozen ? queued.filter((q) => !q.isObservation) : queued;
+      next = keep.length > 0
+        ? { text: renderPrompt('director.observation', { observations: keep.map((q) => q.text).join('\n') }), isObservation: true }
         : null;
     }
   } finally {
@@ -243,6 +252,9 @@ async function processAfterTurn(runId: string): Promise<void> {
     if (raw.plan_review_round > 0 || raw.pending_recovery) patchRun(runId, { plan_review_round: 0, pending_recovery: null });
     return;
   }
+  // a paused run DEFERS its review loops: state is kept, nothing runs — the
+  // next post-turn pass after Resume picks the loop up where it stood
+  if (['PAUSING', 'PAUSED'].includes(raw.state)) return;
 
   // ---- master plan review loop
   if (raw.plan_review_round > 0 && raw.plan_review_round <= 3) {
@@ -481,6 +493,13 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
     if (busy) throw new Error(`Session ${busy.key} is already working in the project directory.`);
   }
 
+  // the run state can change during the git awaits above (a pause — manual or
+  // automatic — may have landed): nothing may be created for a frozen project
+  const stateNow = getRunRaw(runId)?.state;
+  if (!['RUNNING', 'RESUMING', 'PLANNING'].includes(stateNow)) {
+    throw new Error(`Sessions cannot start while the project is ${stateNow}.`);
+  }
+
   // the session is a NORMAL Tandem chat — the same primitive a human's New chat
   // uses. kind 'pd-session' is a durable ownership marker (it survives restarts
   // and relaunches, unlike the pd_sessions.chat_id pointer): the message route
@@ -500,7 +519,7 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
     setGitStateRow(chatId, { mode: 'direct', workBranch: ib, targetBranch: ib, push: 'never', repoPath: cwd });
   }
 
-  patchSession(runId, key, { chatId, cwd, status: 'running', startedAt: Date.now() });
+  patchSession(runId, key, { chatId, cwd, status: 'running', startedAt: Date.now(), stopReason: null });
   addActivity(runId, 'session', `${key} ${session.name} started`, `chat ${chatId}`);
   refreshLiveBlock(runId);
   ensurePoller(runId);
@@ -528,7 +547,7 @@ export async function resumeSession(runId: string, key: string, note?: string): 
   const busy = session.cwd ? dirBusyWithin(runId, session.cwd, key) : null;
   if (busy) throw new Error(`Session ${busy.key} is already working in that directory.`);
   const text = renderPrompt('director.session_continuation', { note: note ?? '' }).trim();
-  patchSession(runId, key, { status: 'running', startedAt: Date.now() });
+  patchSession(runId, key, { status: 'running', startedAt: Date.now(), stopReason: null });
   addActivity(runId, 'session', `${key} resumed`);
   refreshLiveBlock(runId);
   ensurePoller(runId);
@@ -566,30 +585,31 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   const outcome = readOutcome(chatId, baselineSeq);
   const run = getRunRaw(runId);
   const pausing = run && (run.state === 'PAUSING' || run.state === 'PAUSED');
+  // completion is a fact regardless of pause; a pause only reinterprets
+  // interruptions (stop/timeout/failure during the pause) as preservation
   let status: PdSession['status'];
-  if (pausing || outcome.phase === 'stopped') status = 'paused';
+  if (outcome.phase === 'finished' && !outcome.failed && !outcome.timedOut) status = 'completed';
+  else if (outcome.phase === 'stopped') status = 'paused';
+  else if (pausing) status = 'paused';
   else if (outcome.timedOut) status = 'timeout';
   else if (outcome.failed || outcome.phase === 'failed') status = 'failed';
-  else if (outcome.phase === 'finished') status = 'completed';
   else status = 'failed';
+  // the persisted stop INTENT keeps these cases distinct forever after
+  const stopReason: PdSession['stopReason'] = status !== 'paused' ? null : pausing ? 'project_pause' : 'user_stop';
 
   patchSession(runId, key, {
     status,
+    stopReason,
     endedAt: Date.now(),
     resultSummary: outcome.summary.slice(0, 1_000),
     ...(outcome.reviewVerdict ? { reviewVerdict: outcome.reviewVerdict } : {}),
   });
   addActivity(runId, 'session',
     status === 'completed' ? `${key} completed${outcome.reviewVerdict ? ` · reviewer: ${outcome.reviewVerdict}` : ''}`
-      : status === 'paused' ? `${key} stopped and preserved`
+      : status === 'paused' ? (stopReason === 'user_stop' ? `${key} stopped by the user and preserved` : `${key} preserved (project pause)`)
         : status === 'timeout' ? `${key} timed out`
           : `${key} failed`);
   refreshLiveBlock(runId);
-
-  if (pausing) {
-    finishPauseIfDone(runId);
-    return;
-  }
   // canonical title fallback, exactly once (only the chat's FIRST run has
   // baseline 0): if the Builder never registered a name, compose one from the
   // Director's own session name — the sidebar never keeps a prompt excerpt
@@ -599,6 +619,12 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     if (s && chat && !chat.title.startsWith(sessionTitlePrefix(s))) {
       setChatTitle(chatId, canonicalSessionTitle(s, s.name));
     }
+  }
+
+  if (pausing) {
+    // no observations while pausing/paused — nothing may wake orchestration
+    finishPauseIfDone(runId);
+    return;
   }
 
   if (status === 'completed') {
@@ -614,8 +640,17 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict ? ` Reviewer verdict: ${outcome.reviewVerdict}.` : ''} Result summary: ${outcome.summary.slice(0, 600) || '(no summary)'}${ready.length ? ` Sessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
   } else if (status === 'paused') {
     // a deliberate user stop is NOT a failure: no needs_attention, no forced
-    // recovery review — the Director just decides whether/when to resume
-    queueObservation(runId, `Session ${key} was STOPPED by the user; its chat and all work on disk are preserved. Decide whether to resume it (resume_sessions), replan around it, or wait — this was a deliberate stop, not a failure.`);
+    // recovery review. Whether the PROJECT continues depends on the canonical
+    // dependencies: work that nothing else waits on lets the project run;
+    // work with pending dependents can never complete, so the project pauses.
+    if (stopBlocksRequiredPath(runId, key)) {
+      addActivity(runId, 'state', `${key} was stopped by the user and required downstream work depends on it — pausing the project`);
+      const runRow = getRun(runId);
+      if (runRow) addEvent(runRow.chatId, 'status', { text: '⏸ Project paused — a user-stopped session blocks required downstream work.' });
+      pauseProject(runId); // the EXISTING pause path preserves everything else
+    } else {
+      queueObservation(runId, `Session ${key} was STOPPED by the user; its chat and all work on disk are preserved. Nothing pending depends on it, so the project continues. Decide whether to resume it later (resume_sessions), replan around it, or leave it — this was a deliberate stop, not a failure.`);
+    }
   } else {
     patchSession(runId, key, { status: 'needs_attention' });
     const context = await failureContext(runId, key, chatId, outcome);
@@ -682,6 +717,43 @@ async function failureContext(runId: string, key: string, chatId: string, outcom
   }
   lines.push(`Preserved: the session's chat, its Claude session, and all work on disk. Options include: continue with more time, resume with guidance, restart with a better contract, split the remaining work, reduce scope, wait for a dependency, or abandon (work stays recoverable).`);
   return lines.filter(Boolean).join('\n');
+}
+
+/**
+ * Does pending work depend — directly or transitively, via session deps or
+ * milestone deps — on this now-paused session? Computed purely from the
+ * canonical plan/state; no new "critical session" concept. If yes, the
+ * required completion path is blocked and the project cannot legitimately
+ * reach COMPLETED, so it pauses instead of grinding on.
+ */
+function stopBlocksRequiredPath(runId: string, key: string): boolean {
+  const run = getRun(runId);
+  if (!run) return false;
+  const all = run.milestones.flatMap((m) => m.sessions);
+  // transitive session-level dependents of the stopped session
+  const dependents = new Set<string>([key]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const s of all) {
+      if (!dependents.has(s.key) && s.dependsOn.some((d) => dependents.has(d))) { dependents.add(s.key); grew = true; }
+    }
+  }
+  dependents.delete(key);
+  if (all.some((s) => dependents.has(s.key) && s.status === 'planned')) return true;
+  // transitive milestone-level dependents of the stopped session's milestone
+  const owner = run.milestones.find((m) => m.sessions.some((s) => s.key === key));
+  if (!owner || owner.status === 'completed') return false;
+  const msDeps = new Set<string>([owner.key]);
+  grew = true;
+  while (grew) {
+    grew = false;
+    for (const m of run.milestones) {
+      if (!msDeps.has(m.key) && m.dependsOn.some((d) => msDeps.has(d))) { msDeps.add(m.key); grew = true; }
+    }
+  }
+  msDeps.delete(owner.key);
+  return run.milestones.some((m) => msDeps.has(m.key) && m.status !== 'completed');
 }
 
 function readySessions(runId: string): string[] {
@@ -832,7 +904,7 @@ async function resumeSessionWithTimeout(runId: string, key: string, note: string
   const busy = session.cwd ? dirBusyWithin(runId, session.cwd, key) : null;
   if (busy) throw new Error(`Session ${busy.key} is working in that directory.`);
   const text = renderPrompt('director.session_continuation', { note }).trim();
-  patchSession(runId, key, { status: 'running', startedAt: Date.now() });
+  patchSession(runId, key, { status: 'running', startedAt: Date.now(), stopReason: null });
   addActivity(runId, 'session', `${key} resumed`);
   refreshLiveBlock(runId);
   ensurePoller(runId);
@@ -848,11 +920,13 @@ async function resumeSessionWithTimeout(runId: string, key: string, note: string
 export function pauseProject(runId: string): void {
   const run = getRun(runId);
   if (!run) throw new Error('Unknown project run.');
-  if (['PAUSED', 'COMPLETED', 'FAILED'].includes(run.state)) return;
+  // idempotent: an in-flight or finished pause is never restacked
+  if (['PAUSING', 'PAUSED', 'COMPLETED', 'FAILED'].includes(run.state)) return;
   setRunState(runId, 'PAUSING', 'Pause requested — stopping active sessions');
   const active = sessionsByStatus(runId, ['running']);
   if (active.length === 0) {
     setRunState(runId, 'PAUSED', 'Project paused');
+    addEvent(run.chatId, 'status', { text: '⏸ Project paused' });
     return;
   }
   for (const s of active) {
@@ -867,6 +941,7 @@ function finishPauseIfDone(runId: string): void {
   if (sessionsByStatus(runId, ['running']).length === 0) {
     const preserved = sessionsByStatus(runId, ['paused']).length;
     setRunState(runId, 'PAUSED', `Project paused — ${preserved} session${preserved === 1 ? '' : 's'} preserved`);
+    addEvent(raw.chat_id, 'status', { text: `⏸ Project paused · ${preserved} session${preserved === 1 ? '' : 's'} preserved` });
     refreshLiveBlock(runId);
   }
 }
@@ -875,9 +950,12 @@ export function resumeProject(runId: string): void {
   const run = getRun(runId);
   if (!run) throw new Error('Unknown project run.');
   if (run.state !== 'PAUSED' && run.state !== 'NEEDS_USER') throw new Error(`The project is ${run.state}, not paused.`);
+  // the Director wakes FIRST (state flips before the observation so the wake
+  // is not dropped by the paused-project guard) and decides what resumes
   setRunState(runId, 'RESUMING', 'Resume requested');
-  const paused = sessionsByStatus(runId, ['paused', 'timeout', 'needs_attention']).map((s) => s.key);
-  queueObservation(runId, `The user resumed the project. Paused/interrupted sessions: ${paused.join(', ') || '(none)'}. Inspect the current state and decide what should resume NOW (resume_sessions / start_sessions) — do not mechanically restart everything; dependencies may have changed. Completed sessions must not be rerun.`);
+  const paused = sessionsByStatus(runId, ['paused', 'timeout', 'needs_attention'])
+    .map((s) => `${s.key}${s.stopReason === 'user_stop' ? ' (stopped by the user)' : s.stopReason === 'project_pause' ? ' (project pause)' : ''}`);
+  queueObservation(runId, `The user resumed the project. Paused/interrupted sessions: ${paused.join(', ') || '(none)'}. Inspect the current state and decide what should resume NOW (resume_sessions / start_sessions) — do not mechanically restart everything; dependencies may have changed, and a session the user stopped deliberately may be one they do not want rerun. Completed sessions must not be rerun.`);
 }
 
 // ---------------------------------------------------------------- boot recovery
@@ -886,7 +964,7 @@ export function resumeProject(runId: string): void {
 export function recoverDirectorRuns(): void {
   for (const run of listRuns()) {
     const interrupted = sessionsByStatus(run.id, ['running']);
-    for (const s of interrupted) patchSession(run.id, s.key, { status: 'paused', endedAt: Date.now() });
+    for (const s of interrupted) patchSession(run.id, s.key, { status: 'paused', endedAt: Date.now(), stopReason: 'project_pause' });
     if (['RUNNING', 'PAUSING', 'RESUMING'].includes(run.state)) {
       setRunState(run.id, 'PAUSED', `Tandem restarted — ${interrupted.length ? `${interrupted.length} active session${interrupted.length === 1 ? '' : 's'} preserved and paused` : 'project paused'}; resume to continue`);
       refreshLiveBlock(run.id);
@@ -905,6 +983,11 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
   // a terminal run is immutable: answer questions from state, change nothing
   if (['COMPLETED', 'FAILED'].includes(run.state) && op !== 'get_state') {
     return { ok: false, error: `This project run is ${run.state} and can no longer be changed. Answer the user from the existing state; for new work, ask them to start a new project run in the same directory.` };
+  }
+  // a paused project is frozen: nothing starts, integrates, delivers, or
+  // completes until the user presses Resume (which wakes you in RESUMING)
+  if (['PAUSING', 'PAUSED'].includes(run.state) && op !== 'get_state') {
+    return { ok: false, error: `The project is ${run.state}. Nothing can start, change, or complete while it is paused — answer the user in the chat from the existing state, and ask them to press Resume when they are ready.` };
   }
   try {
     switch (op) {
@@ -962,6 +1045,7 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
             errors.push(`${key}: ${err instanceof Error ? err.message : err}`);
           }
         }
+        if (started.length > 0 && getRunRaw(runId).state === 'RESUMING') setRunState(runId, 'RUNNING', 'Project resumed');
         return {
           ok: errors.length === 0 || started.length > 0,
           text: `${started.length ? `Started: ${started.join(', ')}. Each is a normal Tandem session with its own Builder and independent Reviewer; you will be woken when they finish.` : ''}${errors.length ? `\nNot started — ${errors.join('; ')}` : ''}`.trim(),

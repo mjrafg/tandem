@@ -553,6 +553,8 @@ export interface PdSession {
   cwd: string | null;      // worktree dir or the project root
   /** event seq just before the latest run's trigger — the outcome window base */
   lastBaselineSeq?: number | null;
+  /** why a paused session stopped: the user's own stop vs a project-wide pause */
+  stopReason?: 'user_stop' | 'project_pause' | null;
   resultSummary: string | null;
   reviewVerdict: 'pass' | 'findings' | null;
   /** live sub-state derived from the underlying chat (display only) */

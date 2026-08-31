@@ -151,8 +151,13 @@ const TOOLS = [
     },
   },
   {
+    name: 'project_deliver',
+    description: 'Deliver the finished work: the engine fast-forwards the project\'s base branch to the integration branch and checks the base branch out. Call it when all milestones are complete, before complete_project. If it reports a diverged base branch, launch a reconciliation session that merges the integration branch into the base, then deliver again.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'complete_project',
-    description: 'Mark the whole project complete when every milestone is done and the overall goal is satisfied.',
+    description: 'Mark the whole project complete when every milestone is done, the overall goal is satisfied, and the work is delivered (project_deliver). The engine refuses while a milestone is open or the base branch is behind the integration branch; on success it also cleans up session worktrees and merged pd/ branches.',
     inputSchema: {
       type: 'object',
       properties: { summary: { type: 'string', description: 'The delivered result.' } },

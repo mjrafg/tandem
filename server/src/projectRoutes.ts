@@ -82,7 +82,7 @@ function isWritable(p: string): boolean {
 export function registerProjectRoutes(app: FastifyInstance): void {
   app.get('/api/projects', async () => {
     const rows = db.prepare('SELECT * FROM projects ORDER BY last_opened_at DESC').all();
-    return rows.map(rowToProject);
+    return rows.map(rowToProject); // rowToProject marks Director worktrees hidden
   });
 
   app.post('/api/projects/open', async (req, reply) => {

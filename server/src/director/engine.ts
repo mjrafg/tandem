@@ -4,20 +4,21 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Chat, PdSession, ProjectRun, SessionsPayload } from '../../../shared/types';
 import { config } from '../config';
-import { db, getBuilderSession, getChat, getProject, rowToChat, setGitStateRow } from '../db';
+import { db, getBuilderSession, getChat, getEvent, getProject, rowToChat, setGitStateRow } from '../db';
 import { addEvent, broadcastChat, deriveTitle, setChatRunning, setChatTitle, updateEvent } from '../events';
 import { directorSystemText, getPrompt, renderPrompt } from '../prompts';
 import { getSettings } from '../settings';
 import { findOrCreateProject } from '../projectRoutes';
 import { runClaudeTurn } from '../engine/claude';
 import { runCodexReview } from '../engine/codex';
-import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, stopRun } from '../engine/run';
+import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, repoBusyBy, stopRun } from '../engine/run';
 import { computeUsage } from '../context';
 import { performNativeCompaction } from '../engine/providerContext';
 import { parseVerdict, startRun } from '../engine/workflow';
 import {
   addActivity, broadcastRun, createRun, depsSatisfied, getRun, getRunRaw, getSession, listRuns,
-  milestoneByKey, patchMilestone, patchRun, patchSession, planSessions, runForChat, sessionsByStatus,
+  milestoneByKey, milestoneDepsOpen, openMilestones, patchMilestone, patchRun, patchSession,
+  planDocument, planSessions, runForChat, sessionsByStatus,
   setPlan, setRunState, stateSnapshot, type MilestoneInput, type SessionInput,
 } from './store';
 
@@ -70,7 +71,10 @@ function turnState(runId: string): TurnState {
 export function directorUserMessage(chat: Chat, text: string): void {
   const run = runForChat(chat.id);
   if (!run) return;
-  if (!getRunRaw(run.id).goal) patchRun(run.id, { goal: text.slice(0, 2_000) });
+  // the goal is the project's authoritative brief: reviews and post-restart
+  // turns are rendered from it, so it must never be silently mutilated (a
+  // 2k slice once fed a plan reviewer a brief missing the user's own mandate)
+  if (!getRunRaw(run.id).goal) patchRun(run.id, { goal: text.slice(0, 24_000) });
   if (run.state === 'NEEDS_USER') setRunState(run.id, 'RUNNING', 'User replied — continuing');
   void pumpDirector(run.id, text, 'user');
 }
@@ -192,7 +196,7 @@ async function runDirectorTurn(runId: string, message: string): Promise<void> {
 // ---------------------------------------------------------------- review plumbing
 
 /** Run one independent review (the SAME Codex reviewer) on an orchestration artifact. */
-async function reviewArtifact(runId: string, prompt: string): Promise<{ verdict: 'pass' | 'findings'; findingsText: string } | null> {
+async function reviewArtifact(runId: string, prompt: string, round: number): Promise<{ verdict: 'pass' | 'findings'; findingsText: string } | null> {
   const run = getRun(runId);
   if (!run) return null;
   const chat = getChat(run.chatId);
@@ -217,7 +221,7 @@ async function reviewArtifact(runId: string, prompt: string): Promise<{ verdict:
       return null;
     }
     const { verdict, items } = parseVerdict(result.text);
-    addEvent(chat.id, 'findings', { verdict, round: 0, items }, { runId: ctx.runId });
+    addEvent(chat.id, 'findings', { verdict, round, items }, { runId: ctx.runId });
     const findingsText = items.map((f, i) => `${i + 1}. [${f.severity}] ${f.title}\n   ${f.detail}${f.recommendation ? `\n   Recommendation: ${f.recommendation}` : ''}`).join('\n');
     return { verdict, findingsText };
   } finally {
@@ -234,6 +238,11 @@ async function reviewArtifact(runId: string, prompt: string): Promise<{ verdict:
 async function processAfterTurn(runId: string): Promise<void> {
   const raw = getRunRaw(runId);
   if (!raw) return;
+  // a terminal run reviews nothing and applies nothing — mirror the tool guard
+  if (['COMPLETED', 'FAILED'].includes(raw.state)) {
+    if (raw.plan_review_round > 0 || raw.pending_recovery) patchRun(runId, { plan_review_round: 0, pending_recovery: null });
+    return;
+  }
 
   // ---- master plan review loop
   if (raw.plan_review_round > 0 && raw.plan_review_round <= 3) {
@@ -247,10 +256,11 @@ async function processAfterTurn(runId: string): Promise<void> {
       acceptPlan(runId);
       return;
     }
-    const planDoc = stateSnapshot(runId);
+    // the reviewer judges the FULL plan and the FULL goal — never the
+    // display-truncated snapshot (that artifact cost a review round twice)
     const review = await reviewArtifact(runId, renderPrompt('director.plan_review_request', {
-      project_goal: run.goal, plan: planDoc,
-    }));
+      project_goal: run.goal, plan: planDocument(runId),
+    }), round);
     if (!review) {
       addActivity(runId, 'review', 'Plan review could not run — plan proceeds unreviewed (reviewer unavailable)');
       patchRun(runId, { plan_review_round: 0 });
@@ -285,7 +295,7 @@ async function processAfterTurn(runId: string): Promise<void> {
     const review = await reviewArtifact(runId, renderPrompt('director.recovery_review_request', {
       session_context: pending.context ?? '(context unavailable)',
       decision: `Action: ${pending.action}\nReasoning: ${pending.reasoning}${pending.newPrompt ? `\nNew/updated session instructions:\n${pending.newPrompt}` : ''}${pending.extraMinutes ? `\nAdditional time: ${pending.extraMinutes} minutes` : ''}`,
-    }));
+    }), round);
     if (!review || review.verdict === 'pass') {
       patchRun(runId, { pending_recovery: null });
       addActivity(runId, 'review', review
@@ -339,14 +349,72 @@ async function ensureIntegrationBranch(runId: string, rootPath: string): Promise
   const head = await git(rootPath, ['rev-parse', '--verify', 'HEAD']);
   if (!head.ok) throw new Error('The repository has no commits yet — the scaffolding session must create a baseline commit first.');
   const name = 'pd/integration';
+  // the branch we forked from is where the final result must be DELIVERED —
+  // never one of Tandem's own scratch branches (tandem/<chat>) or pd/ branches
+  const base = await git(rootPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const baseBranch = base.ok && base.stdout && base.stdout !== 'HEAD'
+    && !base.stdout.startsWith('pd/') && !base.stdout.startsWith('tandem/')
+    ? base.stdout : null;
   const exists = await git(rootPath, ['rev-parse', '--verify', `refs/heads/${name}`]);
-  if (!exists.ok) {
+  if (exists.ok) {
+    // a leftover pd/integration from an EARLIER run: safe to adopt only when it
+    // carries nothing beyond the current HEAD — otherwise delivering would ship
+    // a previous run's undelivered commits as this run's work
+    const contained = await git(rootPath, ['merge-base', '--is-ancestor', name, 'HEAD']);
+    if (!contained.ok) {
+      throw new Error(`A ${name} branch from a previous run exists and holds commits not in the current HEAD. Inspect it first: deliver or discard that work through a session (merge it into the intended branch or delete the branch), then continue.`);
+    }
+    const reset = await git(rootPath, ['branch', '-f', name, 'HEAD']);
+    if (!reset.ok) throw new Error(`Could not reset the stale integration branch: ${reset.stderr}`);
+  } else {
     const made = await git(rootPath, ['branch', name]);
     if (!made.ok) throw new Error(`Could not create the integration branch: ${made.stderr}`);
   }
-  patchRun(runId, { integration_branch: name });
-  addActivity(runId, 'integration', `Integration branch ${name} established`);
+  patchRun(runId, { integration_branch: name, ...(baseBranch ? { base_branch: baseBranch } : {}) });
+  addActivity(runId, 'integration', `Integration branch ${name} established${baseBranch ? ` (delivers to ${baseBranch})` : ''}`);
   return name;
+}
+
+/**
+ * Best-effort workspace cleanup at completion: session worktrees are removed
+ * (their chats and history remain), fully-merged pd/ branches are deleted
+ * (`-d` only — anything unmerged is deliberately left in place), and the
+ * integration branch goes once the base branch contains it. Failures never
+ * block completion.
+ */
+async function cleanupRunWorkspaces(runId: string, rootPath: string): Promise<void> {
+  try {
+    const run = getRun(runId);
+    if (!run) return;
+    const wtBase = path.join(config.dataDir, 'worktrees', runId.slice(0, 8));
+    let removed = 0;
+    for (const m of run.milestones) {
+      for (const s of m.sessions) {
+        // only COMPLETED sessions' worktrees — an abandoned session's uncommitted
+        // work was promised recoverable, so its worktree is never force-removed —
+        // and even a completed one keeps its worktree if anything is uncommitted
+        if (s.status === 'completed' && s.cwd && s.cwd.startsWith(wtBase) && fs.existsSync(s.cwd)) {
+          const dirty = await git(s.cwd, ['status', '--porcelain']);
+          if (!dirty.ok || dirty.stdout) continue; // unknown or dirty → keep it
+          const r = await git(rootPath, ['worktree', 'remove', s.cwd], 30_000);
+          if (r.ok) removed += 1;
+        }
+      }
+    }
+    await git(rootPath, ['worktree', 'prune']);
+    try { if (fs.existsSync(wtBase) && fs.readdirSync(wtBase).length === 0) fs.rmdirSync(wtBase); } catch { /* leave it */ }
+    let deleted = 0;
+    for (const m of run.milestones) {
+      for (const s of m.sessions) {
+        if (s.branch && (await git(rootPath, ['branch', '-d', s.branch])).ok) deleted += 1;
+      }
+    }
+    const raw = getRunRaw(runId);
+    if (raw.integration_branch && (await git(rootPath, ['branch', '-d', raw.integration_branch])).ok) deleted += 1;
+    if (removed || deleted) {
+      addActivity(runId, 'state', `Workspace cleaned: ${removed} worktree${removed === 1 ? '' : 's'} removed, ${deleted} merged branch${deleted === 1 ? '' : 'es'} deleted`);
+    }
+  } catch { /* cleanup is best-effort by design */ }
 }
 
 // ---------------------------------------------------------------- session launching
@@ -375,6 +443,14 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   if (session.status === 'completed') throw new Error(`Session ${key} is already completed.`);
   const deps = depsSatisfied(runId, key);
   if (!deps.ok) throw new Error(`Session ${key} cannot start: unfinished dependencies ${deps.missing.join(', ')}.`);
+  // milestone-level dependencies are an engine invariant, not a suggestion
+  const ownerMs = run.milestones.find((m) => m.sessions.some((s) => s.key === key));
+  if (ownerMs) {
+    const openDeps = milestoneDepsOpen(runId, ownerMs.key);
+    if (openDeps.length > 0) {
+      throw new Error(`Session ${key} belongs to milestone ${ownerMs.key}, whose predecessor${openDeps.length === 1 ? '' : 's'} ${openDeps.join(', ')} ${openDeps.length === 1 ? 'is' : 'are'} not completed — complete ${openDeps.join(', ')} first (complete_milestone) or revise the plan.`);
+    }
+  }
 
   const rootProject = getProject(run.projectId)!;
   let cwd = rootProject.rootPath;
@@ -405,10 +481,13 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
     if (busy) throw new Error(`Session ${busy.key} is already working in the project directory.`);
   }
 
-  // the session is a NORMAL Tandem chat — the same primitive a human's New chat uses
+  // the session is a NORMAL Tandem chat — the same primitive a human's New chat
+  // uses. kind 'pd-session' is a durable ownership marker (it survives restarts
+  // and relaunches, unlike the pd_sessions.chat_id pointer): the message route
+  // refuses direct human input into any chat that ever belonged to a Director.
   const chatId = randomUUID();
   const now = Date.now();
-  db.prepare('INSERT INTO chats (id, project_id, title, created_at, updated_at, running) VALUES (?, ?, ?, ?, ?, 0)')
+  db.prepare(`INSERT INTO chats (id, project_id, title, created_at, updated_at, running, kind) VALUES (?, ?, ?, ?, ?, 0, 'pd-session')`)
     .run(chatId, chatProjectId, `${key} · ${session.name}`.slice(0, 80), now, now);
   broadcastChat(chatId);
 
@@ -512,8 +591,20 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     return;
   }
   if (status === 'completed') {
+    // close the unprotected window after a scaffolding session: as soon as the
+    // root is a repo with a commit, freeze the base branch behind pd/integration
+    if (!getRunRaw(runId).integration_branch) {
+      const root = getProject(getRun(runId)!.projectId)?.rootPath;
+      if (root && await isRepo(root)) {
+        try { await ensureIntegrationBranch(runId, root); } catch { /* no baseline commit yet — next launch tries again */ }
+      }
+    }
     const ready = readySessions(runId);
     queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict ? ` Reviewer verdict: ${outcome.reviewVerdict}.` : ''} Result summary: ${outcome.summary.slice(0, 600) || '(no summary)'}${ready.length ? ` Sessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
+  } else if (status === 'paused') {
+    // a deliberate user stop is NOT a failure: no needs_attention, no forced
+    // recovery review — the Director just decides whether/when to resume
+    queueObservation(runId, `Session ${key} was STOPPED by the user; its chat and all work on disk are preserved. Decide whether to resume it (resume_sessions), replan around it, or wait — this was a deliberate stop, not a failure.`);
   } else {
     patchSession(runId, key, { status: 'needs_attention' });
     const context = await failureContext(runId, key, chatId, outcome);
@@ -633,21 +724,34 @@ function deriveLive(chatId: string): { builder: string | null; reviewer: string 
 export function refreshLiveBlock(runId: string): void {
   const run = getRun(runId);
   if (!run) return;
-  const launched = run.milestones.flatMap((m) => m.sessions.filter((s) => s.chatId))
-    .filter((s) => ['running', 'completed', 'paused', 'timeout', 'failed', 'needs_attention'].includes(s.status));
-  if (launched.length === 0) return;
-  const currentMs = run.milestones.find((m) => m.sessions.some((s) => s.status === 'running'))
-    ?? run.milestones.find((m) => m.sessions.some((s) => s.chatId));
-  // waiting sessions of the current milestone appear too ("○ Integration · Waiting")
-  const waiting = (currentMs?.sessions ?? []).filter((s) => s.status === 'planned' && !s.chatId);
-  const tracked = [...launched, ...waiting];
-  const active = tracked.filter((s) => s.status === 'running');
+  const byKey = new Map(run.milestones.flatMap((m) => m.sessions.map((s) => [s.key, { s, m }] as const)));
+  const raw0 = getRunRaw(runId);
+  // the block describes ONE WAVE: the sessions already in the live event, plus
+  // whatever is running now, plus planned dependents in the running milestones —
+  // never every session the run has ever launched
+  const prior = raw0.live_event_id ? getEvent(raw0.live_event_id) : null;
+  const priorKeys = new Set<string>(((prior?.payload as any)?.sessions ?? []).map((x: any) => String(x.key)));
+  const running = [...byKey.values()].filter(({ s }) => s.status === 'running');
+  const runningMsIds = new Set(running.map(({ m }) => m.id));
+  const waiting = [...byKey.values()].filter(({ s, m }) => runningMsIds.has(m.id) && s.status === 'planned' && !s.chatId);
+  const tracked = [...byKey.values()].filter(({ s }) =>
+    priorKeys.has(s.key)
+    || s.status === 'running'
+    || waiting.some((w) => w.s.key === s.key));
+  if (tracked.length === 0) return;
+  const active = tracked.filter(({ s }) => s.status === 'running');
+
+  // label the wave by the milestones it actually spans (concurrent milestones
+  // are legitimate — "M4 + M5", never a stale first-milestone fallback)
+  const waveMs: typeof run.milestones = [];
+  for (const { m } of tracked) if (!waveMs.some((x) => x.id === m.id)) waveMs.push(m);
+  waveMs.sort((a, b) => a.orderIdx - b.orderIdx);
 
   const payload: SessionsPayload = {
     runId,
-    milestoneKey: currentMs?.key ?? '',
-    milestoneName: currentMs?.name ?? '',
-    sessions: tracked.slice(-12).map((s) => {
+    milestoneKey: waveMs.map((m) => m.key).join(' + '),
+    milestoneName: waveMs.map((m) => m.name).join(' · '),
+    sessions: tracked.map(({ s }) => s).slice(-12).map((s) => {
       const live = s.status === 'running' && s.chatId ? deriveLive(s.chatId) : { builder: null, reviewer: null, note: null };
       return {
         key: s.key, name: s.name, chatId: s.chatId, status: s.status,
@@ -679,6 +783,11 @@ export async function applyRecovery(runId: string, pending: any): Promise<void> 
   const key = pending.sessionKey as string;
   const session = getSession(runId, key);
   if (!session) return;
+  const state = getRunRaw(runId)?.state;
+  if (!['RUNNING', 'RESUMING', 'PLANNING'].includes(state)) {
+    addActivity(runId, 'recovery', `Recovery for ${key} not applied — the project is ${state}`);
+    return;
+  }
   addActivity(runId, 'recovery', `Recovery applied for ${key}: ${pending.action}`, pending.reasoning?.slice(0, 1_500));
   try {
     if (pending.action === 'continue') {
@@ -691,7 +800,11 @@ export async function applyRecovery(runId: string, pending: any): Promise<void> 
     } else if (pending.action === 'abandon') {
       patchSession(runId, key, { status: 'abandoned' });
       refreshLiveBlock(runId);
-      queueObservation(runId, `Session ${key} is abandoned per your reviewed decision; its work remains on disk${session.branch ? ` (branch ${session.branch})` : ''}. Replan the remaining milestone work if needed.`);
+      // dependencies are only satisfied by COMPLETED sessions, so dependents of
+      // an abandoned one are dead until replanned — say so instead of letting
+      // the Director discover it via launch rejections
+      const blocked = sessionsByStatus(runId, ['planned']).filter((s) => s.dependsOn.includes(key)).map((s) => s.key);
+      queueObservation(runId, `Session ${key} is abandoned per your reviewed decision; its work remains on disk${session.branch ? ` (branch ${session.branch})` : ''}.${blocked.length ? ` BLOCKED dependents: ${blocked.join(', ')} can never start while they depend on ${key} — redefine them with plan_milestone_sessions (new depends_on) or restart ${key}.` : ''} Replan the remaining milestone work if needed.`);
     } else if (pending.action === 'wait') {
       patchSession(runId, key, { status: 'paused' });
       refreshLiveBlock(runId);
@@ -778,6 +891,10 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
   const run = runForChat(chatId);
   if (!run) return { ok: false, error: 'This chat is not a Project Director chat.' };
   const runId = run.id;
+  // a terminal run is immutable: answer questions from state, change nothing
+  if (['COMPLETED', 'FAILED'].includes(run.state) && op !== 'get_state') {
+    return { ok: false, error: `This project run is ${run.state} and can no longer be changed. Answer the user from the existing state; for new work, ask them to start a new project run in the same directory.` };
+  }
   try {
     switch (op) {
       case 'get_state':
@@ -809,7 +926,13 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         }));
         if (sessions.length === 0) return { ok: false, error: 'Provide at least one session.' };
         if (sessions.some((s) => !s.prompt.trim())) return { ok: false, error: 'Every session needs a full self-contained prompt.' };
-        const ms = planSessions(runId, String(args.milestone ?? ''), sessions);
+        const msKeyArg = String(args.milestone ?? '');
+        if (!milestoneByKey(runId, msKeyArg)) return { ok: false, error: `Unknown milestone: ${msKeyArg}` };
+        const openDeps = milestoneDepsOpen(runId, msKeyArg);
+        if (openDeps.length > 0) {
+          return { ok: false, error: `Milestone ${msKeyArg} cannot be decomposed yet: its predecessor${openDeps.length === 1 ? '' : 's'} ${openDeps.join(', ')} ${openDeps.length === 1 ? 'is' : 'are'} not completed. Complete ${openDeps.join(', ')} first (complete_milestone), or revise the plan if the dependency is wrong.` };
+        }
+        const ms = planSessions(runId, msKeyArg, sessions);
         patchMilestone(runId, ms.key, { status: 'running' });
         addActivity(runId, 'decision', `${ms.key} planned into ${ms.sessions.length} sessions`, String(args.reasoning ?? '').slice(0, 1_500));
         return { ok: true, text: `Milestone ${ms.key} now has ${ms.sessions.length} sessions. Start the ready ones with start_sessions.` };
@@ -884,14 +1007,20 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         const msKey = String(args.milestone ?? '');
         const ms = milestoneByKey(runId, msKey);
         if (!ms) return { ok: false, error: `Unknown milestone: ${msKey}` };
-        const unfinished = ms.sessions.filter((s) => !['completed', 'abandoned'].includes(s.status));
+        // ALL preconditions before any side effect (session row / status change),
+        // so a rejection leaves nothing behind that blocks a retry
+        const msDeps = milestoneDepsOpen(runId, msKey);
+        if (msDeps.length > 0) return { ok: false, error: `Milestone ${msKey}'s predecessor${msDeps.length === 1 ? '' : 's'} ${msDeps.join(', ')} ${msDeps.length === 1 ? 'is' : 'are'} not completed — integrate after ${msDeps.join(', ')}.` };
+        const intKey = `${msKey}.INT`;
+        // a leftover planned INT session from an earlier rejected attempt is ours to replace
+        const unfinished = ms.sessions.filter((s) => !['completed', 'abandoned'].includes(s.status) && !(s.key === intKey && s.status === 'planned'));
         if (unfinished.length > 0) return { ok: false, error: `Sessions still open: ${unfinished.map((s) => s.key).join(', ')} — integration needs every session completed or abandoned.` };
         const rootProject = getProject(run.projectId)!;
-        const integration = await ensureIntegrationBranch(runId, rootProject.rootPath);
         const busy = dirBusyWithin(runId, rootProject.rootPath);
         if (busy) return { ok: false, error: `Session ${busy.key} is working in the project directory — integrate after it finishes.` };
+        const integration = await ensureIntegrationBranch(runId, rootProject.rootPath);
         const branches = ms.sessions.filter((s) => s.branch && s.status === 'completed').map((s) => s.branch as string);
-        const sKey = `${msKey}.INT`;
+        const sKey = intKey;
         planSessions(runId, msKey, [{
           key: sKey, name: `${ms.name} integration`, purpose: `Integrate and validate milestone ${msKey}`,
           prompt: renderPrompt('director.integration_wrapper', {
@@ -911,16 +1040,95 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         const msKey = String(args.milestone ?? '');
         const ms = milestoneByKey(runId, msKey);
         if (!ms) return { ok: false, error: `Unknown milestone: ${msKey}` };
+        if (ms.sessions.length === 0) {
+          // "complete" must mean work happened — a milestone that became
+          // unnecessary is removed from the plan, not vacuously completed
+          return { ok: false, error: `Milestone ${msKey} has no sessions — decompose it (plan_milestone_sessions) and do the work, or remove it from the plan (project_set_plan) if it is no longer needed.` };
+        }
         const open = ms.sessions.filter((s) => !['completed', 'abandoned'].includes(s.status));
         if (open.length > 0) return { ok: false, error: `Cannot complete ${msKey}: sessions still open (${open.map((s) => s.key).join(', ')}).` };
+        // a milestone is not complete while its work is stranded on session branches
+        const integration = getRunRaw(runId).integration_branch as string | null;
+        if (integration) {
+          const rootPath = getProject(run.projectId)!.rootPath;
+          const unmerged: string[] = [];
+          for (const s of ms.sessions) {
+            if (s.branch && s.status === 'completed') {
+              const merged = await git(rootPath, ['merge-base', '--is-ancestor', s.branch, integration]);
+              if (!merged.ok) unmerged.push(`${s.key} (${s.branch})`);
+            }
+          }
+          if (unmerged.length > 0) {
+            return { ok: false, error: `Cannot complete ${msKey}: session work is not merged into ${integration} yet — ${unmerged.join(', ')}. Run integrate_milestone (or a session that performs the merge) first.` };
+          }
+        }
         patchMilestone(runId, msKey, { status: 'completed' });
         addActivity(runId, 'session', `${msKey} completed: ${String(args.summary ?? '').slice(0, 300)}`);
         return { ok: true, text: `Milestone ${msKey} is complete. Revise later milestones if what you learned changes them, then plan the next ready milestone.` };
       }
 
+      case 'deliver': {
+        const raw = getRunRaw(runId);
+        const integration = raw.integration_branch as string | null;
+        const base = raw.base_branch as string | null;
+        if (!integration) return { ok: true, text: 'No integration branch exists — the work already lives on the base branch; nothing to deliver.' };
+        if (!base) return { ok: false, error: 'No base branch was recorded for this run — deliver via a session that merges the integration branch into the intended branch (and deletes it), then complete the project.' };
+        const rootPath = getProject(run.projectId)!.rootPath;
+        const busy = dirBusyWithin(runId, rootPath);
+        if (busy) return { ok: false, error: `Session ${busy.key} is working in the project directory — deliver after it finishes.` };
+        // ...and nothing OUTSIDE this run either: an ordinary chat running in
+        // the same repository must never have the branch switched under it
+        const otherChat = repoBusyBy(rootPath, run.chatId);
+        if (otherChat) return { ok: false, error: 'Another chat is actively working in this repository right now — deliver once it finishes.' };
+        const delivered = await git(rootPath, ['merge-base', '--is-ancestor', integration, base]);
+        if (delivered.ok) {
+          const co0 = await git(rootPath, ['checkout', base]);
+          if (!co0.ok) return { ok: false, error: `${base} already contains ${integration}, but the working tree could not switch to ${base}: ${co0.stderr || 'checkout failed'} — likely uncommitted local changes; resolve them via a session, then deliver again.` };
+          return { ok: true, text: `${base} already contains ${integration} — nothing to merge. The repository is on ${base}.` };
+        }
+        // strict fast-forward only: the engine performs no content decisions.
+        // A diverged base means outside interference — that is session work.
+        const ffable = await git(rootPath, ['merge-base', '--is-ancestor', base, integration]);
+        if (!ffable.ok) {
+          return { ok: false, error: `${base} has commits that are not on ${integration} — a fast-forward is impossible. Launch a reconciliation session to merge ${integration} into ${base}, then deliver again.` };
+        }
+        const co = await git(rootPath, ['checkout', base]);
+        if (!co.ok) return { ok: false, error: `Could not switch to ${base}: ${co.stderr || 'checkout failed'} — likely uncommitted local changes; resolve them via a session, then deliver again.` };
+        const ff = await git(rootPath, ['merge', '--ff-only', integration]);
+        if (!ff.ok) {
+          const back = await git(rootPath, ['checkout', integration]); // leave things as found
+          return { ok: false, error: `Fast-forward failed: ${ff.stderr}${back.ok ? '' : ` (and switching back to ${integration} also failed: ${back.stderr})`}` };
+        }
+        const behind = await git(rootPath, ['rev-list', '--count', `${base}..${integration}`]);
+        addActivity(runId, 'delivery', `Delivered: ${base} fast-forwarded to ${integration}${behind.ok && behind.stdout === '0' ? '' : ' (verify!)'}`);
+        return { ok: true, text: `Delivered — ${base} now equals ${integration}, and the repository is checked out on ${base}.` };
+      }
+
       case 'complete_project': {
         const open = sessionsByStatus(runId, ['running', 'planned', 'timeout', 'needs_attention']);
         if (open.length > 0) return { ok: false, error: `Sessions still open: ${open.map((s) => s.key).join(', ')}.` };
+        // COMPLETED must mean complete: every milestone closed, work delivered
+        const msOpen = openMilestones(runId);
+        if (msOpen.length > 0) {
+          return { ok: false, error: `Milestone${msOpen.length === 1 ? '' : 's'} ${msOpen.join(', ')} ${msOpen.length === 1 ? 'is' : 'are'} not completed — complete ${msOpen.length === 1 ? 'it' : 'them'} (complete_milestone) or revise the plan first.` };
+        }
+        const raw = getRunRaw(runId);
+        const rootPath = getProject(run.projectId)!.rootPath;
+        if (raw.integration_branch) {
+          // an integration branch that no longer exists was dealt with by a
+          // session (merged + deleted) — only a LIVE one gates completion
+          const integrationExists = (await git(rootPath, ['rev-parse', '--verify', `refs/heads/${raw.integration_branch}`])).ok;
+          if (integrationExists && raw.base_branch) {
+            const delivered = await git(rootPath, ['merge-base', '--is-ancestor', raw.integration_branch, raw.base_branch]);
+            if (!delivered.ok) {
+              const behind = await git(rootPath, ['rev-list', '--count', `${raw.base_branch}..${raw.integration_branch}`]);
+              return { ok: false, error: `The result is not delivered: ${raw.base_branch} is ${behind.ok ? behind.stdout : 'several'} commits behind ${raw.integration_branch}. Call project_deliver first (or launch a reconciliation session if it reports a diverged base).` };
+            }
+          } else if (integrationExists && !raw.base_branch) {
+            return { ok: false, error: `Delivery cannot be verified: no base branch is recorded for this run (the repository was not on a deliverable branch when ${raw.integration_branch} was created). Launch a session that merges ${raw.integration_branch} into the intended branch and deletes ${raw.integration_branch}, then complete the project.` };
+          }
+        }
+        await cleanupRunWorkspaces(runId, rootPath);
         setRunState(runId, 'COMPLETED', `Project completed: ${String(args.summary ?? '').slice(0, 300)}`);
         return { ok: true, text: 'Project marked complete. Summarize the delivered result for the user.' };
       }

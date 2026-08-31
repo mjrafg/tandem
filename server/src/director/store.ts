@@ -70,6 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_pd_sessions_run ON pd_sessions(run_id);
 CREATE INDEX IF NOT EXISTS idx_pd_activity_run ON pd_activity(run_id, ts);
 `);
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN last_baseline_seq INTEGER'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE project_runs ADD COLUMN base_branch TEXT'); } catch { /* exists */ }
 
 // ---------------------------------------------------------------- mapping
 
@@ -134,7 +135,7 @@ export function createRun(projectId: string, chatId: string, goal: string): Proj
 }
 
 export function patchRun(id: string, patch: Record<string, unknown>): void {
-  const allowed = ['title', 'goal', 'state', 'integration_branch', 'plan_summary', 'plan_review_round', 'pending_recovery', 'live_event_id'];
+  const allowed = ['title', 'goal', 'state', 'integration_branch', 'base_branch', 'plan_summary', 'plan_review_round', 'pending_recovery', 'live_event_id'];
   const sets = Object.keys(patch).filter((k) => allowed.includes(k));
   if (sets.length === 0) return;
   db.prepare(`UPDATE project_runs SET ${sets.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`)
@@ -195,6 +196,11 @@ export function setPlan(runId: string, milestones: MilestoneInput[], summary: st
   milestones.forEach((m, idx) => {
     const old = byKey.get(m.key);
     if (old) {
+      // dependencies of a milestone already past 'planned' are frozen — rewiring
+      // them retroactively would invalidate ordering the engine already enforced
+      if (old.status !== 'planned' && JSON.stringify(m.dependsOn) !== old.depends_on) {
+        throw new Error(`Milestone ${m.key} is ${old.status} — its dependencies can no longer change. Revise its goal/acceptance, or restructure via NEW milestones instead.`);
+      }
       db.prepare('UPDATE pd_milestones SET name = ?, goal = ?, acceptance = ?, order_idx = ?, depends_on = ? WHERE id = ?')
         .run(m.name, m.goal, m.acceptance, idx, JSON.stringify(m.dependsOn), old.id);
     } else {
@@ -313,21 +319,61 @@ export function listRuns(): ProjectRun[] {
 
 // ---------------------------------------------------------------- snapshots
 
+/** Truncate for the state VIEW — always visibly marked, never silent. */
+function view(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)} …[truncated for this view]` : s;
+}
+
+/**
+ * Milestone deps that are not completed yet — the engine invariant behind
+ * "a dependent milestone cannot start before its predecessors are done".
+ */
+export function milestoneDepsOpen(runId: string, msKey: string): string[] {
+  const ms = milestoneByKey(runId, msKey);
+  if (!ms) return [msKey];
+  return ms.dependsOn.filter((d) => milestoneByKey(runId, d)?.status !== 'completed');
+}
+
+/** Milestones not yet completed (for the completion gate). */
+export function openMilestones(runId: string): string[] {
+  return (db.prepare("SELECT key FROM pd_milestones WHERE run_id = ? AND status != 'completed' ORDER BY order_idx").all(runId) as any[])
+    .map((r) => r.key);
+}
+
+/**
+ * FULL-FIDELITY plan document for independent review. Reviews must judge the
+ * actual plan — never the display-truncated state snapshot (both real runs
+ * lost a review round to snapshot truncation artifacts before this existed).
+ */
+export function planDocument(runId: string): string {
+  const run = getRun(runId);
+  if (!run) return '(project run not found)';
+  const lines: string[] = [`# Project goal (complete, as given by the user)\n${run.goal}`];
+  if (run.planSummary) lines.push(`\n# Plan summary\n${run.planSummary}`);
+  lines.push('\n# Milestones');
+  for (const m of run.milestones) {
+    lines.push(`\n${m.key} — ${m.name}${m.dependsOn.length ? ` (after ${m.dependsOn.join(', ')})` : ''}`);
+    lines.push(`Goal: ${m.goal}`);
+    if (m.acceptance) lines.push(`Acceptance: ${m.acceptance}`);
+  }
+  return lines.join('\n');
+}
+
 /** Compact, engine-generated state snapshot handed to the Director each turn. */
 export function stateSnapshot(runId: string): string {
   const run = getRun(runId);
   if (!run) return '(project run not found)';
   const lines: string[] = [
     `Run state: ${run.state}${run.integrationBranch ? ` · integration branch: ${run.integrationBranch}` : ''}`,
-    `Goal: ${run.goal.slice(0, 300)}`,
+    `Goal: ${view(run.goal, 1_200)}`,
   ];
   if (run.milestones.length === 0) {
     lines.push('No milestone plan yet — produce one with project_set_plan.');
   }
   for (const m of run.milestones) {
     lines.push(`\n${m.key} — ${m.name} [${m.status}]${m.dependsOn.length ? ` (after ${m.dependsOn.join(', ')})` : ''}`);
-    lines.push(`  goal: ${m.goal.slice(0, 200)}`);
-    if (m.acceptance) lines.push(`  acceptance: ${m.acceptance.slice(0, 200)}`);
+    lines.push(`  goal: ${view(m.goal, 200)}`);
+    if (m.acceptance) lines.push(`  acceptance: ${view(m.acceptance, 200)}`);
     for (const s of m.sessions) {
       const dep = s.dependsOn.length ? ` deps:[${s.dependsOn.join(',')}]` : '';
       const extras = [

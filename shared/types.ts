@@ -45,6 +45,8 @@ export interface Project {
   source: ProjectSource;
   createdAt: number;
   lastOpenedAt: number;
+  /** Director session worktree — kept out of the sidebar and pickers */
+  hidden?: boolean;
 }
 
 export type GitFlowMode = 'working-branch' | 'auto-merge' | 'direct' | 'none';
@@ -67,7 +69,7 @@ export interface Chat {
   lastCompactionEventId: string | null;
   gitState?: GitFlowState | null;
   /** 'project' = a Project Director chat; absent/'chat' = a normal session */
-  kind?: 'chat' | 'project';
+  kind?: 'chat' | 'project' | 'pd-session';
   /** for kind='project': the run this chat directs */
   projectRunId?: string | null;
 }
@@ -577,7 +579,7 @@ export interface PdActivity {
   id: string;
   runId: string;
   ts: number;
-  kind: 'plan' | 'decision' | 'session' | 'integration' | 'recovery' | 'state' | 'review';
+  kind: 'plan' | 'decision' | 'session' | 'integration' | 'recovery' | 'state' | 'review' | 'delivery';
   text: string;
   detail?: string | null;
 }

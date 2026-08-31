@@ -18,7 +18,7 @@ import { performNativeCompaction } from './engine/providerContext';
 import {
   createProjectRun, directorUserMessage, handleDirectorTool, pauseProject, resumeProject,
 } from './director/engine';
-import { getRun, listActivity, runForChat } from './director/store';
+import { getRun, listActivity, runForChat, sessionForChat } from './director/store';
 import {
   allMemories, createMemory, getMemory, listMemories, searchMemories, toToolShape,
   toJson as toMemoryJson, toMarkdown as toMemoryMarkdown, toPlainText as toMemoryText,
@@ -120,6 +120,14 @@ export function registerRoutes(app: FastifyInstance): void {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
     if (isRunning(chat.id)) return reply.code(409).send({ error: 'An agent run is already in progress for this chat.' });
+    // Director-owned session chats are operated exclusively through the run's
+    // orchestration — a stray message here would start an unmonitored run in
+    // the session's workspace behind the Director's back. The kind marker also
+    // covers chats a relaunch has orphaned from the pd_sessions pointer.
+    const pdSession = sessionForChat(chat.id);
+    if (pdSession || chat.kind === 'pd-session') {
+      return reply.code(409).send({ error: `This chat ${pdSession ? `is session ${pdSession.key} of` : 'belongs to'} a Project Director run — it is driven from the Project Chat. Ask the Director there instead.` });
+    }
     const { text, attachmentIds, review } = (req.body ?? {}) as { text?: string; attachmentIds?: string[]; review?: boolean };
     const clean = (text ?? '').trim();
     const attachments = resolveAttachments(attachmentIds ?? []);

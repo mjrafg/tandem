@@ -13,6 +13,7 @@ export function Sidebar() {
   const setNewProjectOpen = useStore((s) => s.setNewProjectOpen);
 
   const groups = projects
+    .filter((p) => !p.hidden)
     .map((p) => ({
       project: p,
       chats: chats.filter((c) => c.projectId === p.id).sort((a, b) => b.updatedAt - a.updatedAt),

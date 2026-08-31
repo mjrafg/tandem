@@ -120,7 +120,13 @@ export function ChatView() {
         </div>
       )}
 
-      <Composer chat={chat} prefill={prefill} onUsedPrefill={() => setPrefill(undefined)} />
+      {chat.kind === 'pd-session' ? (
+        <div className="border-t border-linesoft px-4 py-3 text-center text-[12.5px] text-dim">
+          This session is driven by its Project Director — talk to it from the Project Chat.
+        </div>
+      ) : (
+        <Composer chat={chat} prefill={prefill} onUsedPrefill={() => setPrefill(undefined)} />
+      )}
       <CompactDialog chatId={chat.id} open={compactOpen} onClose={() => setCompactOpen(false)} />
       </div>
       {isProject && chat.projectRunId && (

@@ -103,10 +103,16 @@ export function kvSet(key: string, value: unknown): void {
 
 // ---------------------------------------------------------------- rows
 
+const worktreesPrefix = path.join(config.dataDir, 'worktrees') + path.sep;
+
 export function rowToProject(r: any): Project {
   return {
     id: r.id, name: r.name, rootPath: r.root_path, source: r.source,
     createdAt: r.created_at, lastOpenedAt: r.last_opened_at,
+    // Director session worktrees are plumbing: hidden EVERYWHERE a project row
+    // travels (listing and live broadcasts alike), so the sidebar never shows
+    // them while their chats stay fully loadable
+    ...(String(r.root_path ?? '').startsWith(worktreesPrefix) ? { hidden: true } : {}),
   };
 }
 
@@ -121,6 +127,7 @@ export function rowToChat(r: any): Chat {
     running: !!r.running, lastCompactionEventId: r.last_compaction_event_id ?? null,
     gitState,
     ...(r.kind === 'project' ? { kind: 'project' as const, projectRunId: r.project_run_id ?? null } : {}),
+    ...(r.kind === 'pd-session' ? { kind: 'pd-session' as const } : {}),
   };
 }
 

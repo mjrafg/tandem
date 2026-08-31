@@ -14,7 +14,9 @@ export function NewProjectDialog() {
   const open = useStore((s) => s.newProjectOpen);
   const mode = useStore((s) => s.newProjectMode);
   const setOpen = useStore((s) => s.setNewProjectOpen);
-  const projects = useStore((s) => s.projects.filter((p) => !p.hidden));
+  // NOTE: selectors must return stable references — filtering happens outside
+  const allProjects = useStore((s) => s.projects);
+  const projects = allProjects.filter((p) => !p.hidden);
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

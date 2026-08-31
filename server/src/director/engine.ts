@@ -16,9 +16,9 @@ import { computeUsage } from '../context';
 import { performNativeCompaction } from '../engine/providerContext';
 import { parseVerdict, startRun } from '../engine/workflow';
 import {
-  addActivity, broadcastRun, createRun, depsSatisfied, getRun, getRunRaw, getSession, listRuns,
-  milestoneByKey, milestoneDepsOpen, openMilestones, patchMilestone, patchRun, patchSession,
-  planDocument, planSessions, runForChat, sessionsByStatus,
+  addActivity, broadcastRun, canonicalSessionTitle, createRun, depsSatisfied, getRun, getRunRaw,
+  getSession, listRuns, milestoneByKey, milestoneDepsOpen, openMilestones, patchMilestone, patchRun,
+  patchSession, planDocument, planSessions, runForChat, sessionTitlePrefix, sessionsByStatus,
   setPlan, setRunState, stateSnapshot, type MilestoneInput, type SessionInput,
 } from './store';
 
@@ -590,6 +590,17 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     finishPauseIfDone(runId);
     return;
   }
+  // canonical title fallback, exactly once (only the chat's FIRST run has
+  // baseline 0): if the Builder never registered a name, compose one from the
+  // Director's own session name — the sidebar never keeps a prompt excerpt
+  if (baselineSeq === 0) {
+    const s = getSession(runId, key);
+    const chat = getChat(chatId);
+    if (s && chat && !chat.title.startsWith(sessionTitlePrefix(s))) {
+      setChatTitle(chatId, canonicalSessionTitle(s, s.name));
+    }
+  }
+
   if (status === 'completed') {
     // close the unprotected window after a scaffolding session: as soon as the
     // root is a repo with a commit, freeze the base branch behind pd/integration

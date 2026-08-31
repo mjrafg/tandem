@@ -254,6 +254,23 @@ export function sessionForChat(chatId: string): PdSession | null {
   return r ? rowToSession(r) : null;
 }
 
+/**
+ * The canonical visible title of a Director session chat: milestone and
+ * session keys come from PD metadata (never from the model); the model only
+ * ever contributes the short descriptive part.
+ */
+export function canonicalSessionTitle(session: PdSession, name: string): string {
+  const ms = db.prepare('SELECT key FROM pd_milestones WHERE id = ?').get(session.milestoneId) as any;
+  const clean = name.replace(/\s+/g, ' ').replace(/["'`]/g, '').trim().slice(0, 48);
+  return `${ms?.key ?? '?'} - ${session.key} - ${clean || session.name.slice(0, 48)}`.slice(0, 80);
+}
+
+/** Prefix that marks a session chat as already canonically titled. */
+export function sessionTitlePrefix(session: PdSession): string {
+  const ms = db.prepare('SELECT key FROM pd_milestones WHERE id = ?').get(session.milestoneId) as any;
+  return `${ms?.key ?? '?'} - ${session.key} - `;
+}
+
 export function patchSession(runId: string, key: string, patch: Partial<{
   chatId: string; status: PdSessionStatus; branch: string | null; cwd: string;
   resultSummary: string; reviewVerdict: string; startedAt: number; endedAt: number; prompt: string;

@@ -18,7 +18,7 @@ import { performNativeCompaction } from './engine/providerContext';
 import {
   createProjectRun, directorUserMessage, handleDirectorTool, pauseProject, resumeProject,
 } from './director/engine';
-import { getRun, listActivity, runForChat, sessionForChat } from './director/store';
+import { canonicalSessionTitle, getRun, listActivity, runForChat, sessionForChat, sessionTitlePrefix } from './director/store';
 import {
   allMemories, createMemory, getMemory, listMemories, searchMemories, toToolShape,
   toJson as toMemoryJson, toMarkdown as toMemoryMarkdown, toPlainText as toMemoryText,
@@ -291,6 +291,27 @@ export function registerRoutes(app: FastifyInstance): void {
     if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
     const result = applyWorkdirChange(chatId ?? '', dirPath ?? '');
     return result.ok ? result : reply.code(400).send(result);
+  });
+
+  /**
+   * A Director session's Builder registers its short descriptive name here on
+   * its first turn. Tandem composes the canonical title from PD metadata —
+   * the model never controls the milestone/session keys — and renames the
+   * existing chat exactly once (a later call cannot re-title it).
+   */
+  app.post('/api/internal/name-session', async (req, reply) => {
+    const { chatId, token, name } = (req.body ?? {}) as { chatId?: string; token?: string; name?: string };
+    if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const chat = chatId ? getChat(chatId) : null;
+    const session = chatId ? sessionForChat(chatId) : null;
+    if (!chat || !session) return reply.code(400).send({ ok: false, error: 'This chat is not a Project Director session.' });
+    if (!String(name ?? '').trim()) return reply.code(400).send({ ok: false, error: 'Provide a non-empty name.' });
+    if (chat.title.startsWith(sessionTitlePrefix(session))) {
+      return { ok: true, applied: false, title: chat.title }; // already named — once only
+    }
+    const title = canonicalSessionTitle(session, String(name));
+    setChatTitle(chatId!, title);
+    return { ok: true, applied: true, title };
   });
 
   app.post('/api/internal/git-workflow', async (req, reply) => {

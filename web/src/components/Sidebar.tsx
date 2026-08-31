@@ -147,7 +147,7 @@ function ChatItem({ chat }: { chat: Chat }) {
         {renaming ? (
           <RenameInput chat={chat} done={() => setRenaming(false)} />
         ) : (
-          <span dir="auto" className="min-w-0 flex-1 truncate">{chat.title}</span>
+          <span dir="auto" className="min-w-0 flex-1 truncate" title={chat.title}>{chat.title}</span>
         )}
         {!renaming && (
           <>

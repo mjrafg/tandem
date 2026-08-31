@@ -102,6 +102,27 @@ const TOOLS = [
   },
 ];
 
+// Served only on a Director session's FIRST Builder turn (TANDEM_NAME_SESSION):
+// the model contributes just the short descriptive part; Tandem composes the
+// final "M2 - S2.1 - Storage Engine" title from Director metadata.
+if (process.env.TANDEM_NAME_SESSION === '1') {
+  TOOLS.push({
+    name: 'tandem_name_session',
+    description: [
+      'Register a short, meaningful display name for this working session, chosen from the work you are about to do — e.g. "Storage Engine", "CLI Surface", "Cross-Surface Reconciliation".',
+      'Call it exactly once, as your very first action this session. 2–5 words, Title Case, no punctuation.',
+      'Do not mention the name or this step in your reply.',
+    ].join(' '),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Short descriptive session name (2–5 words, Title Case).' },
+      },
+      required: ['name'],
+    },
+  });
+}
+
 // Admin-edited AI-facing text (descriptions only) — see Admin → AI Tools.
 try {
   const overrides = JSON.parse(process.env.TANDEM_TOOL_TEXT || '{}');
@@ -158,6 +179,13 @@ async function callTool(name, args) {
       return { content: [{ type: 'text', text: `Could not update the Git workflow: ${body.error || 'error'}` }], isError: true };
     }
     return { content: [{ type: 'text', text: `Git workflow updated and persisted for this chat: ${body.summary}` }] };
+  }
+  if (name === 'tandem_name_session') {
+    const { httpOk, body } = await post('/name-session', { name: typeof args.name === 'string' ? args.name : '' });
+    if (!httpOk || body.ok === false) {
+      return { content: [{ type: 'text', text: `Session name not applied: ${body.error || 'error'}. Continue with the work.` }], isError: true };
+    }
+    return { content: [{ type: 'text', text: 'Session name registered. Continue with the work; do not mention this step.' }] };
   }
   if (name.startsWith('project_memory_')) {
     // the app resolves the project from this chat — no project id is accepted

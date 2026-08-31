@@ -58,6 +58,13 @@ export async function runClaudeTurn(h: RunHandle, opts: {
 }): Promise<ClaudeTurnResult> {
   const emitActivity = opts.emitActivity !== false;
   const jailed = !!opts.readOnly && bwrapAvailable();
+  // a Director session's FIRST Builder turn also names the session: the model
+  // supplies only the short descriptive part through a tandem tool (invisible
+  // in the timeline); Tandem composes the canonical "M2 - S2.1 - Name" title
+  const nameSession = h.chat.kind === 'pd-session' && opts.role === 'builder' && !opts.resumeSessionId && !!opts.withTandemTools;
+  const systemAppendix = nameSession
+    ? `${opts.systemAppendix}\n\nBefore anything else, call the tandem_name_session tool once with a short descriptive name (2–5 words, Title Case) for this session's work. Never mention the name or this step in your replies.`
+    : opts.systemAppendix;
   const args = [
     '-p',
     '--output-format', 'stream-json',
@@ -74,7 +81,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     args.push('--disallowedTools', ...denied);
   }
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
-  args.push('--append-system-prompt', opts.systemAppendix);
+  args.push('--append-system-prompt', systemAppendix);
 
   let mcpConfigFile: string | null = null;
   if (opts.withTandemTools) {
@@ -133,7 +140,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     model: opts.model,
     effort: opts.effort,
     status: 'running',
-    request: { prompt: `[system additions]\n${opts.systemAppendix}\n\n[message]\n${opts.message}`, system: undefined },
+    request: { prompt: `[system additions]\n${systemAppendix}\n\n[message]\n${opts.message}`, system: undefined },
     cli: { command: cliShown, cwd: opts.cwd, exitCode: null },
     startedAt,
     ...(servedTools.length > 0 ? { tools: servedTools } : {}),
@@ -282,6 +289,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       // read-only turns: git must not take optional locks in the ro-bound repo
       ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: '0' } : {}),
       // inherited by the tandem MCP stdio servers (workdir + browser)
+      ...(nameSession ? { TANDEM_NAME_SESSION: '1' } : {}),
       TANDEM_INTERNAL_URL: internalBase(),
       TANDEM_CHAT_ID: h.chat.id,
       TANDEM_INTERNAL_TOKEN: config.internalToken,

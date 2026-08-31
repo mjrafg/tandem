@@ -24,6 +24,7 @@ import {
   toJson as toMemoryJson, toMarkdown as toMemoryMarkdown, toPlainText as toMemoryText,
 } from './projectMemory';
 import { activeCtx } from './engine/run';
+import { handleBrowserTool, releaseBrowsers } from './engine/browserHost';
 import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
 import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings, resolveDirectorRole } from './settings';
@@ -104,6 +105,9 @@ export function registerRoutes(app: FastifyInstance): void {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
     if (isRunning(chat.id)) stopRun(chat.id);
+    // a deleted chat leaves no browser state behind — live instances closed,
+    // durable cookies/storage erased
+    void releaseBrowsers(chat.id, { deleteDurable: true });
     db.prepare('DELETE FROM events WHERE chat_id = ?').run(chat.id);
     db.prepare('DELETE FROM chats WHERE id = ?').run(chat.id);
     broadcast({ type: 'chat_deleted', chatId: chat.id });
@@ -451,6 +455,60 @@ export function registerRoutes(app: FastifyInstance): void {
     };
     addEvent(chat.id, 'browser', payload, { runId: activeCtx(chat.id)?.runId });
     return { ok: true };
+  });
+
+  /**
+   * The Tandem browser itself. The SERVER owns one browser per chat+role
+   * (engine/browserHost.ts) so live state survives across AI invocations;
+   * mcp-browser.cjs is only a stdio proxy into this route. The action is
+   * recorded in the timeline here — sanitized exactly like /browser-event,
+   * never including cookies, storage, or credentials.
+   */
+  app.post('/api/internal/browser', async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, any>;
+    if (b.token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const chat = getChat(String(b.chatId ?? ''));
+    if (!chat) return reply.code(404).send({ ok: false, error: 'Unknown chat.' });
+    // the role comes from the AUTHORITATIVE active run context, never the
+    // caller's body: the internal token lives inside the Reviewer's jail too,
+    // so a body-supplied role would let a prompt-injected Reviewer address the
+    // Builder's browser bucket and read its cookies. Whenever a run is active
+    // (always true for a real browser call), its phase — the same signal that
+    // gates Builder-only tools — decides, and cannot be spoofed. Only with no
+    // run active at all (nothing then holds the token) is the body a fallback.
+    const ctx = activeCtx(chat.id);
+    const role = ctx ? (ctx.phase === 'reviewer' ? 'reviewer' : 'builder')
+      : (b.role === 'reviewer' ? 'reviewer' : 'builder');
+    const t0 = Date.now();
+    const result = await handleBrowserTool(chat.id, role, String(b.tool ?? ''), (b.args ?? {}) as Record<string, unknown>);
+    if (result.report && getChat(chat.id)) { // skip recording if the chat was deleted mid-call
+      const r = result.report as Record<string, any>;
+      const s = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : undefined);
+      const payload: BrowserActionPayload = {
+        action: s(r.action, 40) ?? 'action',
+        detail: s(r.detail, 300) ?? '',
+        url: s(r.url, 600),
+        title: s(r.title, 200),
+        viewport: r.viewport && typeof r.viewport.width === 'number'
+          ? { width: r.viewport.width, height: r.viewport.height, deviceScaleFactor: r.viewport.deviceScaleFactor }
+          : undefined,
+        ref: s(r.ref, 120),
+        value: s(r.value, 240),
+        screenshotFile: s(r.screenshotFile, 80),
+        console: Array.isArray(r.console)
+          ? r.console.slice(0, 12).map((c: any) => ({ level: s(c?.level, 20) ?? 'log', text: s(c?.text, 240) ?? '' }))
+          : undefined,
+        error: s(r.error, 400),
+        durationMs: Date.now() - t0,
+        status: r.status === 'failed' ? 'failed' : 'done',
+        role: role.slice(0, 20),
+      };
+      addEvent(chat.id, 'browser', payload, { runId: activeCtx(chat.id)?.runId });
+    }
+    return {
+      content: result.content ?? [{ type: 'text', text: result.text ?? 'ok' }],
+      ...(result.isError ? { isError: true } : {}),
+    };
   });
 
   // ------------------------------------------------- browser screenshots

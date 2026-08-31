@@ -14,6 +14,7 @@ import { runCodexReview } from '../engine/codex';
 import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, repoBusyBy, stopRun } from '../engine/run';
 import { computeUsage } from '../context';
 import { performNativeCompaction } from '../engine/providerContext';
+import { releaseBrowsers } from '../engine/browserHost';
 import { parseVerdict, startRun } from '../engine/workflow';
 import {
   addActivity, broadcastRun, canonicalSessionTitle, createRun, depsSatisfied, getRun, getRunRaw,
@@ -429,6 +430,13 @@ async function cleanupRunWorkspaces(runId: string, rootPath: string): Promise<vo
     }
     const raw = getRunRaw(runId);
     if (raw.integration_branch && (await git(rootPath, ['branch', '-d', raw.integration_branch])).ok) deleted += 1;
+    // terminal cleanup also releases the sessions' live browsers (durable
+    // state is kept — the chats remain browsable, just never run again)
+    for (const m of run.milestones) {
+      for (const s of m.sessions) {
+        if (s.chatId) await releaseBrowsers(s.chatId, { deleteDurable: false });
+      }
+    }
     if (removed || deleted) {
       addActivity(runId, 'state', `Workspace cleaned: ${removed} worktree${removed === 1 ? '' : 's'} removed, ${deleted} merged branch${deleted === 1 ? '' : 'es'} deleted`);
     }

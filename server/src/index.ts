@@ -12,6 +12,7 @@ import { registerIntegrationRoutes } from './integrationRoutes';
 import { recoverInterruptedRuns } from './engine/run';
 import { backfillModelWindows } from './context';
 import { recoverDirectorRuns } from './director/engine';
+import { shutdownBrowsers, startBrowserReaper } from './engine/browserHost';
 import { seedIfEmpty } from './mock/seed';
 
 // ---------------------------------------------------------------- CLI mode
@@ -39,6 +40,18 @@ async function main(): Promise<void> {
   recoverInterruptedRuns();
   recoverDirectorRuns();
   backfillModelWindows();
+  startBrowserReaper();
+  // graceful stop: checkpoint every chat browser (cookies/localStorage + last
+  // page) so continuity recovers after the restart, then close Chromium
+  let shuttingDown = false;
+  const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    void shutdownBrowsers().finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 8_000).unref();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 
   const app = Fastify({
     logger: { level: config.production ? 'warn' : 'info' },

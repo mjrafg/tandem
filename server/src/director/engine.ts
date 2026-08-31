@@ -753,7 +753,18 @@ function stopBlocksRequiredPath(runId: string, key: string): boolean {
     }
   }
   msDeps.delete(owner.key);
-  return run.milestones.some((m) => msDeps.has(m.key) && m.status !== 'completed');
+  if (run.milestones.some((m) => msDeps.has(m.key) && m.status !== 'completed')) return true;
+  // terminal case: nothing may DEPEND on the stopped session, yet it can still
+  // be the last remaining work (a final required milestone). The invariant is
+  // "no valid path to COMPLETED" — so the project stays RUNNING only while some
+  // OTHER forward progress exists: another active (or recovery-pending)
+  // session, a startable planned session outside the stopped chain, or an open
+  // milestone outside the stopped milestone's dependent closure.
+  const progressable =
+    all.some((s) => s.key !== key && ['running', 'timeout', 'needs_attention'].includes(s.status))
+    || all.some((s) => s.status === 'planned' && !dependents.has(s.key))
+    || run.milestones.some((m) => m.key !== owner.key && !msDeps.has(m.key) && m.status !== 'completed');
+  return !progressable;
 }
 
 function readySessions(runId: string): string[] {

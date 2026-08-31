@@ -13,6 +13,7 @@ import { recoverInterruptedRuns } from './engine/run';
 import { backfillModelWindows } from './context';
 import { recoverDirectorRuns } from './director/engine';
 import { shutdownBrowsers, startBrowserReaper } from './engine/browserHost';
+import { startReviewRetrySweeper } from './reviewRetrySweeper';
 import { seedIfEmpty } from './mock/seed';
 
 // ---------------------------------------------------------------- CLI mode
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
   recoverDirectorRuns();
   backfillModelWindows();
   startBrowserReaper();
+  startReviewRetrySweeper();
   // graceful stop: checkpoint every chat browser (cookies/localStorage + last
   // page) so continuity recovers after the restart, then close Chromium
   let shuttingDown = false;

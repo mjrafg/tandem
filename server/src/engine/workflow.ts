@@ -13,6 +13,9 @@ import {
 } from './run';
 import { adoptRepo, finishGitRun, summaryText } from './gitFlow';
 import { captureWorktree, diffWorktrees, type DeltaNoteKind } from './snapshot';
+import {
+  classifyProviderOutage, deletePendingReview, fmtRetryAt, getPendingReview, upsertPendingReview,
+} from './reviewWait';
 
 export { isRunning, stopRun, applyWorkdirChange } from './run';
 export { setGitWorkflow } from './gitFlow';
@@ -89,9 +92,17 @@ export async function startRun(
 
   const h = new RunHandle(ctx, chat, project, attachments);
   try {
+    // a NEW request replaces the result an older waiting review was about —
+    // that review is superseded, never silently resumed against new work
+    if (getPendingReview(chatId)) {
+      deletePendingReview(chatId);
+      h.status('The pending review of the previous result was superseded by this new request.');
+    }
     h.gitFlow = (await adoptRepo(h)) ?? undefined;
     const ok = await runWorkflow(h, userText, runOpts);
-    if (ok && !ctx.stopped) await finishGitRun(h, userText);
+    // 'awaiting' = implementation done but the required review is waiting on
+    // the provider: no checkpoint/merge (nothing is integrated unreviewed)
+    if (ok === true && !ctx.stopped) await finishGitRun(h, userText);
     addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
   } catch (err) {
     h.error({ message: 'The run failed unexpectedly', detail: String(err), source: 'engine' });
@@ -104,7 +115,7 @@ export async function startRun(
   }
 }
 
-async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean; timeoutMs?: number }): Promise<boolean> {
+async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean; timeoutMs?: number }): Promise<boolean | 'awaiting'> {
   // per-run override so an orchestrator (or a recovery decision) can grant
   // more time; the default stays the module constant
   const builderTimeout = Math.min(runOpts.timeoutMs ?? BUILDER_TIMEOUT, 90 * 60_000);
@@ -150,43 +161,87 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   const subject = subjectFor(delta, first.resultText);
   if (!subject) return true; // the run produced neither changes nor a response
 
-  // ---- round 1
-  const round1 = await review(h, userText, subject, 1);
-  if (h.stopped) return false;
-  if (!round1 || round1.verdict === 'pass') return true;
-
-  // ---- repair
-  const repair = await runClaudeTurn(h, {
-    role: 'builder',
-    model: builderCfg.model,
-    effort: builderCfg.effort,
-    systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined),
-    message: renderPrompt(
-      subject.kind === 'answer' ? 'repair.answer_findings_message' : 'repair.findings_message',
-      { findings: findingsAsText(round1.items) },
-    ),
-    cwd: endDir,
-    resumeSessionId: getBuilderSession(h.chat.id),
-    withTandemTools: true,
-    timeoutMs: builderTimeout,
+  const phase = await runReviewPhase(h, userText, {
+    round: 1, subject, before, startDir, builderTimeout, retry: false,
   });
-  if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId, 'claude-code');
-  if (h.stopped) return false;
-  if (!repair.ok) {
-    h.error({ message: 'Builder repair call failed', detail: repair.error, source: 'builder', retryable: true });
-    return false;
+  if (phase === 'done') return true;
+  if (phase === 'awaiting') return 'awaiting';
+  return false; // 'stopped' | 'failed'
+}
+
+// ---------------------------------------------------------------- review phase
+
+type PhaseOutcome = 'done' | 'awaiting' | 'stopped' | 'failed';
+
+/**
+ * The capped review loop from a given round onward: review → repair → last
+ * review → final repair. Entered at round 1 by every normal run, and re-entered
+ * at the PERSISTED round by a review retry after a Reviewer provider outage —
+ * so a failed provider attempt never consumes a round, and a successful retry
+ * continues the exact same policy (findings → repair → last review; the final
+ * repair stays unreviewed by the cap).
+ */
+async function runReviewPhase(h: RunHandle, userText: string, opts: {
+  round: 1 | 2;
+  subject: ReviewSubject;
+  before: ReturnType<typeof captureWorktree>;
+  startDir: string;
+  builderTimeout: number;
+  /** true when re-entered by the retry sweeper (a provider-wait already stands) */
+  retry: boolean;
+}): Promise<PhaseOutcome> {
+  const builderCfg = h.settings.roles.builder;
+  let subject2 = opts.subject;
+
+  if (opts.round === 1) {
+    const round1 = await review(h, userText, opts.subject, 1);
+    if (h.stopped || 'stopped' in round1) return 'stopped';
+    if ('outage' in round1) return recordReviewWait(h, userText, 1, opts.subject, round1.outage);
+    if ('failure' in round1) return reviewerFailed(h, userText, 1, opts.subject, round1.failure, opts.retry);
+    if (round1.verdict === 'pass') return 'done';
+
+    // ---- repair
+    const repair = await runClaudeTurn(h, {
+      role: 'builder',
+      model: builderCfg.model,
+      effort: builderCfg.effort,
+      systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined),
+      message: renderPrompt(
+        opts.subject.kind === 'answer' ? 'repair.answer_findings_message' : 'repair.findings_message',
+        { findings: findingsAsText(round1.items) },
+      ),
+      cwd: h.project.rootPath,
+      resumeSessionId: getBuilderSession(h.chat.id),
+      withTandemTools: true,
+      timeoutMs: opts.builderTimeout,
+    });
+    if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId, 'claude-code');
+    if (h.stopped) return 'stopped';
+    if (!repair.ok) {
+      h.error({ message: 'Builder repair call failed', detail: repair.error, source: 'builder', retryable: true });
+      return 'failed';
+    }
+
+    // the repair may have produced files — re-check the disk before deciding
+    // what the last round reviews
+    h.refresh();
+    const delta2 = reviewGate(opts.before, opts.startDir, h.project.rootPath, h, true);
+    // on a RETRY, `before` was captured after the original build, so a repair
+    // that changed nothing yields no delta — the honest evidence is then still
+    // the persisted changes subject, never a downgrade to the repair's reply
+    subject2 = delta2
+      ? ({ kind: 'changes', ...currentDelta(h) } as ReviewSubject)
+      : opts.retry && opts.subject.kind === 'changes'
+        ? opts.subject
+        : subjectFor(null, repair.resultText) ?? opts.subject;
   }
 
-  // ---- round 2 (the last review) — the repair may have produced files, so
-  // re-check the disk before deciding what this round reviews
-  h.refresh();
-  const delta2 = reviewGate(before, startDir, h.project.rootPath, h, true);
-  const subject2 = delta2
-    ? ({ kind: 'changes', ...currentDelta(h) } as ReviewSubject)
-    : subjectFor(null, repair.resultText) ?? subject;
+  // ---- round 2 (the last review)
   const round2 = await review(h, userText, subject2, 2);
-  if (h.stopped) return false;
-  if (!round2 || round2.verdict === 'pass') return true;
+  if (h.stopped || 'stopped' in round2) return 'stopped';
+  if ('outage' in round2) return recordReviewWait(h, userText, 2, subject2, round2.outage);
+  if ('failure' in round2) return reviewerFailed(h, userText, 2, subject2, round2.failure, opts.retry);
+  if (round2.verdict === 'pass') return 'done';
 
   // ---- final repair — hard cap: never re-reviewed
   const final = await runClaudeTurn(h, {
@@ -201,18 +256,127 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     cwd: h.project.rootPath,
     resumeSessionId: getBuilderSession(h.chat.id),
     withTandemTools: true,
-    timeoutMs: builderTimeout,
+    timeoutMs: opts.builderTimeout,
   });
   if (final.sessionId) setBuilderSession(h.chat.id, final.sessionId, 'claude-code');
   if (!h.stopped && final.ok) {
     updateEvent(round2.eventId, { finalRepairNotReviewed: true });
     h.status('Final repair applied. The review loop is capped at two rounds, so this final repair was not re-reviewed.');
-    return true;
+    return 'done';
   }
   if (!h.stopped && !final.ok) {
     h.error({ message: 'Final repair call failed', detail: final.error, source: 'builder', retryable: true });
   }
-  return false;
+  return h.stopped ? 'stopped' : 'failed';
+}
+
+/**
+ * A temporary provider condition (usage limit / quota / rate limit) stopped the
+ * required review. The result stays intact and UNREVIEWED, the exact review is
+ * persisted for the sweeper, and the failed attempt consumes no round.
+ */
+function recordReviewWait(
+  h: RunHandle, userText: string, round: 1 | 2, subject: ReviewSubject,
+  outage: { reason: string; retryAt: number; detail: string },
+): PhaseOutcome {
+  upsertPendingReview({
+    chatId: h.chat.id, round, userText, subject,
+    reason: outage.reason, detail: outage.detail, retryAt: outage.retryAt,
+  });
+  h.status(`Implementation complete — the required review could not run: ${outage.reason}. `
+    + `Retry at ${fmtRetryAt(outage.retryAt)}. This result has NOT been reviewed and is not complete; `
+    + 'work that depends on it stays blocked until the review succeeds.');
+  return 'awaiting';
+}
+
+/**
+ * A Reviewer failure that is NOT a recognized provider outage. On a normal run
+ * this keeps the long-standing behavior: the run completes, loudly marked
+ * unreviewed. On a RETRY the session is already in the blocking awaiting state —
+ * dropping out of it on an unclassified error would silently degrade the review
+ * policy, so the wait stands and the sweeper tries again after a default backoff.
+ */
+function reviewerFailed(
+  h: RunHandle, userText: string, round: 1 | 2, subject: ReviewSubject, error: string, retry: boolean,
+): PhaseOutcome {
+  if (retry) {
+    return recordReviewWait(h, userText, round, subject, {
+      reason: 'Reviewer failure (will retry)', detail: error, retryAt: Date.now() + 15 * 60_000,
+    });
+  }
+  h.error({ message: 'Reviewer could not run', detail: error, source: 'reviewer', retryable: true });
+  h.status('The review loop stopped because the Reviewer failed — the result above has NOT been reviewed.');
+  return 'done';
+}
+
+/**
+ * Retry a persisted pending review: the SAME review round against the SAME
+ * result, on the same chat — no new session, no Builder re-run, no extra round.
+ * Invoked by the retry sweeper once retry_at passes. A verdict is then handled
+ * by the normal policy (PASS completes; FINDINGS get the usual repair path).
+ *
+ * Returns null WITHOUT any side effect when the retry cannot start right now
+ * (chat busy, directory owned by another run, pending gone) — the caller must
+ * treat that as "not attempted", never as a run that produced an outcome: a
+ * monitored empty outcome once misclassified the session as failed and
+ * destroyed the pending review.
+ */
+export function startReviewRetry(chatId: string): Promise<void> | null {
+  const chat = getChat(chatId);
+  if (!chat || isRunning(chatId)) return null;
+  const pending = getPendingReview(chatId);
+  if (!pending) return null;
+  const project = getProject(chat.projectId);
+  if (!project) return null;
+  if (repoBusyBy(project.rootPath, chatId)) return null; // another chat owns the directory — the sweeper tries again
+
+  const ctx: RunCtx = { chatId, runId: randomUUID(), stopped: false, rootPath: project.rootPath };
+  registerCtx(ctx);
+  setChatRunning(chatId, true);
+  return (async () => {
+    addEvent(chatId, 'run', { phase: 'started', review: true }, { runId: ctx.runId });
+    const h = new RunHandle(ctx, chat, project, []);
+    try {
+      // an admin who turned the Reviewer OFF dissolved the review requirement:
+      // finish the run the way a reviewer-off run finishes — loudly unreviewed
+      if (h.settings.roles.reviewer.enabled === false) {
+        deletePendingReview(chatId);
+        h.gitFlow = (await adoptRepo(h)) ?? undefined;
+        h.status('The Reviewer was disabled in Settings while this review was waiting — the pending review was dropped and the result remains unreviewed.');
+        if (!ctx.stopped) await finishGitRun(h, pending.userText);
+        addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
+        return;
+      }
+      h.gitFlow = (await adoptRepo(h)) ?? undefined;
+      h.status(`Retrying the required review (round ${pending.round}, attempt ${pending.attempts + 1}) against the same result.`);
+      const outcome = await runReviewPhase(h, pending.userText, {
+        round: pending.round,
+        subject: pending.subject,
+        before: captureWorktree(h.project.rootPath),
+        startDir: h.project.rootPath,
+        builderTimeout: BUILDER_TIMEOUT,
+        retry: true,
+      });
+      if (outcome === 'done') {
+        deletePendingReview(chatId);
+        if (!ctx.stopped) await finishGitRun(h, pending.userText);
+      } else if (outcome === 'failed' || outcome === 'stopped') {
+        // an interrupted or failed retry must not hot-loop the sweeper: the wait
+        // stands, but the next attempt backs off instead of firing immediately
+        const p = getPendingReview(chatId);
+        if (p) upsertPendingReview({ ...p, retryAt: Date.now() + 15 * 60_000, attempts: p.attempts });
+      }
+      addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
+    } catch (err) {
+      h.error({ message: 'The run failed unexpectedly', detail: String(err), source: 'engine' });
+      addEvent(chatId, 'run', { phase: 'failed' }, { runId: ctx.runId });
+    } finally {
+      markDanglingStopped(chatId, ctx.runId);
+      releaseCtx(ctx);
+      setChatRunning(chatId, false);
+      void maybeAutoCompact(chatId);
+    }
+  })();
 }
 
 // ---------------------------------------------------------------- review gate
@@ -257,8 +421,13 @@ function currentDelta(h: RunHandle): ReviewDelta {
 
 // ---------------------------------------------------------------- reviewer
 
-async function review(h: RunHandle, userText: string, subject: ReviewSubject, round: number):
-  Promise<{ verdict: 'pass' | 'findings'; items: Finding[]; eventId: string } | null> {
+type ReviewResult =
+  | { verdict: 'pass' | 'findings'; items: Finding[]; eventId: string }
+  | { outage: { reason: string; retryAt: number; detail: string } } // temporary provider condition — retryable
+  | { failure: string }                                             // any other Reviewer failure
+  | { stopped: true };
+
+async function review(h: RunHandle, userText: string, subject: ReviewSubject, round: number): Promise<ReviewResult> {
   h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is checking the repaired result…');
   const cfg = h.settings.roles.reviewer;
   const evidence = subject.kind === 'changes'
@@ -289,11 +458,13 @@ async function review(h: RunHandle, userText: string, subject: ReviewSubject, ro
   } finally {
     h.ctx.phase = 'builder';
   }
-  if (h.stopped) return null;
+  if (h.stopped) return { stopped: true };
   if (!result.ok) {
-    h.error({ message: 'Reviewer could not run', detail: result.error, source: 'reviewer', retryable: true });
-    h.status('The review loop stopped because the Reviewer failed — the result above has NOT been reviewed.');
-    return null;
+    // provider-outage classification (usage limit / quota / rate limit) is the
+    // caller's signal to WAIT instead of degrading the review policy
+    const outage = classifyProviderOutage(result.error);
+    if (outage) return { outage: { ...outage, detail: result.error ?? '' } };
+    return { failure: result.error ?? 'The Reviewer failed.' };
   }
 
   const { verdict, items } = parseVerdict(result.text);

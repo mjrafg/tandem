@@ -540,6 +540,7 @@ export type PdSessionStatus =
   | 'planned'      // defined, dependencies not yet satisfied or not started
   | 'running'      // its underlying chat run is active
   | 'completed'    // run finished ok (review policy included)
+  | 'awaiting_review' // implementation done, but the required review could not run (Reviewer provider outage) — NOT complete; retried automatically
   | 'failed'       // run failed and no recovery has superseded it
   | 'timeout'      // run hit its time limit — awaiting a Director decision
   | 'needs_attention' // failure surfaced, Director analyzing/deciding
@@ -565,6 +566,8 @@ export interface PdSession {
   stopReason?: 'user_stop' | 'project_pause' | null;
   resultSummary: string | null;
   reviewVerdict: 'pass' | 'findings' | null;
+  /** set while status is awaiting_review: why the review is waiting and when it retries */
+  reviewWait?: { reason: string; retryAt: number } | null;
   /** live sub-state derived from the underlying chat (display only) */
   builderState?: 'working' | 'finished' | 'failed' | null;
   reviewerState?: 'waiting' | 'reviewing' | 'accepted' | 'findings' | null;

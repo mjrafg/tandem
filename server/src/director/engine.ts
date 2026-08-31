@@ -15,7 +15,8 @@ import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, repoBusyBy,
 import { computeUsage } from '../context';
 import { performNativeCompaction } from '../engine/providerContext';
 import { releaseBrowsers } from '../engine/browserHost';
-import { parseVerdict, startRun } from '../engine/workflow';
+import { parseVerdict, startReviewRetry, startRun } from '../engine/workflow';
+import { fmtRetryAt, getPendingReview } from '../engine/reviewWait';
 import {
   addActivity, broadcastRun, canonicalSessionTitle, createRun, depsSatisfied, getRun, getRunRaw,
   getSession, listRuns, milestoneByKey, milestoneDepsOpen, openMilestones, patchMilestone, patchRun,
@@ -451,10 +452,15 @@ function worktreeDir(runId: string, key: string): string {
   return dir;
 }
 
-/** Another launched session (or integration) already occupying this directory? */
+/**
+ * Another launched session (or integration) already occupying this directory?
+ * A session awaiting its required review still OWNS its directory: its
+ * unreviewed changes sit there uncommitted, and its retry will run there —
+ * letting other work in would absorb or clobber the very result under review.
+ */
 function dirBusyWithin(runId: string, cwd: string, exceptKey?: string): PdSession | null {
-  const running = sessionsByStatus(runId, ['running']);
-  return running.find((s) => s.cwd === cwd && s.key !== exceptKey) ?? null;
+  const busy = sessionsByStatus(runId, ['running', 'awaiting_review']);
+  return busy.find((s) => s.cwd === cwd && s.key !== exceptKey) ?? null;
 }
 
 export async function launchSession(runId: string, key: string, timeoutMin?: number): Promise<string> {
@@ -467,6 +473,9 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   if (!session) throw new Error(`Unknown session: ${key}`);
   if (session.status === 'running') throw new Error(`Session ${key} is already running.`);
   if (session.status === 'completed') throw new Error(`Session ${key} is already completed.`);
+  if (session.status === 'awaiting_review') {
+    throw new Error(`Session ${key} is awaiting its required review (${session.reviewWait?.reason ?? 'Reviewer provider outage'}) — its implementation is done and the review retries automatically${session.reviewWait ? ` at ${fmtRetryAt(session.reviewWait.retryAt)}` : ''}. Do not relaunch it.`);
+  }
   const deps = depsSatisfied(runId, key);
   if (!deps.ok) throw new Error(`Session ${key} cannot start: unfinished dependencies ${deps.missing.join(', ')}.`);
   // milestone-level dependencies are an engine invariant, not a suggestion
@@ -571,6 +580,28 @@ export async function resumeSession(runId: string, key: string, note?: string): 
   void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true }));
 }
 
+/**
+ * Fire a due review retry for a session in awaiting_review, monitored like any
+ * other session run: the SAME review round against the SAME result on the same
+ * chat — never a new session, never a Builder re-run for provider availability.
+ * A verdict then flows through the normal outcome classification (completed /
+ * awaiting again / a real failure for the Director to decide on).
+ */
+export async function retrySessionReview(runId: string, key: string, chatId: string): Promise<void> {
+  const session = getSession(runId, key);
+  if (!session || session.status !== 'awaiting_review' || session.chatId !== chatId) return;
+  const baseline = chatMaxSeq(chatId);
+  // a null start means "not attempted" (directory busy, chat busy) — nothing
+  // ran, so nothing may be monitored: classifying the empty outcome would
+  // flip the session to failed and destroy the pending review
+  const running = startReviewRetry(chatId);
+  if (!running) return;
+  patchSession(runId, key, { lastBaselineSeq: baseline });
+  addActivity(runId, 'session', `${key} review retry started`);
+  refreshLiveBlock(runId);
+  await monitorSession(runId, key, chatId, baseline, running);
+}
+
 // ---------------------------------------------------------------- monitoring
 
 /** Max event seq currently in a chat — the baseline for reading a run's outcome. */
@@ -599,10 +630,19 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   const outcome = readOutcome(chatId, baselineSeq);
   const run = getRunRaw(runId);
   const pausing = run && (run.state === 'PAUSING' || run.state === 'PAUSED');
+  // a persisted pending review means the run ended with its implementation
+  // intact but the REQUIRED review unrun (Reviewer provider outage): the
+  // session is NOT complete, and stays that way until the review reaches a
+  // real verdict — the failed provider attempt consumed no review round
+  const pending = getPendingReview(chatId);
   // completion is a fact regardless of pause; a pause only reinterprets
   // interruptions (stop/timeout/failure during the pause) as preservation
   let status: PdSession['status'];
-  if (outcome.phase === 'finished' && !outcome.failed && !outcome.timedOut) status = 'completed';
+  // the standing wait survives interruptions too: a retry stopped by the user
+  // or a project pause leaves the pending review in place, and the sweeper
+  // fires it again later — the session never quietly leaves awaiting_review
+  if (pending && !outcome.failed && !outcome.timedOut && ['finished', 'stopped'].includes(outcome.phase)) status = 'awaiting_review';
+  else if (outcome.phase === 'finished' && !outcome.failed && !outcome.timedOut) status = 'completed';
   else if (outcome.phase === 'stopped') status = 'paused';
   else if (pausing) status = 'paused';
   else if (outcome.timedOut) status = 'timeout';
@@ -615,14 +655,19 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     status,
     stopReason,
     endedAt: Date.now(),
-    resultSummary: outcome.summary.slice(0, 1_000),
+    // a reviewer-only retry produces no assistant message — keep the summary
+    // recorded when the implementation actually finished
+    ...(outcome.summary ? { resultSummary: outcome.summary.slice(0, 1_000) } : {}),
     ...(outcome.reviewVerdict ? { reviewVerdict: outcome.reviewVerdict } : {}),
+    reviewWaitReason: status === 'awaiting_review' ? pending!.reason : null,
+    reviewRetryAt: status === 'awaiting_review' ? pending!.retryAt : null,
   });
   addActivity(runId, 'session',
     status === 'completed' ? `${key} completed${outcome.reviewVerdict ? ` · reviewer: ${outcome.reviewVerdict}` : ''}`
-      : status === 'paused' ? (stopReason === 'user_stop' ? `${key} stopped by the user and preserved` : `${key} preserved (project pause)`)
-        : status === 'timeout' ? `${key} timed out`
-          : `${key} failed`);
+      : status === 'awaiting_review' ? `${key} implementation complete — waiting for Reviewer (${pending!.reason}); retry at ${fmtRetryAt(pending!.retryAt)}`
+        : status === 'paused' ? (stopReason === 'user_stop' ? `${key} stopped by the user and preserved` : `${key} preserved (project pause)`)
+          : status === 'timeout' ? `${key} timed out`
+            : `${key} failed`);
   refreshLiveBlock(runId);
   // canonical title fallback, exactly once (only the chat's FIRST run has
   // baseline 0): if the Builder never registered a name, compose one from the
@@ -638,6 +683,20 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   if (pausing) {
     // no observations while pausing/paused — nothing may wake orchestration
     finishPauseIfDone(runId);
+    return;
+  }
+
+  if (status === 'awaiting_review') {
+    // the Director hears about the wait ONCE, when it starts; later failed
+    // retries only refresh the activity line and the persisted retry time —
+    // the standing instruction ("wait, dependents blocked") does not change
+    if (pending!.attempts <= 1) {
+      queueObservation(runId, `Session ${key} implementation completed, but its required review could not run: ${pending!.reason}. `
+        + `Retry at ${fmtRetryAt(pending!.retryAt)}. ${key} is NOT complete — do not treat its work as reviewed or its dependents as satisfied. `
+        + `The application refuses to start dependent sessions, integrate, deliver, or complete through this chain until the review reaches a real verdict. `
+        + `Independent work with no dependency path through ${key} may continue normally. `
+        + `The review retries automatically against the same result — do not relaunch, rebuild, or restart ${key}.`);
+    }
     return;
   }
 
@@ -775,7 +834,9 @@ function stopBlocksRequiredPath(runId: string, key: string): boolean {
   // session, a startable planned session outside the stopped chain, or an open
   // milestone outside the stopped milestone's dependent closure.
   const progressable =
-    all.some((s) => s.key !== key && ['running', 'timeout', 'needs_attention'].includes(s.status))
+    // awaiting_review counts: its scheduled review retry completes the session
+    // without any launch, so the project can still legitimately move forward
+    all.some((s) => s.key !== key && ['running', 'timeout', 'needs_attention', 'awaiting_review'].includes(s.status))
     || all.some((s) => s.status === 'planned' && !dependents.has(s.key))
     || run.milestones.some((m) => m.key !== owner.key && !msDeps.has(m.key) && m.status !== 'completed');
   return !progressable;
@@ -864,7 +925,10 @@ export function refreshLiveBlock(runId: string): void {
       return {
         key: s.key, name: s.name, chatId: s.chatId, status: s.status,
         builderState: live.builder, reviewerState: live.reviewer,
-        note: live.note ?? (s.status === 'planned' ? `Waiting for ${s.dependsOn.join(', ')}` : s.resultSummary?.slice(0, 80) ?? null),
+        note: live.note ?? (
+          s.status === 'awaiting_review' && s.reviewWait
+            ? `Implementation complete — waiting for Reviewer (${s.reviewWait.reason}) · retry at ${fmtRetryAt(s.reviewWait.retryAt)}`
+            : s.status === 'planned' ? `Waiting for ${s.dependsOn.join(', ')}` : s.resultSummary?.slice(0, 80) ?? null),
         startedAt: s.startedAt, endedAt: s.endedAt,
       };
     }),
@@ -948,7 +1012,13 @@ export function pauseProject(runId: string): void {
   // idempotent: an in-flight or finished pause is never restacked
   if (['PAUSING', 'PAUSED', 'COMPLETED', 'FAILED'].includes(run.state)) return;
   setRunState(runId, 'PAUSING', 'Pause requested — stopping active sessions');
-  const active = sessionsByStatus(runId, ['running']);
+  // an in-flight review retry is a live run too (its session shows
+  // awaiting_review, not running) — a pause must stop it like any other work;
+  // the pending review survives the stop and refires after Resume
+  const active = [
+    ...sessionsByStatus(runId, ['running']),
+    ...sessionsByStatus(runId, ['awaiting_review']).filter((s) => s.chatId && isRunning(s.chatId)),
+  ];
   if (active.length === 0) {
     setRunState(runId, 'PAUSED', 'Project paused');
     addEvent(run.chatId, 'status', { text: '⏸ Project paused' });
@@ -963,7 +1033,8 @@ export function pauseProject(runId: string): void {
 function finishPauseIfDone(runId: string): void {
   const raw = getRunRaw(runId);
   if (raw?.state !== 'PAUSING') return;
-  if (sessionsByStatus(runId, ['running']).length === 0) {
+  const retrying = sessionsByStatus(runId, ['awaiting_review']).some((s) => s.chatId && isRunning(s.chatId));
+  if (!retrying && sessionsByStatus(runId, ['running']).length === 0) {
     const preserved = sessionsByStatus(runId, ['paused']).length;
     setRunState(runId, 'PAUSED', `Project paused — ${preserved} session${preserved === 1 ? '' : 's'} preserved`);
     addEvent(raw.chat_id, 'status', { text: `⏸ Project paused · ${preserved} session${preserved === 1 ? '' : 's'} preserved` });
@@ -1098,6 +1169,14 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         if (!['continue', 'restart', 'abandon', 'wait'].includes(action)) {
           return { ok: false, error: 'action must be one of: continue, restart, abandon, wait.' };
         }
+        if (session.status === 'awaiting_review' && action !== 'abandon') {
+          // nothing failed: the implementation is done and only the required
+          // review is outstanding. continue/restart would re-run the Builder for
+          // mere provider availability, and even 'wait' would re-park the session
+          // as paused and cancel the automatic retry — only abandoning is a
+          // meaningful decision here
+          return { ok: false, error: `Session ${key} is awaiting its required review (${session.reviewWait?.reason ?? 'Reviewer provider outage'}${session.reviewWait ? `; retry at ${fmtRetryAt(session.reviewWait.retryAt)}` : ''}). Its implementation is complete and the review retries automatically — no recovery is needed. The only applicable action is 'abandon', and only if the session is truly no longer needed.` };
+        }
         const raw = getRunRaw(runId);
         let round = 1;
         if (raw.pending_recovery) {
@@ -1188,6 +1267,13 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
       }
 
       case 'deliver': {
+        // delivery ships everything on the integration branch — a session whose
+        // required review is still waiting (shared-directory sessions commit
+        // straight onto it) must never ride along unreviewed
+        const waitingReview = sessionsByStatus(runId, ['awaiting_review']);
+        if (waitingReview.length > 0) {
+          return { ok: false, error: `Cannot deliver: session${waitingReview.length === 1 ? '' : 's'} ${waitingReview.map((s) => s.key).join(', ')} ${waitingReview.length === 1 ? 'is' : 'are'} awaiting the required review (Reviewer provider outage) — that work is NOT reviewed. The review retries automatically; deliver once it completes.` };
+        }
         const raw = getRunRaw(runId);
         const integration = raw.integration_branch as string | null;
         const base = raw.base_branch as string | null;
@@ -1225,7 +1311,7 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
       }
 
       case 'complete_project': {
-        const open = sessionsByStatus(runId, ['running', 'planned', 'timeout', 'needs_attention']);
+        const open = sessionsByStatus(runId, ['running', 'planned', 'timeout', 'needs_attention', 'awaiting_review']);
         if (open.length > 0) return { ok: false, error: `Sessions still open: ${open.map((s) => s.key).join(', ')}.` };
         // COMPLETED must mean complete: every milestone closed, work delivered
         const msOpen = openMilestones(runId);

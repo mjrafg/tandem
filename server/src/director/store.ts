@@ -72,6 +72,9 @@ CREATE INDEX IF NOT EXISTS idx_pd_activity_run ON pd_activity(run_id, ts);
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN last_baseline_seq INTEGER'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE project_runs ADD COLUMN base_branch TEXT'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN stop_reason TEXT'); } catch { /* exists */ }
+// awaiting_review: why the required review is waiting, and when it retries
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_wait_reason TEXT'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_retry_at INTEGER'); } catch { /* exists */ }
 
 // ---------------------------------------------------------------- mapping
 
@@ -86,6 +89,9 @@ function rowToSession(r: any): PdSession {
     stopReason: (r.stop_reason as PdSession['stopReason']) ?? null,
     resultSummary: r.result_summary ?? null,
     reviewVerdict: (r.review_verdict as PdSession['reviewVerdict']) ?? null,
+    reviewWait: r.review_wait_reason && r.review_retry_at
+      ? { reason: r.review_wait_reason, retryAt: r.review_retry_at }
+      : null,
     startedAt: r.started_at ?? null, endedAt: r.ended_at ?? null,
   };
 }
@@ -277,12 +283,14 @@ export function patchSession(runId: string, key: string, patch: Partial<{
   chatId: string; status: PdSessionStatus; branch: string | null; cwd: string;
   resultSummary: string; reviewVerdict: string; startedAt: number; endedAt: number; prompt: string;
   lastBaselineSeq: number; stopReason: 'user_stop' | 'project_pause' | null;
+  reviewWaitReason: string | null; reviewRetryAt: number | null;
 }>): void {
   const map: Record<string, string> = {
     chatId: 'chat_id', status: 'status', branch: 'branch', cwd: 'cwd',
     resultSummary: 'result_summary', reviewVerdict: 'review_verdict',
     startedAt: 'started_at', endedAt: 'ended_at', prompt: 'prompt',
     lastBaselineSeq: 'last_baseline_seq', stopReason: 'stop_reason',
+    reviewWaitReason: 'review_wait_reason', reviewRetryAt: 'review_retry_at',
   };
   const sets = Object.keys(patch).filter((k) => k in map);
   if (sets.length === 0) return;
@@ -398,6 +406,9 @@ export function stateSnapshot(runId: string): string {
       const extras = [
         s.branch ? `branch ${s.branch}` : 'shared dir',
         s.status === 'paused' && s.stopReason ? (s.stopReason === 'user_stop' ? 'stopped by the user' : 'stopped by project pause') : '',
+        s.status === 'awaiting_review' && s.reviewWait
+          ? `implementation done, required review NOT run (${s.reviewWait.reason}); retries automatically at ${new Date(s.reviewWait.retryAt).toISOString().slice(11, 16)} UTC — not complete, dependents stay blocked`
+          : '',
         s.resultSummary ? `result: ${s.resultSummary.slice(0, 120)}` : '',
         s.reviewVerdict ? `review: ${s.reviewVerdict}` : '',
       ].filter(Boolean).join(' · ');

@@ -332,6 +332,7 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
 const SESSION_TONE: Record<string, string> = {
   running: 'text-accent', completed: 'text-ok', paused: 'text-dim',
   timeout: 'text-warn', failed: 'text-err', needs_attention: 'text-warn', planned: 'text-dim', abandoned: 'text-dim',
+  awaiting_review: 'text-warn',
 };
 
 export function SessionsRow({ ev }: { ev: ChatEvent }) {
@@ -359,7 +360,7 @@ export function SessionsRow({ ev }: { ev: ChatEvent }) {
       <div className="space-y-1.5">
         {p.sessions.map((s) => {
           const tone = SESSION_TONE[s.status] ?? 'text-mut';
-          const dot = s.status === 'running' ? '●' : s.status === 'completed' ? '✓' : s.status === 'planned' ? '○' : s.status === 'paused' ? '⏸' : '⚠';
+          const dot = s.status === 'running' ? '●' : s.status === 'completed' ? '✓' : s.status === 'planned' ? '○' : s.status === 'paused' ? '⏸' : s.status === 'awaiting_review' ? '⏳' : '⚠';
           const inner = (
             <div className="flex items-start gap-2.5 rounded-md px-2 py-1.5">
               <span className={`shrink-0 ${tone}`}>{dot}</span>
@@ -368,7 +369,7 @@ export function SessionsRow({ ev }: { ev: ChatEvent }) {
                   <span className="mono shrink-0 text-[12px] text-ink">{s.key}</span>
                   <span className="min-w-0 truncate text-[12.5px] text-mut">{s.name}</span>
                   {s.startedAt && s.status === 'running' && <span className="shrink-0 text-[11px] text-dim">{fmtDuration(Date.now() - s.startedAt)}</span>}
-                  <span className={`ml-auto shrink-0 text-[11px] ${tone}`}>{s.status}</span>
+                  <span className={`ml-auto shrink-0 text-[11px] ${tone}`}>{s.status.replace(/_/g, ' ')}</span>
                 </div>
                 {(s.builderState || s.reviewerState) && (
                   <div className="mt-0.5 flex flex-wrap gap-x-4 text-[11px] text-dim">

@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS events (
   payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_chat ON events(chat_id, seq);
+CREATE TABLE IF NOT EXISTS pending_reviews (
+  chat_id TEXT PRIMARY KEY REFERENCES chats(id),
+  round INTEGER NOT NULL,
+  user_text TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  retry_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 // additive migrations

@@ -126,9 +126,9 @@ function MilestoneBlock({ milestone: m }: { milestone: PdMilestone }) {
 
 function SessionLine({ session: s }: { session: PdSession }) {
   const tone = s.status === 'completed' ? 'text-ok' : s.status === 'running' ? 'text-accent'
-    : s.status === 'timeout' || s.status === 'needs_attention' || s.status === 'failed' ? 'text-warn'
+    : s.status === 'timeout' || s.status === 'needs_attention' || s.status === 'failed' || s.status === 'awaiting_review' ? 'text-warn'
       : s.status === 'paused' ? 'text-dim' : 'text-dim';
-  const dot = s.status === 'completed' ? '✓' : s.status === 'running' ? '●' : s.status === 'planned' ? '○' : s.status === 'paused' ? '⏸' : '⚠';
+  const dot = s.status === 'completed' ? '✓' : s.status === 'running' ? '●' : s.status === 'planned' ? '○' : s.status === 'paused' ? '⏸' : s.status === 'awaiting_review' ? '⏳' : '⚠';
   const inner = (
     <div className="rounded-md px-1.5 py-1">
       <div className="flex items-center gap-2">
@@ -139,6 +139,13 @@ function SessionLine({ session: s }: { session: PdSession }) {
       </div>
       {s.resultSummary && s.status === 'completed' && <div className="mt-0.5 pl-[18px] text-[11px] leading-snug text-dim">{s.resultSummary}{s.reviewVerdict ? ` · reviewer: ${s.reviewVerdict === 'pass' ? 'accepted' : 'findings'}` : ''}</div>}
       {s.status === 'planned' && s.dependsOn.length > 0 && <div className="mt-0.5 pl-[18px] text-[11px] text-dim">Waiting for {s.dependsOn.join(', ')}</div>}
+      {s.status === 'awaiting_review' && (
+        <div className="mt-0.5 pl-[18px] text-[11px] leading-snug">
+          <span className="text-dim">Implementation complete · </span>
+          <span className="text-warn">Waiting for Reviewer{s.reviewWait ? ` — ${s.reviewWait.reason}` : ''}</span>
+          {s.reviewWait && <span className="text-dim"> · Retry at {new Date(s.reviewWait.retryAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>}
+        </div>
+      )}
       {(s.status === 'timeout' || s.status === 'needs_attention' || s.status === 'failed') && <div className="mt-0.5 pl-[18px] text-[11px] text-warn">{s.status.replace('_', ' ')} — Director deciding</div>}
     </div>
   );

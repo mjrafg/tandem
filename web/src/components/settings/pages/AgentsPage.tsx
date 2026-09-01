@@ -1,5 +1,5 @@
-import { Archive, ChevronRight, Plus, RotateCcw, Star } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Archive, ChevronRight, Download, Plus, RotateCcw, Star, Upload } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { AgentProfile } from '@shared/types';
 import { api } from '../../../api';
@@ -21,6 +21,8 @@ export function AgentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   async function load(archived = showArchived) {
     try {
@@ -46,6 +48,29 @@ export function AgentsPage() {
     }
   }
 
+  async function runImport(file: File) {
+    setImporting(true);
+    try {
+      const { summary } = await api.importAgents(JSON.parse(await file.text()));
+      await load();
+      const parts = [
+        summary.created.length ? `${summary.created.length} created` : '',
+        summary.updated.length ? `${summary.updated.length} updated` : '',
+        summary.skipped.length ? `${summary.skipped.length} skipped` : '',
+      ].filter(Boolean).join(' · ') || 'nothing to import';
+      toast(`Import: ${parts}`, summary.skipped.length ? 'error' : 'info');
+      if (summary.skipped.length) {
+        // say WHICH ones and why, instead of a silent partial success
+        setError(`Skipped: ${summary.skipped.map((s) => `${s.slug} (${s.reason})`).join(' · ')}`);
+      }
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Import failed', 'error');
+    } finally {
+      setImporting(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  }
+
   const active = (agents ?? []).filter((a) => !a.archivedAt);
   const archived = (agents ?? []).filter((a) => a.archivedAt);
   const enabledCount = active.filter((a) => a.enabled).length;
@@ -61,11 +86,31 @@ export function AgentsPage() {
         changes apply to new sessions only; running sessions keep the configuration they started with.
       </PageHeader>
 
-      <div className="mb-2.5 flex items-center gap-3 px-1">
+      <div className="mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 px-1">
         <span className="text-[12px] text-dim">{agents === null ? 'Loading…' : `${enabledCount} enabled · ${active.length} total`}</span>
-        <button className="btn-ghost ml-auto text-[12px]" onClick={() => setShowArchived((v) => !v)}>
-          {showArchived ? 'Hide archived' : 'Show archived'}
-        </button>
+        <span className="ml-auto flex items-center gap-1">
+          <button className="btn-ghost text-[12px]" onClick={() => setShowArchived((v) => !v)}>
+            {showArchived ? 'Hide archived' : 'Show archived'}
+          </button>
+          <a
+            href={`${api.agentsExportUrl}${showArchived ? '?archived=1' : ''}`}
+            download
+            className="btn-ghost gap-1.5 text-[12px]"
+            title="Download these agents as JSON — portable between Tandem instances"
+          >
+            <Download size={13} /> Export
+          </a>
+          <button className="btn-ghost gap-1.5 text-[12px]" disabled={importing} onClick={() => fileRef.current?.click()}>
+            {importing ? <Spinner size={13} /> : <Upload size={13} />} Import
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void runImport(f); }}
+          />
+        </span>
       </div>
 
       {error && <div className="card mb-3 px-4 py-3 text-[12.5px] text-err">{error}</div>}

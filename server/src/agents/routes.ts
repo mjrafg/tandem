@@ -4,14 +4,14 @@
  * Every route is behind the same authenticated admin boundary as the rest of
  * Settings (see the global auth hook). Validation lives in the store, so the
  * server is authoritative no matter what a client sends: provider can only be
- * 'claude-code', models and efforts must come from the shared registry, slugs
- * must be unique among active profiles, and the "exactly one enabled default"
- * invariant is enforced transactionally.
+ * 'claude-code', efforts must be known values, model names are free text but
+ * must be argv-safe, slugs must be unique among active profiles, and the
+ * "exactly one enabled default" invariant is enforced transactionally.
  */
 import type { FastifyInstance } from 'fastify';
 import {
-  AgentError, archiveAgent, createAgent, getAgent, listAgents, restoreAgent,
-  setDefaultAgent, updateAgent, type AgentInput,
+  AgentError, archiveAgent, createAgent, exportAgents, getAgent, importAgents, listAgents,
+  restoreAgent, setDefaultAgent, updateAgent, type AgentInput,
 } from './store';
 
 function body(req: any): AgentInput {
@@ -42,6 +42,21 @@ export function registerAgentRoutes(app: FastifyInstance): void {
   app.get('/api/agents', async (req) => {
     const q = (req.query ?? {}) as { archived?: string };
     return listAgents({ includeArchived: q.archived === '1' || q.archived === 'true' });
+  });
+
+  // export/import are declared before the :id route so their literal paths win
+  app.get('/api/agents/export', async (req, reply) => {
+    const q = (req.query ?? {}) as { archived?: string };
+    reply.header('Content-Disposition', 'attachment; filename="tandem-agents.json"');
+    return reply.type('application/json').send(JSON.stringify(exportAgents(q.archived === '1'), null, 2));
+  });
+
+  app.post('/api/agents/import', async (req, reply) => {
+    try {
+      return { summary: importAgents(req.body), agents: listAgents() };
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : 'Invalid agents file.' });
+    }
   });
 
   app.get('/api/agents/:id', async (req, reply) => {

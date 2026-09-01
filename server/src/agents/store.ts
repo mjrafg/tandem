@@ -18,7 +18,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { AgentProfile, AgentSnapshot, Effort, Provider } from '../../../shared/types';
-import { CLAUDE_MODELS, EFFORTS, MAX_AGENT_PROMPT_CHARS } from '../../../shared/types';
+import { EFFORTS, MAX_AGENT_PROMPT_CHARS } from '../../../shared/types';
 import { db, kvGet, kvSet } from '../db';
 import { SEED_AGENTS } from './seeds';
 
@@ -84,12 +84,22 @@ export class AgentError extends Error {}
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
+/**
+ * Model names are FREE TEXT on purpose: providers ship new models constantly,
+ * and requiring a code change (or a Tandem release) before an admin can use one
+ * would make the agent system data-driven in name only. CLAUDE_MODELS remains
+ * the suggestion list in the UI, not an allow-list. Validation is limited to
+ * what the runtime actually needs — a single-line, argv-safe, bounded token —
+ * so a typo surfaces as the CLI's own "model not found" error rather than being
+ * silently swapped for something else.
+ */
 export function validateModel(model: unknown): string {
   if (model !== undefined && model !== null && typeof model !== 'string') throw new AgentError('Model must be text.');
   const m = String(model ?? '').trim();
-  if (!(CLAUDE_MODELS as readonly string[]).includes(m)) {
-    throw new AgentError(`Unsupported model "${m}". Supported models: ${CLAUDE_MODELS.join(', ')}.`);
-  }
+  if (!m) throw new AgentError('Model is required.');
+  if (m.length > 100) throw new AgentError('Model names are limited to 100 characters.');
+  // eslint-disable-next-line no-control-regex
+  if (/[\s\u0000-\u001f]/.test(m)) throw new AgentError('A model name cannot contain spaces or control characters.');
   return m;
 }
 
@@ -314,6 +324,99 @@ export function getAgentSnapshot(chatId: string): AgentSnapshot | null {
 
 export function deleteAgentSnapshot(chatId: string): void {
   db.prepare('DELETE FROM chat_agent_snapshots WHERE chat_id = ?').run(chatId);
+}
+
+// ------------------------------------------------------------ export / import
+
+export interface AgentsExport {
+  app: 'tandem';
+  kind: 'agent-profiles';
+  version: 1;
+  exportedAt: number;
+  agents: {
+    slug: string; name: string; description: string; systemPrompt: string;
+    provider: Provider; model: string; effort: Effort; enabled: boolean; isDefault: boolean;
+  }[];
+}
+
+/**
+ * A portable snapshot. Ids are deliberately omitted: they are THIS instance's
+ * identities, and a session snapshot elsewhere must never be re-pointed by an
+ * import. Slug is the portable handle.
+ */
+export function exportAgents(includeArchived = false): AgentsExport {
+  return {
+    app: 'tandem',
+    kind: 'agent-profiles',
+    version: 1,
+    exportedAt: Date.now(),
+    agents: listAgents({ includeArchived }).map((a) => ({
+      slug: a.slug, name: a.name, description: a.description, systemPrompt: a.systemPrompt,
+      provider: a.provider, model: a.model, effort: a.effort, enabled: a.enabled, isDefault: a.isDefault,
+    })),
+  };
+}
+
+export interface AgentsImportResult {
+  created: string[];
+  updated: string[];
+  skipped: { slug: string; reason: string }[];
+  defaultChanged: string | null;
+}
+
+/**
+ * Import by SLUG: an existing active profile with that slug is updated in
+ * place (keeping its id, so history and every session snapshot stay intact),
+ * anything else is created. One bad entry is skipped with a reason rather than
+ * failing the batch, and the "exactly one enabled default" invariant is
+ * re-established through the same transactional path the API uses.
+ */
+export function importAgents(data: unknown): AgentsImportResult {
+  const raw = data && typeof data === 'object' && !Array.isArray(data)
+    ? (Array.isArray((data as any).agents) ? (data as any).agents : null)
+    : Array.isArray(data) ? data : null;
+  if (!raw) throw new Error('Expected a JSON object with an "agents" array (the exported format), or a plain array of agents.');
+  if (raw.length > 200) throw new Error('Too many agents in the file (limit 200).');
+
+  const result: AgentsImportResult = { created: [], updated: [], skipped: [], defaultChanged: null };
+  let wantsDefault: string | null = null;
+
+  for (const entry of raw as any[]) {
+    const slug = String(entry?.slug ?? '').trim().toLowerCase();
+    try {
+      if (!entry || typeof entry !== 'object') throw new AgentError('Not an object.');
+      const input: AgentInput = {
+        slug,
+        name: entry.name,
+        description: entry.description,
+        systemPrompt: entry.systemPrompt ?? entry.system_prompt,
+        provider: entry.provider,
+        model: entry.model,
+        effort: entry.effort,
+        enabled: entry.enabled !== false,
+      };
+      const existing = db.prepare('SELECT id FROM agent_profiles WHERE slug = ? AND archived_at IS NULL').get(slug) as any;
+      if (existing) {
+        updateAgent(existing.id, input);
+        result.updated.push(slug);
+      } else {
+        createAgent(input);
+        result.created.push(slug);
+      }
+      if (entry.isDefault === true || entry.is_default === true) wantsDefault = slug;
+    } catch (err) {
+      result.skipped.push({ slug: slug || '(no slug)', reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  if (wantsDefault) {
+    const row = db.prepare('SELECT id, enabled FROM agent_profiles WHERE slug = ? AND archived_at IS NULL').get(wantsDefault) as any;
+    if (row?.enabled) {
+      setDefaultAgent(row.id);
+      result.defaultChanged = wantsDefault;
+    }
+  }
+  return result;
 }
 
 // --------------------------------------------------------------------- seeds

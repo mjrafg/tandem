@@ -162,8 +162,25 @@ export function AgentEditorPage() {
             <Field label="Provider / CLI" hint="fixed">
               <input className="input mono text-[12.5px] opacity-60" value="Claude Code CLI" disabled aria-label="Agent provider (fixed)" />
             </Field>
-            <Field label="Model">
-              <SelectBox ariaLabel="Agent model" value={draft.model} onChange={(v) => set({ model: v })} options={CLAUDE_MODELS.map((m) => ({ value: m, label: m }))} />
+            <Field label="Model" hint="type any model the CLI accepts">
+              <>
+                {/* free text, not a picker: new models ship faster than Tandem
+                    releases, and the known ones are only suggestions */}
+                <input
+                  className="input mono text-[12.5px]"
+                  list="agent-models"
+                  value={draft.model}
+                  aria-label="Agent model"
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  placeholder="claude-sonnet-5"
+                  onChange={(e) => set({ model: e.target.value })}
+                />
+                <datalist id="agent-models">
+                  {CLAUDE_MODELS.map((m) => <option key={m} value={m} />)}
+                </datalist>
+              </>
             </Field>
             <Field label="Reasoning effort">
               <SelectBox ariaLabel="Agent reasoning effort" value={draft.effort} onChange={(v) => set({ effort: v as Effort })} options={EFFORTS.map((e) => ({ value: e, label: e[0].toUpperCase() + e.slice(1) }))} />

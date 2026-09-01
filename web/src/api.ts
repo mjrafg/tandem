@@ -151,6 +151,10 @@ export const api = {
   setDefaultAgent: (id: string) => j<AgentProfile>(`/api/agents/${id}/default`, { method: 'POST' }),
   archiveAgent: (id: string) => j<AgentProfile>(`/api/agents/${id}/archive`, { method: 'POST' }),
   restoreAgent: (id: string) => j<AgentProfile>(`/api/agents/${id}/restore`, { method: 'POST' }),
+  agentsExportUrl: '/api/agents/export',
+  importAgents: (data: unknown) =>
+    j<{ summary: { created: string[]; updated: string[]; skipped: { slug: string; reason: string }[]; defaultChanged: string | null }; agents: AgentProfile[] }>(
+      '/api/agents/import', { method: 'POST', body: JSON.stringify(data) }),
 
   // settings
   settings: () => j<AppSettings>('/api/settings'),

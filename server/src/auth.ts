@@ -100,6 +100,9 @@ export function authHook(req: FastifyRequest, reply: FastifyReply, done: () => v
   if (url.startsWith('/api/login') || url.startsWith('/api/health')) return done();
   // localhost-internal endpoints authenticate with the per-boot token instead
   if (url.startsWith('/api/internal/')) return done();
+  // the read-only Observability API authenticates with its own bearer key, never
+  // a browser session (key management below stays under normal admin auth)
+  if (url.startsWith('/api/observability/v1/')) return done();
   const token = (req.cookies as Record<string, string | undefined>)?.tandem_sid;
   if (!validSession(token)) {
     reply.code(401).send({ error: 'unauthorized' });

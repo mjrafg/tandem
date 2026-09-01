@@ -95,6 +95,36 @@ export interface AppSettings {
   context: ContextConfig;
 }
 
+/** Admin-visible metadata for an Observability API key — never the secret. */
+export interface ObservabilityKey {
+  id: string;
+  name: string;
+  /** first characters only, for recognition in the list */
+  keyPrefix: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
+/**
+ * A wake-up signal on the Observability stream. It carries identities and a
+ * cursor, never evidence: the consumer reads the canonical evidence back from
+ * the read-only API. `runId` is always project_runs.id.
+ */
+export interface ObservabilitySignal {
+  type: 'session.completed' | 'session.attention' | 'run.terminal';
+  instanceId: string;
+  projectId: string;
+  runId: string;
+  sessionId?: string;
+  chatId?: string;
+  /** the session/run state that produced this signal (Tandem's own vocabulary) */
+  state: string;
+  /** highest events.seq for the session's chat at emit time */
+  latestSeq?: number;
+  timestamp: string;
+}
+
 export type ProjectSource = 'directory' | 'zip' | 'git';
 
 export interface Project {

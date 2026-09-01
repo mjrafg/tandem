@@ -1,5 +1,5 @@
 import type {
-  AgentProfile,
+  AgentProfile, ObservabilityKey,
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
   DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
 } from '@shared/types';
@@ -155,6 +155,13 @@ export const api = {
   importAgents: (data: unknown) =>
     j<{ summary: { created: string[]; updated: string[]; skipped: { slug: string; reason: string }[]; defaultChanged: string | null }; agents: AgentProfile[] }>(
       '/api/agents/import', { method: 'POST', body: JSON.stringify(data) }),
+
+  // observability api keys (admin-authenticated; the API itself uses bearer keys)
+  observabilityKeys: () => j<{ keys: ObservabilityKey[]; keyPrefix: string }>('/api/observability/keys'),
+  createObservabilityKey: (name: string) =>
+    j<{ key: ObservabilityKey; secret: string }>('/api/observability/keys', { method: 'POST', body: JSON.stringify({ name }) }),
+  revokeObservabilityKey: (id: string) =>
+    j<{ key: ObservabilityKey }>(`/api/observability/keys/${id}/revoke`, { method: 'POST', body: JSON.stringify({}) }),
 
   // settings
   settings: () => j<AppSettings>('/api/settings'),

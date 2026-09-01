@@ -9,6 +9,7 @@ import { AgentsPage } from './components/settings/pages/AgentsPage';
 import { AgentEditorPage } from './components/settings/pages/AgentEditorPage';
 import { RolesPage } from './components/settings/pages/RolesPage';
 import { AccountPage, ContextPage, InstructionsPage, IntegrationsPage, ToolsPage } from './components/settings/pages/SimplePages';
+import { ObservabilityPage } from './components/settings/pages/ObservabilityPage';
 import { NewProjectDialog } from './components/NewProjectDialog';
 import { Logo, MenuButton, Spinner, ToastHost } from './components/ui';
 import { FolderOpen } from 'lucide-react';
@@ -49,6 +50,7 @@ export default function App() {
             <Route path="tools" element={<ToolsPage />} />
             <Route path="integrations" element={<IntegrationsPage />} />
             <Route path="context" element={<ContextPage />} />
+            <Route path="observability" element={<ObservabilityPage />} />
             <Route path="account" element={<AccountPage />} />
             <Route path="*" element={<Navigate to="/settings/roles" replace />} />
           </Route>

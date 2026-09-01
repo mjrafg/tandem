@@ -5,6 +5,7 @@ import type {
 import { db } from '../db';
 import { broadcast } from '../sse';
 import { getAgentSnapshot } from '../agents/store';
+import { signalRunState } from '../observability/signals';
 
 /**
  * Persistence for the Project Director. Everything here is project-level
@@ -160,6 +161,9 @@ export function patchRun(id: string, patch: Record<string, unknown>): void {
 export function setRunState(id: string, state: ProjectRunState, note?: string): void {
   patchRun(id, { state });
   addActivity(id, 'state', note ?? `Project state → ${state}`);
+  // persist first, notify second: the state and its activity row are committed
+  // above, so an Observability consumer that fetches immediately sees them
+  signalRunState(id, state);
 }
 
 // ---------------------------------------------------------------- plan
@@ -346,6 +350,12 @@ export function addActivity(runId: string, kind: PdActivity['kind'], text: strin
 
 export function listActivity(runId: string, limit = 200): PdActivity[] {
   return (db.prepare('SELECT * FROM pd_activity WHERE run_id = ? ORDER BY ts DESC LIMIT ?').all(runId, limit) as any[])
+    .map((r) => ({ id: r.id, runId: r.run_id, ts: r.ts, kind: r.kind, text: r.text, detail: r.detail ?? null }));
+}
+
+/** The run's COMPLETE activity log, oldest first — no cap, for evidence export. */
+export function listAllActivity(runId: string): PdActivity[] {
+  return (db.prepare('SELECT * FROM pd_activity WHERE run_id = ? ORDER BY ts, id').all(runId) as any[])
     .map((r) => ({ id: r.id, runId: r.run_id, ts: r.ts, kind: r.kind, text: r.text, detail: r.detail ?? null }));
 }
 

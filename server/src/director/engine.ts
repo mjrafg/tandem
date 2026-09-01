@@ -19,6 +19,7 @@ import { parseVerdict, startReviewRetry, startRun } from '../engine/workflow';
 import { fmtRetryAt, getPendingReview } from '../engine/reviewWait';
 import { terminateProcGroup } from '../engine/procGroups';
 import { agentCatalogText } from '../agents/catalog';
+import { signalSessionState } from '../observability/signals';
 import { AgentError, captureAgentSnapshot, getAgent, getAgentSnapshot, resolveAgentForLaunch } from '../agents/store';
 import {
   addActivity, broadcastRun, canonicalSessionTitle, createRun, depsSatisfied, getRun, getRunRaw,
@@ -776,6 +777,9 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
           : status === 'timeout' ? `${key} timed out`
             : `${key} failed`);
   refreshLiveBlock(runId);
+  // the session row, its activity line and every event are committed by now —
+  // only then does an Observability consumer get told to come and read them
+  signalSessionState(runId, getSession(runId, key)?.id ?? key, chatId, status);
   // canonical title fallback, exactly once (only the chat's FIRST run has
   // baseline 0): if the Builder never registered a name, compose one from the
   // Director's own session name — the sidebar never keeps a prompt excerpt

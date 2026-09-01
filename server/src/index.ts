@@ -10,6 +10,7 @@ import { registerRoutes } from './routes';
 import { registerProjectRoutes } from './projectRoutes';
 import { registerIntegrationRoutes } from './integrationRoutes';
 import { registerAgentRoutes } from './agents/routes';
+import { registerObservabilityRoutes } from './observability/routes';
 import { seedAgents } from './agents/store';
 import { recoverInterruptedRuns } from './engine/run';
 import { backfillModelWindows } from './context';
@@ -74,6 +75,7 @@ async function main(): Promise<void> {
   registerIntegrationRoutes(app);
   registerProjectRoutes(app);
   registerAgentRoutes(app);
+  registerObservabilityRoutes(app);
 
   // ---------------------------------------------------------------- SPA
 

@@ -21,6 +21,12 @@ interface State {
   loaded: Record<string, boolean>;
   loadError: Record<string, string>;
   settings: AppSettings | null;
+  /** Admin's in-progress settings edit — outlives category navigation */
+  settingsDraft: AppSettings | null;
+  settingsDirty: boolean;
+  savingSettings: boolean;
+  /** Admin's in-progress Builder Agent edits, keyed by agent id ('new' = create) */
+  agentDrafts: Record<string, unknown>;
   toasts: Toast[];
   newProjectOpen: boolean;
   /** New chat vs New project — which flow the shared dialog is running */
@@ -57,6 +63,10 @@ export const useStore = create<State>((set, get) => ({
   loaded: {},
   loadError: {},
   settings: null,
+  settingsDraft: null,
+  settingsDirty: false,
+  savingSettings: false,
+  agentDrafts: {},
   toasts: [],
   newProjectOpen: false,
   newProjectMode: 'chat',

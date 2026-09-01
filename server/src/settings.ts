@@ -1,4 +1,4 @@
-import type { AppSettings, DirectorRoleConfig } from '../../shared/types';
+import type { AppSettings, Effort } from '../../shared/types';
 import { kvGet, kvSet } from './db';
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -36,7 +36,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
  * leaks its model name into the Director: the fallback then uses the stock
  * Claude model instead. Once a Director model is saved, it stands on its own.
  */
-export function resolveDirectorRole(s: AppSettings): DirectorRoleConfig {
+export function resolveDirectorRole(s: AppSettings): { model: string; effort: Effort } {
   const d = s.roles.director;
   const b = s.roles.builder;
   const model = d?.model?.trim()

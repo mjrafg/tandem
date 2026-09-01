@@ -84,7 +84,8 @@ export interface ContextConfig {
  * depend on it), so only model + effort are configurable. */
 export interface DirectorRoleConfig {
   model: string;
-  effort: Effort;
+  /** absent = follow the Builder's effort (resolveDirectorRole) */
+  effort?: Effort;
 }
 
 export interface AppSettings {

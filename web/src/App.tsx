@@ -4,7 +4,11 @@ import { useStore } from './store';
 import { Login } from './components/Login';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
-import { SettingsView } from './components/settings/SettingsView';
+import { SettingsLayout } from './components/settings/SettingsLayout';
+import { AgentsPage } from './components/settings/pages/AgentsPage';
+import { AgentEditorPage } from './components/settings/pages/AgentEditorPage';
+import { RolesPage } from './components/settings/pages/RolesPage';
+import { AccountPage, ContextPage, InstructionsPage, IntegrationsPage, ToolsPage } from './components/settings/pages/SimplePages';
 import { NewProjectDialog } from './components/NewProjectDialog';
 import { Logo, MenuButton, Spinner, ToastHost } from './components/ui';
 import { FolderOpen } from 'lucide-react';
@@ -34,7 +38,20 @@ export default function App() {
         <Route element={<Shell />}>
           <Route path="/" element={<Home />} />
           <Route path="/c/:chatId" element={<ChatView />} />
-          <Route path="/settings" element={<SettingsView />} />
+          {/* Admin: one category at a time. /settings keeps working and lands
+              on Roles; every category and the agent editor own a real URL. */}
+          <Route path="/settings" element={<SettingsLayout />}>
+            <Route index element={<Navigate to="roles" replace />} />
+            <Route path="roles" element={<RolesPage />} />
+            <Route path="agents" element={<AgentsPage />} />
+            <Route path="agents/:agentId" element={<AgentEditorPage />} />
+            <Route path="instructions" element={<InstructionsPage />} />
+            <Route path="tools" element={<ToolsPage />} />
+            <Route path="integrations" element={<IntegrationsPage />} />
+            <Route path="context" element={<ContextPage />} />
+            <Route path="account" element={<AccountPage />} />
+            <Route path="*" element={<Navigate to="/settings/roles" replace />} />
+          </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

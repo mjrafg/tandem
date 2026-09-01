@@ -16,6 +16,7 @@ import { captureWorktree, diffWorktrees, type DeltaNoteKind } from './snapshot';
 import {
   classifyProviderOutage, deletePendingReview, fmtRetryAt, getPendingReview, upsertPendingReview,
 } from './reviewWait';
+import { builderExecFor } from '../agents/exec';
 
 export { isRunning, stopRun, applyWorkdirChange } from './run';
 export { setGitWorkflow } from './gitFlow';
@@ -119,7 +120,9 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   // per-run override so an orchestrator (or a recovery decision) can grant
   // more time; the default stays the module constant
   const builderTimeout = Math.min(runOpts.timeoutMs ?? BUILDER_TIMEOUT, 90 * 60_000);
-  const builderCfg = h.settings.roles.builder;
+  // the chat's immutable Agent snapshot decides model/effort/specialist prompt;
+  // chats without one keep the Builder role settings exactly as before
+  const builderCfg = builderExecFor(h.chat.id, h.settings);
   const startDir = h.project.rootPath;
   const before = captureWorktree(startDir);
   const resume = getBuilderSession(h.chat.id);
@@ -129,7 +132,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     role: 'builder',
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined),
+    systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
     message: builderMessage(h, userText, resume),
     cwd: startDir,
     resumeSessionId: resume,
@@ -190,7 +193,9 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   /** true when re-entered by the retry sweeper (a provider-wait already stands) */
   retry: boolean;
 }): Promise<PhaseOutcome> {
-  const builderCfg = h.settings.roles.builder;
+  // repairs run on the SAME snapshot the first turn used — an admin editing the
+  // Agent template mid-session never changes what this session executes
+  const builderCfg = builderExecFor(h.chat.id, h.settings);
   let subject2 = opts.subject;
 
   if (opts.round === 1) {
@@ -205,7 +210,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
       role: 'builder',
       model: builderCfg.model,
       effort: builderCfg.effort,
-      systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined),
+      systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
       message: renderPrompt(
         opts.subject.kind === 'answer' ? 'repair.answer_findings_message' : 'repair.findings_message',
         { findings: findingsAsText(round1.items) },
@@ -248,7 +253,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     role: 'final_repair',
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystemText(h.settings, 'final_repair', h.gitFlow ? summaryText(h.gitFlow) : undefined),
+    systemAppendix: builderSystemText(h.settings, 'final_repair', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
     message: renderPrompt(
       subject2.kind === 'answer' ? 'repair.answer_final_message' : 'repair.final_message',
       { findings: findingsAsText(round2.items) },

@@ -4,6 +4,56 @@ export type Provider = 'claude-code' | 'codex';
 export type RoleName = 'builder' | 'reviewer';
 export type Effort = 'low' | 'medium' | 'high';
 
+/**
+ * The single model/effort registry shared by Settings, the Director card and
+ * Builder Agent profiles — one source of truth, so the options an admin sees
+ * are exactly the ones the server accepts and the Claude Code runtime serves.
+ */
+export const CLAUDE_MODELS = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'] as const;
+export const CODEX_MODELS = ['gpt-5.6-sol'] as const;
+export const EFFORTS: Effort[] = ['low', 'medium', 'high'];
+/** an Agent prompt travels as one argv element — see agents/store.ts */
+export const MAX_AGENT_PROMPT_CHARS = 32_000;
+
+/**
+ * A Builder Agent profile: persisted configuration that specializes Builder
+ * behavior (prompt overlay + model + reasoning). It is NOT an engine concept —
+ * new agents are new rows, never new code. `provider` is persisted for future
+ * provider-neutral execution but is fixed to 'claude-code' in V1.
+ */
+export interface AgentProfile {
+  id: string;              // stable immutable identity (never the slug)
+  slug: string;            // readable handle; unique among non-archived profiles
+  name: string;
+  description: string;
+  systemPrompt: string;    // specialist OVERLAY, appended to Tandem's Builder instructions
+  provider: Provider;      // always 'claude-code' in V1 (server-enforced)
+  model: string;
+  effort: Effort;
+  enabled: boolean;
+  isDefault: boolean;
+  createdAt: number;
+  updatedAt: number;
+  archivedAt: number | null;
+}
+
+/**
+ * The immutable Agent configuration a session actually executed with, captured
+ * when the session launches. Builder turns, repairs, review retries and
+ * restarts all read THIS — never the (mutable) profile row.
+ */
+export interface AgentSnapshot {
+  profileId: string;
+  profileName: string;
+  profileSlug: string;
+  provider: Provider;
+  model: string;
+  effort: Effort;
+  systemPrompt: string;
+  profileUpdatedAt: number;
+  capturedAt: number;
+}
+
 export interface RoleConfig {
   provider: Provider;
   model: string;
@@ -557,6 +607,10 @@ export interface PdSession {
   prompt: string;          // the contract given to the session's Builder
   chatId: string | null;   // the EXISTING Tandem chat executing this session
   status: PdSessionStatus;
+  /** Builder Agent profile the Director selected (stable id; null = default) */
+  agentProfileId?: string | null;
+  /** the immutable Agent configuration this session actually executed with */
+  agent?: AgentSnapshot | null;
   dependsOn: string[];     // session keys within the run
   branch: string | null;   // pd/<key> when isolated
   cwd: string | null;      // worktree dir or the project root
@@ -624,6 +678,8 @@ export interface SessionsPayload {
     status: PdSessionStatus;
     builderState?: string | null;
     reviewerState?: string | null;
+    /** immutable agent identity this session executes with (snapshot) */
+    agent?: { name: string; model: string; effort: string } | null;
     note?: string | null;       // e.g. "Waiting for S2.3" / current activity line
     startedAt?: number | null;
     endedAt?: number | null;

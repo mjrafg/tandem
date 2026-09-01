@@ -57,6 +57,7 @@ const TOOLS = [
       'Decompose ONE milestone into sessions, just in time — after inspecting the actual repository state.',
       'Each session becomes a normal Tandem chat with its own Builder and independent Reviewer. Write each prompt as a full self-contained contract (goal, context, constraints, definition of done) — the session knows nothing about this conversation.',
       'Set isolated=true for sessions that should run in parallel with siblings touching the same repository (each gets its own git worktree and branch); leave it false for sequential work in the shared project directory.',
+      'Choose a Builder Agent for each session with agent_profile_id, using an ID from the AVAILABLE BUILDER AGENTS catalog in your instructions.',
     ].join(' '),
     inputSchema: {
       type: 'object',
@@ -74,6 +75,7 @@ const TOOLS = [
               prompt: { type: 'string', description: 'The complete self-contained instructions for the session\'s Builder.' },
               depends_on: { type: 'array', items: { type: 'string' }, description: 'Session keys that must complete first.' },
               isolated: { type: 'boolean', description: 'true = own worktree/branch for safe parallel work.' },
+              agent_profile_id: { type: 'string', description: 'ID of the Builder Agent profile from the AVAILABLE BUILDER AGENTS catalog. Omit to use the default agent.' },
             },
             required: ['key', 'name', 'purpose', 'prompt'],
           },

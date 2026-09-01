@@ -3,6 +3,7 @@ import type { Chat, CompactionPayload, CompactOutcome, Provider } from '../../..
 import { config } from '../config';
 import { computeUsage } from '../context';
 import { getBuilderSession, getBuilderSessionProvider, getProject } from '../db';
+import { builderExecFor } from '../agents/exec';
 import { addEvent } from '../events';
 import { getSettings } from '../settings';
 
@@ -26,10 +27,18 @@ interface SessionRef {
   model: string;
 }
 
-/** The provider that owns a chat's conversation session (per configuration). */
-export function sessionProvider(): { provider: Provider; model: string } {
-  const builder = getSettings().roles.builder;
-  return { provider: builder.provider, model: builder.model };
+/**
+ * The provider/model that owns a chat's conversation session.
+ *
+ * A Director session chat is owned by the model its immutable Agent snapshot
+ * pins — compacting it with the Builder ROLE model would resume that session
+ * under a different model than the one that created it. Chats without a
+ * snapshot (ordinary chats) follow the Builder role settings as before.
+ */
+export function sessionProvider(chatId?: string): { provider: Provider; model: string } {
+  const settings = getSettings();
+  const exec = chatId ? builderExecFor(chatId, settings) : null;
+  return { provider: settings.roles.builder.provider, model: exec?.model ?? settings.roles.builder.model };
 }
 
 // ------------------------------------------------------------- native reads
@@ -90,7 +99,7 @@ export async function performNativeCompaction(
    * the Project Chat's session belongs to the Director (always claude-code) */
   override?: { provider: Provider; model: string },
 ): Promise<CompactOutcome> {
-  const { provider, model } = override ?? sessionProvider();
+  const { provider, model } = override ?? sessionProvider(chat.id);
   const providerLabel = provider === 'claude-code' ? 'Claude' : 'Codex';
   const startedAt = Date.now();
 

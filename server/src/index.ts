@@ -9,6 +9,8 @@ import { config } from './config';
 import { registerRoutes } from './routes';
 import { registerProjectRoutes } from './projectRoutes';
 import { registerIntegrationRoutes } from './integrationRoutes';
+import { registerAgentRoutes } from './agents/routes';
+import { seedAgents } from './agents/store';
 import { recoverInterruptedRuns } from './engine/run';
 import { backfillModelWindows } from './context';
 import { recoverDirectorRuns } from './director/engine';
@@ -39,6 +41,7 @@ if (process.argv[2] === 'set-password') {
 async function main(): Promise<void> {
   ensureUser();
   seedIfEmpty();
+  seedAgents(); // once per installation; admin edits/deletions are never overwritten
   recoverInterruptedRuns();
   recoverDirectorRuns();
   void reconcileProcGroups(); // reap process groups of already-terminal sessions
@@ -70,6 +73,7 @@ async function main(): Promise<void> {
   registerRoutes(app);
   registerIntegrationRoutes(app);
   registerProjectRoutes(app);
+  registerAgentRoutes(app);
 
   // ---------------------------------------------------------------- SPA
 

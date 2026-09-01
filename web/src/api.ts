@@ -1,4 +1,5 @@
 import type {
+  AgentProfile,
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
   DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
 } from '@shared/types';
@@ -142,6 +143,14 @@ export const api = {
     j<ToolInfo>(`/api/tools/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`, { method: 'PUT', body: JSON.stringify(patch) }),
   resetTool: (server: string, tool: string) =>
     j<ToolInfo>(`/api/tools/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`, { method: 'DELETE' }),
+
+  // builder agents
+  agents: (includeArchived = false) => j<AgentProfile[]>(`/api/agents${includeArchived ? '?archived=1' : ''}`),
+  createAgent: (input: Partial<AgentProfile>) => j<AgentProfile>('/api/agents', { method: 'POST', body: JSON.stringify(input) }),
+  updateAgent: (id: string, input: Partial<AgentProfile>) => j<AgentProfile>(`/api/agents/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  setDefaultAgent: (id: string) => j<AgentProfile>(`/api/agents/${id}/default`, { method: 'POST' }),
+  archiveAgent: (id: string) => j<AgentProfile>(`/api/agents/${id}/archive`, { method: 'POST' }),
+  restoreAgent: (id: string) => j<AgentProfile>(`/api/agents/${id}/restore`, { method: 'POST' }),
 
   // settings
   settings: () => j<AppSettings>('/api/settings'),

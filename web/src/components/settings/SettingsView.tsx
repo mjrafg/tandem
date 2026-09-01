@@ -2,18 +2,22 @@ import { ArrowLeft, Eye } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AppSettings, Effort, Provider, RoleConfig, RoleName } from '@shared/types';
+import { CLAUDE_MODELS, CODEX_MODELS } from '@shared/types';
 import { api } from '../../api';
 import { useStore } from '../../store';
 import { Field, MenuButton, Modal, SelectBox, Spinner, Toggle } from '../ui';
+import { AgentsSection } from './AgentsSection';
 import { CredentialsSection } from './CredentialsSection';
 import { IntegrationsSection } from './IntegrationsSection';
 import { PromptsSection } from './PromptsSection';
 import { SkillsSection } from './SkillsSection';
 import { ToolsSection } from './ToolsSection';
 
-const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
-  'claude-code': ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
-  codex: ['gpt-5.6-sol'],
+// one registry for every model selector in the app (shared/types.ts), so the
+// Roles card, the Director card and Builder Agents can never drift apart
+const MODEL_SUGGESTIONS: Record<Provider, readonly string[]> = {
+  'claude-code': CLAUDE_MODELS,
+  codex: CODEX_MODELS,
 };
 
 // TODO(provider-swap): provider selection is intentionally disabled — the
@@ -26,7 +30,7 @@ const FIXED_PROVIDER: Record<RoleName, Provider> = { builder: 'claude-code', rev
 const PROVIDER_LABEL: Record<Provider, string> = { 'claude-code': 'Claude Code CLI', codex: 'Codex CLI' };
 
 const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }> = {
-  builder: { title: 'Builder', blurb: 'Understands each request and does the actual work — investigates, edits, runs, verifies.', dot: 'bg-builder' },
+  builder: { title: 'Builder', blurb: 'Understands each request and does the actual work — investigates, edits, runs, verifies. These settings drive ordinary chats; Project Director sessions use the Builder Agent the Director selects (see Builder Agents below).', dot: 'bg-builder' },
   reviewer: { title: 'Reviewer', blurb: 'Independently evaluates each result against your request — changed files when there are any, otherwise the answer itself. Verifies with its own tools inside a read-only jail; max two rounds.', dot: 'bg-reviewer' },
 };
 
@@ -136,6 +140,10 @@ export function SettingsView() {
             />
           </div>
         </div>
+
+        {/* ------------------------------------------------ builder agents */}
+        <SectionTitle>Builder Agents</SectionTitle>
+        <AgentsSection />
 
         {/* ------------------------------------------------ AI prompts */}
         <SectionTitle>AI Prompts</SectionTitle>

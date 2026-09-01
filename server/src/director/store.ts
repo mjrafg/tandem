@@ -4,6 +4,7 @@ import type {
 } from '../../../shared/types';
 import { db } from '../db';
 import { broadcast } from '../sse';
+import { getAgentSnapshot } from '../agents/store';
 
 /**
  * Persistence for the Project Director. Everything here is project-level
@@ -75,6 +76,8 @@ try { db.exec('ALTER TABLE pd_sessions ADD COLUMN stop_reason TEXT'); } catch { 
 // awaiting_review: why the required review is waiting, and when it retries
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_wait_reason TEXT'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_retry_at INTEGER'); } catch { /* exists */ }
+// the Builder Agent profile the Director selected for this session (stable id)
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN agent_profile_id TEXT'); } catch { /* exists */ }
 
 // ---------------------------------------------------------------- mapping
 
@@ -83,6 +86,9 @@ function rowToSession(r: any): PdSession {
     id: r.id, runId: r.run_id, milestoneId: r.milestone_id,
     key: r.key, name: r.name, purpose: r.purpose, prompt: r.prompt,
     chatId: r.chat_id ?? null, status: r.status,
+    agentProfileId: r.agent_profile_id ?? null,
+    // the truthful execution history: what this session ACTUALLY ran with
+    agent: r.chat_id ? getAgentSnapshot(r.chat_id) : null,
     dependsOn: JSON.parse(r.depends_on || '[]'),
     branch: r.branch ?? null, cwd: r.cwd ?? null,
     lastBaselineSeq: r.last_baseline_seq ?? null,
@@ -219,7 +225,11 @@ export function setPlan(runId: string, milestones: MilestoneInput[], summary: st
   patchRun(runId, { plan_summary: summary });
 }
 
-export interface SessionInput { key: string; name: string; purpose: string; prompt: string; dependsOn: string[]; isolated: boolean }
+export interface SessionInput {
+  key: string; name: string; purpose: string; prompt: string; dependsOn: string[]; isolated: boolean;
+  /** stable Builder Agent profile id chosen by the Director (never a slug) */
+  agentProfileId?: string | null;
+}
 
 /** Define (or extend) the session plan for one milestone. Existing sessions are kept by key. */
 export function planSessions(runId: string, milestoneKey: string, sessions: SessionInput[]): PdMilestone {
@@ -238,12 +248,12 @@ export function planSessions(runId: string, milestoneKey: string, sessions: Sess
       if (old.status !== 'planned' && old.status !== 'abandoned') {
         throw new Error(`Session ${s.key} is ${old.status} and its definition can no longer be replaced — use recover_session instead.`);
       }
-      db.prepare('UPDATE pd_sessions SET name = ?, purpose = ?, prompt = ?, depends_on = ?, status = ? WHERE id = ?')
-        .run(s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), 'planned', old.id);
+      db.prepare('UPDATE pd_sessions SET name = ?, purpose = ?, prompt = ?, depends_on = ?, status = ?, agent_profile_id = ? WHERE id = ?')
+        .run(s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), 'planned', s.agentProfileId ?? null, old.id);
     } else {
-      db.prepare(`INSERT INTO pd_sessions (id, run_id, milestone_id, key, name, purpose, prompt, status, depends_on, branch)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)`)
-        .run(randomUUID(), runId, ms.id, s.key, s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), s.isolated ? `pd/${s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : null);
+      db.prepare(`INSERT INTO pd_sessions (id, run_id, milestone_id, key, name, purpose, prompt, status, depends_on, branch, agent_profile_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?)`)
+        .run(randomUUID(), runId, ms.id, s.key, s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), s.isolated ? `pd/${s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : null, s.agentProfileId ?? null);
     }
   }
   broadcastRun(runId);
@@ -283,7 +293,7 @@ export function patchSession(runId: string, key: string, patch: Partial<{
   chatId: string; status: PdSessionStatus; branch: string | null; cwd: string;
   resultSummary: string; reviewVerdict: string; startedAt: number; endedAt: number; prompt: string;
   lastBaselineSeq: number; stopReason: 'user_stop' | 'project_pause' | null;
-  reviewWaitReason: string | null; reviewRetryAt: number | null;
+  reviewWaitReason: string | null; reviewRetryAt: number | null; agentProfileId: string | null;
 }>): void {
   const map: Record<string, string> = {
     chatId: 'chat_id', status: 'status', branch: 'branch', cwd: 'cwd',
@@ -291,6 +301,7 @@ export function patchSession(runId: string, key: string, patch: Partial<{
     startedAt: 'started_at', endedAt: 'ended_at', prompt: 'prompt',
     lastBaselineSeq: 'last_baseline_seq', stopReason: 'stop_reason',
     reviewWaitReason: 'review_wait_reason', reviewRetryAt: 'review_retry_at',
+    agentProfileId: 'agent_profile_id',
   };
   const sets = Object.keys(patch).filter((k) => k in map);
   if (sets.length === 0) return;
@@ -405,6 +416,9 @@ export function stateSnapshot(runId: string): string {
       const dep = s.dependsOn.length ? ` deps:[${s.dependsOn.join(',')}]` : '';
       const extras = [
         s.branch ? `branch ${s.branch}` : 'shared dir',
+        // what it ran with (snapshot), or what it will run with (selection)
+        s.agent ? `agent ${s.agent.profileName} (${s.agent.model} · ${s.agent.effort})`
+          : s.agentProfileId ? `agent ${s.agentProfileId}` : '',
         s.status === 'paused' && s.stopReason ? (s.stopReason === 'user_stop' ? 'stopped by the user' : 'stopped by project pause') : '',
         s.status === 'awaiting_review' && s.reviewWait
           ? `implementation done, required review NOT run (${s.reviewWait.reason}); retries automatically at ${new Date(s.reviewWait.retryAt).toISOString().slice(11, 16)} UTC — not complete, dependents stay blocked`

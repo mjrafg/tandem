@@ -137,6 +137,11 @@ function SessionLine({ session: s }: { session: PdSession }) {
         <span className="min-w-0 truncate text-[12px] text-mut">{s.name}</span>
         {s.status === 'running' && s.startedAt && <span className="ml-auto shrink-0 text-[10.5px] text-dim">{fmtDuration(Date.now() - s.startedAt)}</span>}
       </div>
+      {s.agent && (
+        <div className="mt-0.5 pl-[18px] text-[11px] text-dim">
+          {s.agent.profileName} <span className="text-dim/70">· {s.agent.model} · {s.agent.effort}</span>
+        </div>
+      )}
       {s.resultSummary && s.status === 'completed' && <div className="mt-0.5 pl-[18px] text-[11px] leading-snug text-dim">{s.resultSummary}{s.reviewVerdict ? ` · reviewer: ${s.reviewVerdict === 'pass' ? 'accepted' : 'findings'}` : ''}</div>}
       {s.status === 'planned' && s.dependsOn.length > 0 && <div className="mt-0.5 pl-[18px] text-[11px] text-dim">Waiting for {s.dependsOn.join(', ')}</div>}
       {s.status === 'awaiting_review' && (

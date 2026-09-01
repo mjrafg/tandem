@@ -371,6 +371,9 @@ export function SessionsRow({ ev }: { ev: ChatEvent }) {
                   {s.startedAt && s.status === 'running' && <span className="shrink-0 text-[11px] text-dim">{fmtDuration(Date.now() - s.startedAt)}</span>}
                   <span className={`ml-auto shrink-0 text-[11px] ${tone}`}>{s.status.replace(/_/g, ' ')}</span>
                 </div>
+                {s.agent && (
+                  <div className="mt-0.5 text-[11px] text-dim">{s.agent.name} <span className="text-dim/70">· {s.agent.model} · {s.agent.effort}</span></div>
+                )}
                 {(s.builderState || s.reviewerState) && (
                   <div className="mt-0.5 flex flex-wrap gap-x-4 text-[11px] text-dim">
                     {s.builderState && <span>Builder <span className="text-mut">{s.builderState}</span></span>}

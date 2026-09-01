@@ -574,9 +574,21 @@ export function renderPrompt(key: string, vars: Record<string, string | number>)
 // The exact system-addition builders used by the production engine (and by the
 // Admin preview, so the preview can never drift from reality).
 
-export function builderSystemText(settings: AppSettings, role: 'builder' | 'final_repair', gitWorkflow?: string): string {
+export function builderSystemText(
+  settings: AppSettings,
+  role: 'builder' | 'final_repair',
+  gitWorkflow?: string,
+  /**
+   * A Builder Agent profile's specialist prompt — an OVERLAY appended to
+   * Tandem's own Builder instructions, never a replacement. Engine-owned rules
+   * (git safety, worktree ownership, dependency handling, containment, tools,
+   * review lifecycle) come from the sections around it and stay authoritative.
+   */
+  agentPrompt?: string,
+): string {
   const parts = [getPrompt('builder.base')];
   if (role === 'final_repair') parts.push(getPrompt('repair.final_base'));
+  if (agentPrompt?.trim()) parts.push(`# Your specialist profile\n\n${agentPrompt.trim()}`);
   if (settings.sharedInstructions.trim()) parts.push(settings.sharedInstructions.trim());
   const extra = role === 'final_repair' ? settings.finalRepairInstructions : settings.roles.builder.instructions;
   if (extra.trim()) parts.push(extra.trim());

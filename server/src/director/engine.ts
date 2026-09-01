@@ -18,6 +18,8 @@ import { releaseBrowsers } from '../engine/browserHost';
 import { parseVerdict, startReviewRetry, startRun } from '../engine/workflow';
 import { fmtRetryAt, getPendingReview } from '../engine/reviewWait';
 import { terminateProcGroup } from '../engine/procGroups';
+import { agentCatalogText } from '../agents/catalog';
+import { AgentError, captureAgentSnapshot, getAgent, getAgentSnapshot, resolveAgentForLaunch } from '../agents/store';
 import {
   addActivity, broadcastRun, canonicalSessionTitle, createRun, depsSatisfied, getRun, getRunRaw,
   getSession, listRuns, milestoneByKey, milestoneDepsOpen, openMilestones, patchMilestone, patchRun,
@@ -190,7 +192,10 @@ async function runDirectorTurn(runId: string, message: string): Promise<void> {
       role: 'director',
       model: director.model,
       effort: director.effort,
-      systemAppendix: directorSystemText(settings),
+      // the Agent catalog is rebuilt from the database for EVERY turn and rides
+      // on --append-system-prompt, so admin changes reach the very next
+      // planning decision and never linger in conversation history
+      systemAppendix: `${directorSystemText(settings)}\n\n${agentCatalogText()}`,
       message: `${state}\n\n${message}`,
       cwd: project.rootPath,
       resumeSessionId: getBuilderSession(chat.id),
@@ -550,6 +555,11 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
     }
   }
 
+  // resolve the Builder Agent BEFORE any side effect: an explicitly selected
+  // profile that is unknown, archived, disabled or misconfigured fails the
+  // launch loudly instead of being silently swapped for another agent
+  const agent = resolveAgentForLaunch(session.agentProfileId);
+
   const rootProject = getProject(run.projectId)!;
   let cwd = rootProject.rootPath;
   let chatProjectId = run.projectId;
@@ -614,6 +624,11 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   const now = Date.now();
   db.prepare(`INSERT INTO chats (id, project_id, title, created_at, updated_at, running, kind) VALUES (?, ?, ?, ?, ?, 0, 'pd-session')`)
     .run(chatId, chatProjectId, `${key} · ${session.name}`.slice(0, 80), now, now);
+  // the session's execution configuration is fixed HERE, once: every later turn
+  // of this chat (continuation, repair, final repair, review retry, resume after
+  // a restart) reads this snapshot, so editing the profile template afterwards
+  // can never change what this session runs
+  const snapshot = captureAgentSnapshot(chatId, agent);
   broadcastChat(chatId);
 
   // pre-seed the chat's persistent Git policy so its checkpoints land on the
@@ -625,8 +640,14 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
     setGitStateRow(chatId, { mode: 'direct', workBranch: ib, targetBranch: ib, push: 'never', repoPath: cwd });
   }
 
+  // NOTE: the session's own agent_profile_id is left exactly as planned. A
+  // session that expressed no preference must keep expressing none, or the
+  // default it happened to launch under becomes a permanent pin that can make
+  // a later restart unlaunchable once that agent is archived. What it actually
+  // ran with lives in the immutable snapshot.
   patchSession(runId, key, { chatId, cwd, status: 'running', startedAt: Date.now(), stopReason: null });
-  addActivity(runId, 'session', `${key} ${session.name} started`, `chat ${chatId}`);
+  // identity only — the full prompt stays in the snapshot, never in the feed
+  addActivity(runId, 'session', `${key} ${session.name} started · agent: ${snapshot.profileName} (${snapshot.model} · ${snapshot.effort})`, `chat ${chatId}`);
   refreshLiveBlock(runId);
   ensurePoller(runId);
 
@@ -1014,6 +1035,7 @@ export function refreshLiveBlock(runId: string): void {
       return {
         key: s.key, name: s.name, chatId: s.chatId, status: s.status,
         builderState: live.builder, reviewerState: live.reviewer,
+        agent: s.agent ? { name: s.agent.profileName, model: s.agent.model, effort: s.agent.effort } : null,
         note: live.note ?? (
           s.status === 'awaiting_review' && s.reviewWait
             ? `Implementation complete — waiting for Reviewer (${s.reviewWait.reason}) · retry at ${fmtRetryAt(s.reviewWait.retryAt)}`
@@ -1205,9 +1227,18 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
           purpose: String(s.purpose ?? ''), prompt: String(s.prompt ?? ''),
           dependsOn: Array.isArray(s.depends_on) ? s.depends_on.map(String) : [],
           isolated: !!s.isolated,
+          agentProfileId: s.agent_profile_id ? String(s.agent_profile_id) : null,
         }));
         if (sessions.length === 0) return { ok: false, error: 'Provide at least one session.' };
         if (sessions.some((s) => !s.prompt.trim())) return { ok: false, error: 'Every session needs a full self-contained prompt.' };
+        // an explicitly chosen agent is validated NOW, so a bad id is a planning
+        // error the Director can fix — never a silent substitution at launch
+        for (const s of sessions) {
+          if (!s.agentProfileId) continue;
+          try { resolveAgentForLaunch(s.agentProfileId); } catch (err) {
+            return { ok: false, error: `Session ${s.key}: ${err instanceof Error ? err.message : String(err)}` };
+          }
+        }
         const msKeyArg = String(args.milestone ?? '');
         if (!milestoneByKey(runId, msKeyArg)) return { ok: false, error: `Unknown milestone: ${msKeyArg}` };
         const openDeps = milestoneDepsOpen(runId, msKeyArg);

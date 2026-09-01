@@ -17,6 +17,7 @@ import { performNativeCompaction } from '../engine/providerContext';
 import { releaseBrowsers } from '../engine/browserHost';
 import { parseVerdict, startReviewRetry, startRun } from '../engine/workflow';
 import { fmtRetryAt, getPendingReview } from '../engine/reviewWait';
+import { terminateProcGroup } from '../engine/procGroups';
 import {
   addActivity, broadcastRun, canonicalSessionTitle, createRun, depsSatisfied, getRun, getRunRaw,
   getSession, listRuns, milestoneByKey, milestoneDepsOpen, openMilestones, patchMilestone, patchRun,
@@ -406,6 +407,14 @@ async function cleanupRunWorkspaces(runId: string, rootPath: string): Promise<vo
   try {
     const run = getRun(runId);
     if (!run) return;
+    // terminal invariant, ordered: every session-owned process is reaped and
+    // VERIFIED gone before any worktree is removed — a surviving dev server
+    // would recreate husk directories under the tree being deleted
+    for (const m of run.milestones) {
+      for (const s of m.sessions) {
+        if (s.chatId) await terminateProcGroup(s.chatId);
+      }
+    }
     const wtBase = path.join(config.dataDir, 'worktrees', runId.slice(0, 8));
     let removed = 0;
     for (const m of run.milestones) {
@@ -445,6 +454,60 @@ async function cleanupRunWorkspaces(runId: string, rootPath: string): Promise<vo
 }
 
 // ---------------------------------------------------------------- session launching
+
+/**
+ * Make a session's DECLARED dependencies content-visible in its starting tree.
+ *
+ * depends_on has always gated scheduling, but an isolated dependency's
+ * completed work lives on its own pd/ branch until milestone integration — so
+ * a dependent forked from pd/integration started WITHOUT the very content it
+ * declared it needs (a LaunchWatch Builder had to discover and merge its
+ * dependency by hand). Here the ENGINE merges each declared dependency's
+ * branch into the session's starting branch, in declared order, before the
+ * session starts:
+ *
+ *   - deps without a branch worked on the integration branch — already in the
+ *     start point, nothing to merge
+ *   - deps already contained (integrated, or reused worktree) merge as no-ops
+ *   - transitive deps come through the dependency's own branch, which was
+ *     given ITS deps the same way when it launched
+ *   - siblings that are NOT declared are never merged — isolation stands
+ *   - merge-only: no amend/rebase/rewrite of shared commits
+ *
+ * A conflict aborts cleanly and fails the launch: a session must never start
+ * on a working tree the engine cannot describe deterministically.
+ */
+async function mergeDependencyContent(runId: string, key: string, workdir: string, integration: string): Promise<string[]> {
+  const session = getSession(runId, key)!;
+  const merged: string[] = [];
+  for (const depKey of session.dependsOn) {
+    const dep = getSession(runId, depKey);
+    if (!dep) continue;
+    // a branchless (shared-directory) dep worked directly on the integration
+    // branch — a FRESH fork already contains it, but a reused branch forked
+    // before that dep completed does not: merging integration itself brings it
+    // (a no-op whenever it is already contained)
+    const source = dep.branch ?? integration;
+    const exists = await git(workdir, ['rev-parse', '--verify', `refs/heads/${source}`]);
+    if (!exists.ok) continue; // no branch was ever created (e.g. no commits) — nothing to merge
+    // a shared session runs ON integration — integration-as-source is itself
+    if (!session.branch && source === integration) continue;
+    const m = await git(workdir, [
+      '-c', 'user.name=Tandem', '-c', 'user.email=tandem@tandem.local',
+      'merge', '--no-ff', '--no-edit', '-m', `tandem: dependency content ${depKey} (${source}) for ${key}`,
+      source,
+    ], 60_000);
+    if (!m.ok) {
+      await git(workdir, ['merge', '--abort']);
+      throw new Error(`Cannot start ${key}: merging its declared dependency ${depKey} (${source}) into the starting content conflicts — the engine will not start a session on an incorrect tree. Reconcile the branches through a session (or revise the plan), then start ${key} again. Git said: ${m.stderr.trim().slice(-300)}`);
+    }
+    merged.push(`${source} (${depKey})`);
+  }
+  if (merged.length > 0) {
+    addActivity(runId, 'integration', `${key} starting content includes ${merged.join(', ')}`);
+  }
+  return merged;
+}
 
 function worktreeDir(runId: string, key: string): string {
   const dir = path.join(config.dataDir, 'worktrees', runId.slice(0, 8), key.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
@@ -490,6 +553,7 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   const rootProject = getProject(run.projectId)!;
   let cwd = rootProject.rootPath;
   let chatProjectId = run.projectId;
+  let mergedDeps: string[] = [];
 
   if (session.branch) {
     // isolated: its own worktree on its own pd/ branch, off the integration branch
@@ -501,7 +565,14 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
         ? await git(rootProject.rootPath, ['worktree', 'add', dir, session.branch], 30_000)
         : await git(rootProject.rootPath, ['worktree', 'add', dir, '-b', session.branch, integration], 30_000);
       if (!wt.ok) throw new Error(`Could not create the session worktree: ${wt.stderr}`);
+    } else if (session.dependsOn.length > 0) {
+      // a REUSED worktree may sit on a detached HEAD or a scratch branch from
+      // its previous life — dependency content must land on the session's own
+      // branch, never on whatever HEAD happens to be
+      const sw = await git(dir, ['switch', session.branch]);
+      if (!sw.ok) throw new Error(`Cannot start ${key}: its existing worktree could not return to ${session.branch} to receive dependency content (${sw.stderr.trim().slice(-200) || 'switch failed'}). Resolve the worktree's state through a session, then start ${key} again.`);
     }
+    mergedDeps = await mergeDependencyContent(runId, key, dir, integration);
     const wtProject = findOrCreateProject(dir, 'directory');
     cwd = wtProject.rootPath;
     chatProjectId = wtProject.id;
@@ -510,7 +581,19 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
     // hard invariant — one session at a time in a shared directory
     const busy = dirBusyWithin(runId, rootProject.rootPath, key);
     if (busy) throw new Error(`Session ${busy.key} is already working in the shared project directory — mark ${key} isolated to run it in parallel, or start it after ${busy.key} finishes.`);
-    await ensureIntegrationBranch(runId, rootProject.rootPath);
+    const integration = await ensureIntegrationBranch(runId, rootProject.rootPath);
+    // the session works ON the integration branch — its declared dependency
+    // content must be there before it starts, so check the branch out now
+    // (the run's git adoption expects it anyway) and merge the deps into it
+    if (session.dependsOn.length > 0) {
+      // switching the shared directory under ANOTHER chat's live run would be
+      // destructive — the same boundary every run start enforces applies here
+      const otherChat = repoBusyBy(rootProject.rootPath, '');
+      if (otherChat) throw new Error(`Cannot start ${key}: another chat is actively working in this directory right now — start it once that run finishes.`);
+      const sw = await git(rootProject.rootPath, ['switch', integration]);
+      if (!sw.ok) throw new Error(`Cannot start ${key}: the project directory could not switch to ${integration} to receive dependency content (${sw.stderr.trim().slice(-200) || 'checkout failed'}) — likely uncommitted local changes.`);
+      mergedDeps = await mergeDependencyContent(runId, key, rootProject.rootPath, integration);
+    }
   } else {
     const busy = dirBusyWithin(runId, rootProject.rootPath, key);
     if (busy) throw new Error(`Session ${busy.key} is already working in the project directory.`);
@@ -548,6 +631,9 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   ensurePoller(runId);
 
   const timeoutMs = Math.min(timeoutMin ?? DEFAULT_SESSION_TIMEOUT_MIN, MAX_SESSION_TIMEOUT_MIN) * 60_000;
+  if (mergedDeps.length > 0) {
+    addEvent(chatId, 'status', { text: `Starting tree includes this session's declared dependencies, merged by the engine: ${mergedDeps.join(', ')}.` });
+  }
   const baseline = chatMaxSeq(chatId);
   patchSession(runId, key, { lastBaselineSeq: baseline });
   addEvent(chatId, 'user_message', { text: session.prompt });
@@ -701,6 +787,9 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   }
 
   if (status === 'completed') {
+    // a finished session's background processes (dev servers, watchers) have
+    // nothing left to serve — the review policy is concluded. Reap the group.
+    void terminateProcGroup(chatId);
     // close the unprotected window after a scaffolding session: as soon as the
     // root is a repo with a commit, freeze the base branch behind pd/integration
     if (!getRunRaw(runId).integration_branch) {
@@ -966,11 +1055,14 @@ export async function applyRecovery(runId: string, pending: any): Promise<void> 
       const note = pending.newPrompt ? `\nUpdated guidance from the Project Director:\n${pending.newPrompt}` : '';
       await resumeSessionWithTimeout(runId, key, note, pending.extraMinutes);
     } else if (pending.action === 'restart') {
+      // the replaced chat's background processes must not haunt the fresh start
+      if (session.chatId) await terminateProcGroup(session.chatId);
       if (pending.newPrompt) patchSession(runId, key, { prompt: pending.newPrompt });
       patchSession(runId, key, { status: 'planned' });
       await launchSession(runId, key, pending.extraMinutes);
     } else if (pending.action === 'abandon') {
       patchSession(runId, key, { status: 'abandoned' });
+      if (session.chatId) void terminateProcGroup(session.chatId);
       refreshLiveBlock(runId);
       // dependencies are only satisfied by COMPLETED sessions, so dependents of
       // an abandoned one are dead until replanned — say so instead of letting

@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS events (
   payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_chat ON events(chat_id, seq);
+CREATE TABLE IF NOT EXISTS proc_groups (
+  chat_id TEXT NOT NULL,
+  pgid INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, pgid)
+);
 CREATE TABLE IF NOT EXISTS pending_reviews (
   chat_id TEXT PRIMARY KEY REFERENCES chats(id),
   round INTEGER NOT NULL,

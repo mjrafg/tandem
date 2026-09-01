@@ -14,6 +14,7 @@ import { backfillModelWindows } from './context';
 import { recoverDirectorRuns } from './director/engine';
 import { shutdownBrowsers, startBrowserReaper } from './engine/browserHost';
 import { startReviewRetrySweeper } from './reviewRetrySweeper';
+import { reconcileProcGroups } from './engine/procGroups';
 import { seedIfEmpty } from './mock/seed';
 
 // ---------------------------------------------------------------- CLI mode
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
   seedIfEmpty();
   recoverInterruptedRuns();
   recoverDirectorRuns();
+  void reconcileProcGroups(); // reap process groups of already-terminal sessions
   backfillModelWindows();
   startBrowserReaper();
   startReviewRetrySweeper();

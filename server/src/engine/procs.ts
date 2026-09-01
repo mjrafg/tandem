@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { RunCtx } from './run';
 import { killChild } from './run';
+import { enterProcGroup, spawnDetached } from './procGroups';
 
 export interface StreamResult {
   exitCode: number | null;
@@ -35,12 +36,17 @@ export function spawnStreaming(opts: {
         cwd: opts.cwd,
         env: { ...process.env, ...opts.env },
         stdio: [opts.stdinData != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        // fallback containment backend: the child leads its own process group
+        detached: spawnDetached(),
       });
     } catch (err) {
       resolve({ exitCode: null, timedOut: false, spawnError: String(err), stderrTail: '' });
       return;
     }
     opts.ctx.child = child;
+    // the invocation and every descendant it spawns (dev servers, watchers)
+    // belong to the chat's containment group for the session's whole lifetime
+    enterProcGroup(opts.ctx.chatId, child.pid);
 
     const timer = setTimeout(() => {
       timedOut = true;

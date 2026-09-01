@@ -22,6 +22,11 @@ ExecStart=/opt/node22/bin/node /srv/tandem/app/server/dist/index.js
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
+# Hand the service its own cgroup v2 subtree: Tandem creates one sub-cgroup per
+# session chat and moves each agent CLI into it, so dev servers and watchers a
+# Builder starts belong to the session and are reaped (cgroup.kill) exactly when
+# the session becomes terminal — never before the Reviewer/repair used them.
+Delegate=yes
 StandardOutput=append:/srv/tandem/data/tandem.log
 StandardError=append:/srv/tandem/data/tandem.log
 

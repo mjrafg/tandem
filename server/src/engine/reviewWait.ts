@@ -52,6 +52,19 @@ export function deletePendingReview(chatId: string): void {
   db.prepare('DELETE FROM pending_reviews WHERE chat_id = ?').run(chatId);
 }
 
+/**
+ * Bring a pending review's scheduled retry earlier (default: now), so the
+ * sweeper fires it on its next pass instead of waiting for the provider's
+ * reset time. Only ever moves the schedule EARLIER — a manual "retry now" after
+ * an operator lifts a usage limit, never a way to delay a retry. Returns true
+ * if a still-future row was moved.
+ */
+export function expediteReview(chatId: string, at = Date.now()): boolean {
+  const r = db.prepare('UPDATE pending_reviews SET retry_at = ?, updated_at = ? WHERE chat_id = ? AND retry_at > ?')
+    .run(at, Date.now(), chatId, at);
+  return r.changes > 0;
+}
+
 export function duePendingReviews(now = Date.now()): PendingReview[] {
   const rows = db.prepare('SELECT chat_id FROM pending_reviews WHERE retry_at <= ?').all(now) as any[];
   return rows.map((r) => getPendingReview(r.chat_id)!).filter(Boolean);

@@ -8,7 +8,7 @@
  * monitored like any other session run (status, observations, unblocking).
  */
 import { getChat } from './db';
-import { duePendingReviews, deletePendingReview, getPendingReview } from './engine/reviewWait';
+import { duePendingReviews, deletePendingReview, expediteReview, getPendingReview } from './engine/reviewWait';
 import { isRunning, startReviewRetry } from './engine/workflow';
 import { queueObservation, retrySessionReview } from './director/engine';
 import { addActivity, getRunRaw, listRuns, patchSession, sessionForChat, sessionsByStatus } from './director/store';
@@ -25,6 +25,32 @@ export function startReviewRetrySweeper(): void {
   if (timer) return;
   timer = setInterval(sweep, TICK_MS);
   timer.unref?.();
+}
+
+/**
+ * User-triggered "retry the blocked reviews now": bring every waiting review in
+ * a run forward to now and fire the sweeper immediately, instead of waiting for
+ * the provider's scheduled reset. This is the control an operator needs after
+ * lifting a Codex usage limit — the Director deliberately has no such tool,
+ * because whether the limit was lifted is external knowledge only the user has.
+ *
+ * It changes nothing about HOW a review retries: it only moves the schedule
+ * earlier and reuses the exact same guarded sweep path. Reviews on a paused
+ * project are still re-queued (they fire the instant it resumes).
+ */
+export function expediteRunReviews(runId: string): { requeued: number; runState: string } {
+  const runState = getRunRaw(runId)?.state ?? '';
+  let requeued = 0;
+  for (const s of sessionsByStatus(runId, ['awaiting_review'])) {
+    if (!s.chatId || !getPendingReview(s.chatId)) continue;
+    expediteReview(s.chatId); // moves retry_at to now (no-op if already due)
+    requeued += 1;
+  }
+  if (requeued > 0) {
+    addActivity(runId, 'review', `${requeued} waiting review${requeued === 1 ? '' : 's'} re-queued to run now (manual retry)`);
+    if (['RUNNING', 'RESUMING', 'PLANNING'].includes(runState)) sweep();
+  }
+  return { requeued, runState };
 }
 
 function sweep(): void {

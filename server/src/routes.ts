@@ -29,6 +29,7 @@ import { deletePendingReview } from './engine/reviewWait';
 import { terminateProcGroup } from './engine/procGroups';
 import { deleteAgentSnapshot } from './agents/store';
 import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
+import { expediteRunReviews } from './reviewRetrySweeper';
 import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings, resolveDirectorRole } from './settings';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
@@ -192,6 +193,16 @@ export function registerRoutes(app: FastifyInstance): void {
     } catch (err) {
       return reply.code(400).send({ error: err instanceof Error ? err.message : 'Resume failed.' });
     }
+  });
+
+  // Retry the run's reviews that are waiting on a provider outage NOW, instead
+  // of waiting for the provider's scheduled reset — the control an operator
+  // uses after lifting a Codex usage limit. Reuses the sweeper's guarded path.
+  app.post('/api/project-runs/:id/retry-reviews', async (req, reply) => {
+    const run = getRun((req.params as any).id);
+    if (!run) return reply.code(404).send({ error: 'Project run not found.' });
+    const { requeued, runState } = expediteRunReviews(run.id);
+    return { ok: true, requeued, runState, run: getRun(run.id) };
   });
 
   app.post('/api/internal/director', async (req, reply) => {

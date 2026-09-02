@@ -122,6 +122,7 @@ export const api = {
   projectRun: (id: string) => j<{ run: ProjectRun; activity: PdActivity[] }>(`/api/project-runs/${id}`),
   pauseProjectRun: (id: string) => j<{ ok: true; run: ProjectRun }>(`/api/project-runs/${id}/pause`, { method: 'POST' }),
   resumeProjectRun: (id: string) => j<{ ok: true; run: ProjectRun }>(`/api/project-runs/${id}/resume`, { method: 'POST' }),
+  retryProjectReviews: (id: string) => j<{ ok: true; requeued: number; runState: string; run: ProjectRun }>(`/api/project-runs/${id}/retry-reviews`, { method: 'POST' }),
 
   // skills
   skills: () => j<Skill[]>('/api/skills'),

@@ -1,4 +1,4 @@
-import { Boxes, ChevronRight, Pause, Play, X } from 'lucide-react';
+import { Boxes, ChevronRight, Pause, Play, RotateCw, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { PdActivity, PdMilestone, PdSession, ProjectRunState } from '@shared/types';
@@ -48,9 +48,34 @@ export function ProjectDrawer({ runId, open, onClose }: { runId: string; open: b
     }
   }
 
+  async function retryReviews() {
+    setBusy(true);
+    try {
+      const { requeued, runState } = await api.retryProjectReviews(runId);
+      const live = ['RUNNING', 'RESUMING', 'PLANNING'].includes(runState);
+      toast(requeued === 0
+        ? 'No reviews were waiting to retry'
+        : live
+          ? `${requeued} waiting review${requeued === 1 ? '' : 's'} retrying now`
+          // paused/needs-user: the retry was brought forward but the engine only
+          // fires it once the project is running again — say so honestly
+          : `${requeued} review${requeued === 1 ? '' : 's'} re-queued — will retry when the project resumes`);
+      void loadProjectRun(runId);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Retry failed', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!open) return null;
   const canPause = run && ['RUNNING', 'RESUMING', 'PLANNING'].includes(run.state);
   const canResume = run && ['PAUSED', 'NEEDS_USER'].includes(run.state);
+  // sessions blocked on a provider outage (e.g. Codex usage limit) — the user
+  // can force their scheduled retry now, e.g. after lifting the limit
+  const waitingReviews = run
+    ? run.milestones.flatMap((m) => m.sessions).filter((s) => s.status === 'awaiting_review').length
+    : 0;
 
   return (
     <>
@@ -70,11 +95,23 @@ export function ProjectDrawer({ runId, open, onClose }: { runId: string; open: b
           <>
             <div className="flex items-center justify-between gap-2 border-b border-linesoft px-3.5 py-2.5">
               <span className={`text-[12px] font-medium ${STATE_TONE[run.state]}`}>{run.state}</span>
-              {(canPause || canResume) && (
-                <button className="btn-outline px-2.5 py-1 text-[12px]" disabled={busy} onClick={() => void pauseResume()}>
-                  {busy ? <Spinner size={12} /> : canResume ? <><Play size={12} /> Resume</> : <><Pause size={12} /> Pause</>}
-                </button>
-              )}
+              <div className="flex items-center gap-1.5">
+                {waitingReviews > 0 && (
+                  <button
+                    className="btn-outline px-2.5 py-1 text-[12px]"
+                    disabled={busy}
+                    onClick={() => void retryReviews()}
+                    title="Retry reviews waiting on a provider limit now (e.g. after upgrading Codex)"
+                  >
+                    <RotateCw size={12} /> Retry {waitingReviews} review{waitingReviews === 1 ? '' : 's'}
+                  </button>
+                )}
+                {(canPause || canResume) && (
+                  <button className="btn-outline px-2.5 py-1 text-[12px]" disabled={busy} onClick={() => void pauseResume()}>
+                    {busy ? <Spinner size={12} /> : canResume ? <><Play size={12} /> Resume</> : <><Pause size={12} /> Pause</>}
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="flex gap-1 border-b border-linesoft px-3 py-1.5 text-[12px]">

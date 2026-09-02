@@ -40,6 +40,17 @@ if (process.argv[2] === 'set-password') {
 }
 
 async function main(): Promise<void> {
+  // Sessions run unjailed, as this same user, in this same PID namespace. A
+  // Builder stopping its OWN dev server with `pkill -f "dist/index.js"` was
+  // therefore matching THIS process and taking production down — five times in
+  // one night, each one silently restarting the service and pausing the run.
+  // A distinct title keeps us out of the patterns an agent naturally reaches
+  // for (`pkill -f dist/index.js`, `pkill -f node`, `killall node`): Node
+  // rewrites both /proc/<pid>/cmdline and comm. Nothing here matches this
+  // service by name — deploy.sh uses systemctl, procGroups reaps by pgid.
+  // This is collision avoidance, NOT a security boundary. Real containment is
+  // a per-session PID namespace so a session cannot signal outside its tree.
+  process.title = 'tandem-server';
   ensureUser();
   seedIfEmpty();
   seedAgents(); // once per installation; admin edits/deletions are never overwritten
@@ -51,10 +62,15 @@ async function main(): Promise<void> {
   startReviewRetrySweeper();
   // graceful stop: checkpoint every chat browser (cookies/localStorage + last
   // page) so continuity recovers after the restart, then close Chromium
+  // An unexpected SIGTERM used to be indistinguishable from a clean deploy
+  // stop: this handler exited 0 without a word, so a session killing the
+  // service left no trace anywhere in tandem.log. Always name the signal — the
+  // timestamp is what correlates a restart with the command that caused it.
   let shuttingDown = false;
-  const shutdown = (): void => {
+  const shutdown = (signal: NodeJS.Signals): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    console.log(`[tandem] received ${signal} — graceful shutdown, exiting 0`);
     void shutdownBrowsers().finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 8_000).unref();
   };

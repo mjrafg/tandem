@@ -54,8 +54,9 @@ async function main(): Promise<void> {
   ensureUser();
   seedIfEmpty();
   seedAgents(); // once per installation; admin edits/deletions are never overwritten
-  recoverInterruptedRuns();
-  recoverDirectorRuns();
+  // repair chat rows first: this only touches the database, and everything
+  // below assumes no chat is still flagged as running
+  const interruptedChats = recoverInterruptedRuns();
   void reconcileProcGroups(); // reap process groups of already-terminal sessions
   backfillModelWindows();
   startBrowserReaper();
@@ -115,5 +116,12 @@ async function main(): Promise<void> {
   await app.listen({ port: config.port, host: config.host });
   console.log(`[tandem] v${config.version} listening on http://${config.host}:${config.port}`);
   console.log(`[tandem] data: ${config.dataDir} · projects: ${config.projectsDir}`);
+
+  // A project that was running when the server died resumes ITSELF; only a
+  // pause the user asked for survives the restart. This runs AFTER listen on
+  // purpose: auto-resume wakes the Director, whose MCP tools call straight back
+  // into this server's own /api/internal endpoint. Waking it before the port
+  // was open would race every tool call in the first turn against startup.
+  recoverDirectorRuns(interruptedChats);
   void path;
 }

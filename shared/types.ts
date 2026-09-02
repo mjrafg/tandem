@@ -647,8 +647,8 @@ export interface PdSession {
   cwd: string | null;      // worktree dir or the project root
   /** event seq just before the latest run's trigger — the outcome window base */
   lastBaselineSeq?: number | null;
-  /** why a paused session stopped: the user's own stop vs a project-wide pause */
-  stopReason?: 'user_stop' | 'project_pause' | null;
+  /** why a paused session stopped: the user's own stop, a project-wide pause, or a Tandem restart */
+  stopReason?: 'user_stop' | 'project_pause' | 'restart' | null;
   resultSummary: string | null;
   reviewVerdict: 'pass' | 'findings' | null;
   /** set while status is awaiting_review: why the review is waiting and when it retries */

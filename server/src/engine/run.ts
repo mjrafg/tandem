@@ -72,7 +72,9 @@ export function killChild(ctx: RunCtx): void {
  * agent processes are gone but chats stay flagged running=1 forever, and the
  * UI shows an eternal "Working…". Make the interruption honest and visible.
  */
-export function recoverInterruptedRuns(): void {
+/** Returns the chats whose run died with the server, so callers can tell an
+ *  interrupted project apart from one that was simply idle. */
+export function recoverInterruptedRuns(): Set<string> {
   const rows = db.prepare('SELECT id FROM chats WHERE running = 1').all() as { id: string }[];
   for (const { id } of rows) {
     const dangling = db.prepare(`SELECT id FROM events WHERE chat_id = ? AND payload LIKE '%"status":"running"%'`).all(id) as { id: string }[];
@@ -86,6 +88,7 @@ export function recoverInterruptedRuns(): void {
     db.prepare('UPDATE chats SET running = 0 WHERE id = ?').run(id);
   }
   if (rows.length > 0) console.log(`[tandem] recovered ${rows.length} run(s) interrupted by the previous shutdown`);
+  return new Set(rows.map((r) => r.id));
 }
 
 /** Anything left in status:running after a run ends is marked stopped. */

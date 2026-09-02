@@ -22,10 +22,11 @@ import { agentCatalogText } from '../agents/catalog';
 import { signalSessionState } from '../observability/signals';
 import { AgentError, captureAgentSnapshot, getAgent, getAgentSnapshot, resolveAgentForLaunch } from '../agents/store';
 import {
-  addActivity, broadcastRun, canonicalSessionTitle, createRun, depsSatisfied, getRun, getRunRaw,
-  getSession, listRuns, milestoneByKey, milestoneDepsOpen, openMilestones, patchMilestone, patchRun,
-  patchSession, planDocument, planSessions, runForChat, sessionTitlePrefix, sessionsByStatus,
-  setPlan, setRunState, stateSnapshot, type MilestoneInput, type SessionInput,
+  addActivity, broadcastRun, bumpAutoResumeStreak, canonicalSessionTitle, createRun, depsSatisfied,
+  getRun, getRunRaw, getSession, listRuns, milestoneByKey, milestoneDepsOpen, openMilestones,
+  patchMilestone, patchRun, patchSession, planDocument, planSessions, resetAutoResumeStreak,
+  runForChat, sessionTitlePrefix, sessionsByStatus, setPlan, setRunState, stateSnapshot,
+  type MilestoneInput, type SessionInput,
 } from './store';
 
 /**
@@ -126,6 +127,19 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
         ? { text: renderPrompt('director.observation', { observations: keep.map((q) => q.text).join('\n') }), isObservation: true }
         : null;
     }
+  } catch (err) {
+    // Both callers launch this as a floating promise, so an escaping throw is an
+    // unhandled rejection — which ends the process. That was survivable while
+    // every wake was user-triggered; boot recovery now wakes the Director
+    // automatically, so a throw here would crash the server on startup and
+    // systemd would restart it into the same crash. Surface it loudly instead.
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`[tandem] director turn failed for run ${runId}:`, err);
+    try {
+      addActivity(runId, 'state', `Director turn failed — ${detail.slice(0, 200)}`);
+      const chatId = getRunRaw(runId)?.chat_id;
+      if (chatId) addEvent(chatId, 'error', { message: 'Director turn failed', detail, source: 'director', retryable: true });
+    } catch { /* reporting must never be the thing that throws */ }
   } finally {
     t.busy = false;
   }
@@ -1167,21 +1181,109 @@ export function resumeProject(runId: string): void {
   // the Director wakes FIRST (state flips before the observation so the wake
   // is not dropped by the paused-project guard) and decides what resumes
   setRunState(runId, 'RESUMING', 'Resume requested');
+  resetAutoResumeStreak(runId); // a human is driving again — the loop guard starts over
   const paused = sessionsByStatus(runId, ['paused', 'timeout', 'needs_attention'])
-    .map((s) => `${s.key}${s.stopReason === 'user_stop' ? ' (stopped by the user)' : s.stopReason === 'project_pause' ? ' (project pause)' : ''}`);
+    .map((s) => `${s.key}${s.stopReason === 'user_stop' ? ' (stopped by the user)' : s.stopReason === 'restart' ? ' (interrupted by a Tandem restart)' : s.stopReason === 'project_pause' ? ' (project pause)' : ''}`);
   queueObservation(runId, `The user resumed the project. Paused/interrupted sessions: ${paused.join(', ') || '(none)'}. Inspect the current state and decide what should resume NOW (resume_sessions / start_sessions) — do not mechanically restart everything; dependencies may have changed, and a session the user stopped deliberately may be one they do not want rerun. Completed sessions must not be rerun.`);
 }
 
 // ---------------------------------------------------------------- boot recovery
 
-/** Server restart: interrupted sessions become paused, running projects pause honestly. */
-export function recoverDirectorRuns(): void {
+/** consecutive short-lived boots that mean "the server is looping", not "it restarted" */
+const AUTO_RESUME_MAX = 3;
+/** how long a suspected loop must stay up before the deferred wake is trusted */
+const SETTLE_DELAY_MS = 2 * 60_000;
+
+/**
+ * Wake the Director after a restart, and never leave the project in limbo.
+ *
+ * A restart loop is handled by DELAYING this wake, never by pausing the
+ * project: pausing would be indistinguishable from the user's own Pause, would
+ * demand a manual Resume, and — because recovery only ever looks at RUNNING,
+ * RESUMING and PLANNING — would never be reconsidered on a later boot. Waiting
+ * instead is self-clearing: if the server is still alive once it has settled,
+ * the wake simply happens; if it dies again, the next boot decides afresh.
+ *
+ * The turn is awaited so a wake that reaches nobody (a provider outage, a host
+ * that booted before its network) cannot strand the run in RESUMING with no
+ * retry and no Resume button. In that one case it falls back to PAUSED, which
+ * is honest and puts the control back in the user's hands.
+ */
+function wakeAfterRestart(runId: string, observation: string, now: number): void {
+  const streak = bumpAutoResumeStreak(runId, now);
+  if (streak > AUTO_RESUME_MAX) {
+    addActivity(runId, 'state', `Tandem restarted ${streak} times in quick succession — waiting ${Math.round(SETTLE_DELAY_MS / 60_000)} min for it to settle before resuming`);
+    setTimeout(() => {
+      // re-decide from scratch: the user may have paused it in the meantime,
+      // and a run that is no longer waiting to resume must not be poked
+      const state = getRunRaw(runId)?.state;
+      if (state === 'RESUMING' || state === 'PLANNING') void driveRestartWake(runId, observation);
+    }, SETTLE_DELAY_MS).unref();
+    return;
+  }
+  void driveRestartWake(runId, observation);
+}
+
+async function driveRestartWake(runId: string, observation: string): Promise<void> {
+  // pumpDirector absorbs its own failures, so this only ever resolves
+  await pumpDirector(runId, observation, 'observation');
+  // Still RESUMING with nothing running means the turn accomplished nothing —
+  // the Director never answered, or answered without starting work. Leaving it
+  // there would look identical to a healthy resume while being permanently
+  // stuck, so hand it back with the reason attached.
+  if (getRunRaw(runId)?.state !== 'RESUMING') return;
+  if (sessionsByStatus(runId, ['running']).length > 0) return;
+  setRunState(runId, 'PAUSED', 'Automatic resume after the restart could not get the Director going — press Resume to try again');
+  refreshLiveBlock(runId);
+}
+
+/**
+ * Server restart: a restart is not a decision.
+ *
+ * A project that was working when Tandem went down resumes ITSELF — a deploy, a
+ * crash, or the OS restarting the unit underneath us are all the same accident,
+ * and none of them is the user changing their mind. The only stop that survives
+ * a restart is one the USER asked for: PAUSED stays paused, and a PAUSING that
+ * never finished is completed rather than resumed, because Pause was already
+ * pressed. (Every path that reaches PAUSED traces back to a user action — the
+ * Pause button, or a session the user stopped that blocks required work — so
+ * the state itself is the persisted record of that intent.)
+ *
+ * The single exception is a restart LOOP. If a run has already auto-resumed
+ * AUTO_RESUME_MAX times inside AUTO_RESUME_WINDOW_MS, relaunching work on every
+ * boot would spawn agents faster than anyone could stop them, so it pauses and
+ * says why. Ordinary restarts are minutes or hours apart and never reach it.
+ *
+ * `interruptedChats` is the set of chats whose run died with the server (from
+ * recoverInterruptedRuns). A project still PLANNING is only woken if its own
+ * Director chat is in that set — otherwise it is simply a new project waiting
+ * for its first message, and must not be prodded.
+ */
+export function recoverDirectorRuns(interruptedChats: ReadonlySet<string> = new Set()): void {
+  const now = Date.now();
   for (const run of listRuns()) {
     const interrupted = sessionsByStatus(run.id, ['running']);
-    for (const s of interrupted) patchSession(run.id, s.key, { status: 'paused', endedAt: Date.now(), stopReason: 'project_pause' });
-    if (['RUNNING', 'PAUSING', 'RESUMING'].includes(run.state)) {
-      setRunState(run.id, 'PAUSED', `Tandem restarted — ${interrupted.length ? `${interrupted.length} active session${interrupted.length === 1 ? '' : 's'} preserved and paused` : 'project paused'}; resume to continue`);
+    for (const s of interrupted) patchSession(run.id, s.key, { status: 'paused', endedAt: now, stopReason: 'restart' });
+    const preserved = interrupted.length
+      ? `${interrupted.length} interrupted session${interrupted.length === 1 ? '' : 's'} preserved`
+      : 'no sessions were mid-flight';
+
+    if (['RUNNING', 'RESUMING'].includes(run.state)) {
+      // state first, then the wake: queueObservation drops anything aimed at a
+      // paused project, so RESUMING has to be visible before the observation
+      setRunState(run.id, 'RESUMING', `Tandem restarted — ${preserved}; resuming automatically`);
       refreshLiveBlock(run.id);
+      wakeAfterRestart(run.id, `Tandem restarted while this project was running, and the project has resumed AUTOMATICALLY — the user did not pause it and has not asked for anything new. Sessions interrupted by the restart: ${interrupted.map((s) => s.key).join(', ') || '(none)'}. Their work on disk and their chats are intact; they were cut off mid-flight, NOT stopped deliberately. Inspect the current state and decide what should resume NOW (resume_sessions / start_sessions). Completed sessions must not be rerun, and dependencies may have moved on while the server was down.`, now);
+    } else if (run.state === 'PAUSING') {
+      // Pause was pressed before the restart — honour it rather than undo it
+      setRunState(run.id, 'PAUSED', `Project paused — pause requested before the restart; ${preserved}`);
+      refreshLiveBlock(run.id);
+    } else if (run.state === 'PLANNING' && interruptedChats.has(run.chatId)) {
+      // Planning was cut off mid-turn; nothing else would ever wake it. This
+      // goes through the same guard as a running project: the wake itself marks
+      // the chat running again, so without a cap a crashing server would re-wake
+      // this same chat on every single boot, forever.
+      wakeAfterRestart(run.id, 'Tandem restarted while you were planning this project and your turn was cut off. Nothing was lost — re-read the current state and continue planning from where it stands.', now);
     }
   }
 }
@@ -1268,7 +1370,9 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
             errors.push(`${key}: ${err instanceof Error ? err.message : err}`);
           }
         }
-        if (started.length > 0 && getRunRaw(runId).state === 'RESUMING') setRunState(runId, 'RUNNING', 'Project resumed');
+        // work is actually running again: whatever restarts preceded this did
+        // not stop the project, so the crash-loop counter starts clean
+        if (started.length > 0 && getRunRaw(runId).state === 'RESUMING') { setRunState(runId, 'RUNNING', 'Project resumed'); resetAutoResumeStreak(runId); }
         return {
           ok: errors.length === 0 || started.length > 0,
           text: `${started.length ? `Started: ${started.join(', ')}. Each is a normal Tandem session with its own Builder and independent Reviewer; you will be woken when they finish.` : ''}${errors.length ? `\nNot started — ${errors.join('; ')}` : ''}`.trim(),
@@ -1284,7 +1388,7 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
           try { await resumeSession(runId, key, args.note ? String(args.note) : undefined); resumed.push(key); }
           catch (err) { errors.push(`${key}: ${err instanceof Error ? err.message : err}`); }
         }
-        if (resumed.length > 0 && ['RESUMING', 'PAUSED'].includes(getRunRaw(runId).state)) setRunState(runId, 'RUNNING', 'Project resumed');
+        if (resumed.length > 0 && ['RESUMING', 'PAUSED'].includes(getRunRaw(runId).state)) { setRunState(runId, 'RUNNING', 'Project resumed'); resetAutoResumeStreak(runId); }
         return { ok: errors.length === 0 || resumed.length > 0, text: `${resumed.length ? `Resumed: ${resumed.join(', ')}.` : ''}${errors.length ? ` Not resumed — ${errors.join('; ')}` : ''}`.trim() };
       }
 

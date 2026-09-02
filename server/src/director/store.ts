@@ -79,6 +79,10 @@ try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_wait_reason TEXT'); } c
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_retry_at INTEGER'); } catch { /* exists */ }
 // the Builder Agent profile the Director selected for this session (stable id)
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN agent_profile_id TEXT'); } catch { /* exists */ }
+// auto-resume after a restart: how many boots in a row relaunched this run, and
+// when the last one was. Only ever read to detect a restart LOOP.
+try { db.exec('ALTER TABLE project_runs ADD COLUMN auto_resume_streak INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE project_runs ADD COLUMN auto_resume_at INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
 
 // ---------------------------------------------------------------- mapping
 
@@ -296,7 +300,7 @@ export function sessionTitlePrefix(session: PdSession): string {
 export function patchSession(runId: string, key: string, patch: Partial<{
   chatId: string; status: PdSessionStatus; branch: string | null; cwd: string;
   resultSummary: string; reviewVerdict: string; startedAt: number; endedAt: number; prompt: string;
-  lastBaselineSeq: number; stopReason: 'user_stop' | 'project_pause' | null;
+  lastBaselineSeq: number; stopReason: 'user_stop' | 'project_pause' | 'restart' | null;
   reviewWaitReason: string | null; reviewRetryAt: number | null; agentProfileId: string | null;
 }>): void {
   const map: Record<string, string> = {
@@ -365,6 +369,38 @@ export function listRuns(): ProjectRun[] {
     .filter(Boolean);
 }
 
+/**
+ * How soon after the previous boot a restart still looks like a crash loop.
+ *
+ * This is deliberately near the systemd cadence (Restart=always, RestartSec=2),
+ * NOT a generous few minutes: the gap between two boots is essentially how long
+ * the previous boot survived, so a small value asks "did the last boot die
+ * almost immediately?" — the only question worth asking. A deploy cadence, even
+ * a fast one, leaves gaps far larger than this and never counts.
+ */
+export const AUTO_RESUME_WINDOW_MS = 90_000;
+
+/**
+ * Count this boot's auto-resume and return the current consecutive streak.
+ *
+ * The comparison is against the PREVIOUS auto-resume, so this measures a chain
+ * of short-lived boots rather than a fixed window — which is what a crash loop
+ * actually is. A single gap wider than the window breaks the chain and the
+ * streak restarts at 1. Persisted, because the whole point is to survive the
+ * restart being counted.
+ */
+export function bumpAutoResumeStreak(runId: string, now: number): number {
+  const r = db.prepare('SELECT auto_resume_streak AS n, auto_resume_at AS at FROM project_runs WHERE id = ?').get(runId) as any;
+  const streak = r && r.at > 0 && now - r.at <= AUTO_RESUME_WINDOW_MS ? (r.n ?? 0) + 1 : 1;
+  db.prepare('UPDATE project_runs SET auto_resume_streak = ?, auto_resume_at = ? WHERE id = ?').run(streak, now, runId);
+  return streak;
+}
+
+/** A human took over (manual resume): the loop counter starts fresh. */
+export function resetAutoResumeStreak(runId: string): void {
+  db.prepare('UPDATE project_runs SET auto_resume_streak = 0, auto_resume_at = 0 WHERE id = ?').run(runId);
+}
+
 // ---------------------------------------------------------------- snapshots
 
 /** Truncate for the state VIEW — always visibly marked, never silent. */
@@ -429,7 +465,11 @@ export function stateSnapshot(runId: string): string {
         // what it ran with (snapshot), or what it will run with (selection)
         s.agent ? `agent ${s.agent.profileName} (${s.agent.model} · ${s.agent.effort})`
           : s.agentProfileId ? `agent ${s.agentProfileId}` : '',
-        s.status === 'paused' && s.stopReason ? (s.stopReason === 'user_stop' ? 'stopped by the user' : 'stopped by project pause') : '',
+        s.status === 'paused' && s.stopReason
+          ? (s.stopReason === 'user_stop' ? 'stopped by the user'
+            : s.stopReason === 'restart' ? 'interrupted by a Tandem restart (not a deliberate stop)'
+              : 'stopped by project pause')
+          : '',
         s.status === 'awaiting_review' && s.reviewWait
           ? `implementation done, required review NOT run (${s.reviewWait.reason}); retries automatically at ${new Date(s.reviewWait.retryAt).toISOString().slice(11, 16)} UTC — not complete, dependents stay blocked`
           : '',

@@ -10,7 +10,8 @@
 import { getChat } from './db';
 import { duePendingReviews, deletePendingReview, expediteReview, getPendingReview } from './engine/reviewWait';
 import { isRunning, startReviewRetry } from './engine/workflow';
-import { queueObservation, retrySessionReview } from './director/engine';
+import { deliverPendingWake, queueObservation, retrySessionReview } from './director/engine';
+import { deletePendingWake, duePendingWakes, expediteWake } from './director/pendingWake';
 import { addActivity, getRunRaw, listRuns, patchSession, sessionForChat, sessionsByStatus } from './director/store';
 
 const TICK_MS = Number(process.env.TANDEM_REVIEW_SWEEP_MS || 60_000);
@@ -46,6 +47,10 @@ export function expediteRunReviews(runId: string): { requeued: number; runState:
     expediteReview(s.chatId); // moves retry_at to now (no-op if already due)
     requeued += 1;
   }
+  // the same control covers a Builder/Director wait: the operator is the one
+  // who knows the plan was upgraded or the limit lifted early, and a reset time
+  // parsed out of an error message is only ever a guess
+  if (expediteWake(runId)) requeued += 1;
   if (requeued > 0) {
     addActivity(runId, 'review', `${requeued} waiting review${requeued === 1 ? '' : 's'} re-queued to run now (manual retry)`);
     if (['RUNNING', 'RESUMING', 'PLANNING'].includes(runState)) sweep();
@@ -86,8 +91,34 @@ function sweep(): void {
         .finally(() => inFlight.delete(chatId));
     }
   }
+  sweepProviderWakes();
   reconcileOrphans();
 }
+
+/**
+ * Deliver what a provider limit stopped the Director from hearing.
+ *
+ * This is the half that actually restarts a stalled project: the Builder's
+ * session and the Director's own turn can both be refused by the same Claude
+ * limit, and when that happens nobody is left to notice it lifting. The row
+ * outlives the outage (and any restart), so the next tick past retry_at says it
+ * again. A project the user paused meanwhile keeps its row and waits.
+ */
+function sweepProviderWakes(): void {
+  for (const wake of duePendingWakes()) {
+    const state = getRunRaw(wake.runId)?.state;
+    if (!state || ['COMPLETED', 'FAILED'].includes(state)) { deletePendingWake(wake.runId); continue; }
+    if (!['RUNNING', 'RESUMING', 'PLANNING'].includes(state)) continue; // paused: waits for Resume
+    if (wakeInFlight.has(wake.runId)) continue;
+    // clear FIRST: if the provider is still refusing, the failed turn writes a
+    // fresh row with the new reset time rather than colliding with this one
+    deletePendingWake(wake.runId);
+    wakeInFlight.add(wake.runId);
+    addActivity(wake.runId, 'state', `${wake.reason} lifted — picking the project back up`);
+    try { deliverPendingWake(wake.runId, wake.message, wake.reason); } finally { wakeInFlight.delete(wake.runId); }
+  }
+}
+const wakeInFlight = new Set<string>();
 
 /**
  * An awaiting_review session whose pending review no longer exists (a crash in

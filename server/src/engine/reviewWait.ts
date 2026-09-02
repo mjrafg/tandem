@@ -79,6 +79,12 @@ export interface ProviderOutage {
 
 /** default backoff when the provider names no reset time */
 const DEFAULT_RETRY_MS = 15 * 60_000;
+/** a stated reset already this far behind us is a rounding race, not yesterday */
+const JUST_MISSED_MS = 20 * 60_000;
+/** how soon to look again after such a near miss */
+const NEAR_RETRY_MS = 3 * 60_000;
+/** retry just AFTER a stated reset, never exactly on it */
+const RESET_GRACE_MS = 60_000;
 
 /**
  * Is this Reviewer failure a TEMPORARY provider condition (usage limit, quota,
@@ -87,16 +93,22 @@ const DEFAULT_RETRY_MS = 15 * 60_000;
  * quota family (model errors, auth errors, crashes, timeouts) returns null and
  * keeps its existing handling.
  */
-export function classifyProviderOutage(errorText: string | undefined, now = Date.now()): ProviderOutage | null {
+export function classifyProviderOutage(errorText: string | undefined, now = Date.now(), provider = 'Codex'): ProviderOutage | null {
   const text = (errorText ?? '').slice(0, 4_000);
   if (!text) return null;
   // 429 counts only as a standalone HTTP-status token — never `file.js:429:7`
-  // or another number that happens to contain it
-  const quota = /usage[ _-]?limit|rate[ _-]?limit|\bquota\b|too many requests|(?<![:\d.])429(?![:\d])|usage_limit_reached|rate_limit_exceeded/i;
+  // or another number that happens to contain it. "session limit" is Claude
+  // Code's wording for the same condition ("You've hit your session limit").
+  const quota = /usage[ _-]?limit|rate[ _-]?limit|session[ _-]?limit|\bquota\b|too many requests|(?<![:\d.])429(?![:\d])|usage_limit_reached|rate_limit_exceeded/i;
   if (!quota.test(text)) return null;
 
-  const reason = /rate/i.test(text) && !/usage/i.test(text) ? 'Codex rate limit' : 'Codex usage limit';
-  return { reason, retryAt: parseResetTime(text, now) ?? now + DEFAULT_RETRY_MS };
+  const kind = /session[ _-]?limit/i.test(text) ? 'session limit'
+    : /rate[ _-]?limit/i.test(text) && !/usage/i.test(text) ? 'rate limit'
+      : 'usage limit';
+  // a grace period on the provider's own figure: retrying on the exact second
+  // it names loses the race often enough to matter
+  const reset = parseResetTime(text, now);
+  return { reason: `${provider} ${kind}`, retryAt: reset ? reset + RESET_GRACE_MS : now + DEFAULT_RETRY_MS };
 }
 
 /** Best-effort reset-time extraction from provider error text. */
@@ -120,10 +132,17 @@ export function parseResetTime(text: string, now: number): number | null {
     }
     if (ms > 0 && ms < 14 * 24 * 3600_000) return now + Math.max(ms, 60_000);
   }
-  // "try again at 14:45" / "resets at 2:45 PM" — the next occurrence of that
-  // wall-clock time; a reset-ish word must precede "at" so an incidental
-  // timestamp elsewhere in the error never becomes the schedule
-  const at = text.match(/(?:again|try|retry|resets?|available|until)[^.\n]{0,20}?\bat\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  // "try again at 14:45" / "resets at 2:45 PM" / "resets 11:30am (UTC)" — the
+  // next occurrence of that wall-clock time.
+  //
+  // Two forms, deliberately separate. Only text reading literally "resets
+  // <time>" may omit "at"; everything else still demands it. The keywords are
+  // whole words (unanchored, "try" matches inside registry/telemetry and
+  // "again" inside against), and the time may not be part of a longer
+  // timestamp, or the 13:55 inside an ISO date would become the schedule.
+  const TIME = String.raw`(?<![\d:])(\d{1,2}):(\d{2})(?![:\d])\s*(am|pm)?`;
+  const at = text.match(new RegExp(String.raw`\bresets?\s+${TIME}`, 'i'))
+    ?? text.match(new RegExp(String.raw`\b(?:again|try|retry|resets?|available|until)\b[^.\n]{0,20}?\bat\s+${TIME}`, 'i'));
   if (at) {
     let h = Number(at[1]);
     const m = Number(at[2]);
@@ -131,9 +150,22 @@ export function parseResetTime(text: string, now: number): number | null {
     if (ap === 'pm' && h < 12) h += 12;
     if (ap === 'am' && h === 12) h = 0;
     if (h < 24 && m < 60) {
+      // when the provider names the zone, honour it rather than the host's —
+      // Claude Code reports "resets 11:30am (UTC)" and a host on another zone
+      // would otherwise schedule the retry hours off
+      const utc = new RegExp(`${at[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(?\\s*UTC`, 'i').test(text);
       const d = new Date(now);
-      d.setHours(h, m, 0, 0);
-      if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+      if (utc) d.setUTCHours(h, m, 0, 0);
+      else d.setHours(h, m, 0, 0);
+      if (d.getTime() > now) return d.getTime();
+      // The stated time has already passed. Providers report the reset to the
+      // minute, so a retry made at the boundary can be refused by seconds and
+      // come back naming a time that is now barely behind us — rolling that to
+      // tomorrow would turn a few seconds of skew into a day of lost work.
+      // Only a time well in the past really means the next occurrence.
+      if (now - d.getTime() <= JUST_MISSED_MS) return now + NEAR_RETRY_MS;
+      if (utc) d.setUTCDate(d.getUTCDate() + 1);
+      else d.setDate(d.getDate() + 1);
       return d.getTime();
     }
   }

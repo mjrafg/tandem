@@ -6,6 +6,7 @@ import { db } from '../db';
 import { broadcast } from '../sse';
 import { getAgentSnapshot } from '../agents/store';
 import { signalRunState } from '../observability/signals';
+import { getPendingWake } from './pendingWake';
 
 /**
  * Persistence for the Project Director. Everything here is project-level
@@ -126,6 +127,8 @@ export function getRun(id: string): ProjectRun | null {
     planSummary: r.plan_summary ?? null,
     createdAt: r.created_at, updatedAt: r.updated_at,
     milestones: db.prepare('SELECT * FROM pd_milestones WHERE run_id = ? ORDER BY order_idx').all(r.id).map(rowToMilestone),
+    // surfaced so a stalled-looking project can say WHY it is waiting and until when
+    providerWait: (() => { const w = getPendingWake(r.id); return w ? { reason: w.reason, retryAt: w.retryAt } : null; })(),
   };
 }
 
@@ -300,7 +303,7 @@ export function sessionTitlePrefix(session: PdSession): string {
 export function patchSession(runId: string, key: string, patch: Partial<{
   chatId: string; status: PdSessionStatus; branch: string | null; cwd: string;
   resultSummary: string; reviewVerdict: string; startedAt: number; endedAt: number; prompt: string;
-  lastBaselineSeq: number; stopReason: 'user_stop' | 'project_pause' | 'restart' | null;
+  lastBaselineSeq: number; stopReason: 'user_stop' | 'project_pause' | 'restart' | 'provider_outage' | null;
   reviewWaitReason: string | null; reviewRetryAt: number | null; agentProfileId: string | null;
 }>): void {
   const map: Record<string, string> = {
@@ -468,7 +471,8 @@ export function stateSnapshot(runId: string): string {
         s.status === 'paused' && s.stopReason
           ? (s.stopReason === 'user_stop' ? 'stopped by the user'
             : s.stopReason === 'restart' ? 'interrupted by a Tandem restart (not a deliberate stop)'
-              : 'stopped by project pause')
+              : s.stopReason === 'provider_outage' ? 'stopped by a provider usage limit, work preserved — NOT a failure, resume it rather than rebuilding'
+                : 'stopped by project pause')
           : '',
         s.status === 'awaiting_review' && s.reviewWait
           ? `implementation done, required review NOT run (${s.reviewWait.reason}); retries automatically at ${new Date(s.reviewWait.retryAt).toISOString().slice(11, 16)} UTC — not complete, dependents stay blocked`

@@ -16,7 +16,8 @@ import { computeUsage } from '../context';
 import { performNativeCompaction } from '../engine/providerContext';
 import { releaseBrowsers } from '../engine/browserHost';
 import { parseVerdict, startReviewRetry, startRun } from '../engine/workflow';
-import { fmtRetryAt, getPendingReview } from '../engine/reviewWait';
+import { type ProviderOutage, classifyProviderOutage, fmtRetryAt, getPendingReview } from '../engine/reviewWait';
+import { expediteWake, getPendingWake, providerWaitActive, upsertPendingWake } from './pendingWake';
 import { terminateProcGroup } from '../engine/procGroups';
 import { agentCatalogText } from '../agents/catalog';
 import { signalSessionState } from '../observability/signals';
@@ -86,6 +87,18 @@ export function directorUserMessage(chat: Chat, text: string): void {
   void pumpDirector(run.id, text, 'user');
 }
 
+/**
+ * Say again what a provider limit prevented the Director from hearing. Sent as
+ * a plain message, not an observation, because the stored text is already the
+ * fully composed turn that was refused — re-wrapping it would nest it inside a
+ * second observation frame.
+ */
+export function deliverPendingWake(runId: string, message: string, reason: string): void {
+  const state = getRunRaw(runId)?.state;
+  if (!['RUNNING', 'RESUMING', 'PLANNING'].includes(state ?? '')) return;
+  void pumpDirector(runId, `The ${reason} that was blocking this project has lifted. What follows is what could not be delivered while it was in force — act on it now.\n\n${message}`, 'user');
+}
+
 export function queueObservation(runId: string, text: string): void {
   // a paused project gets NO automatic orchestration wake — everything the
   // Director needs is in the persisted state it reads when the user resumes
@@ -112,7 +125,26 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
       isObservation: kind === 'observation',
     };
     while (next) {
-      await runDirectorTurn(runId, next.text);
+      const outage = await runDirectorTurn(runId, next.text);
+      if (outage) {
+        // The provider refused. Everything undelivered — this turn's text plus
+        // whatever queued behind it — is persisted and said again once the
+        // limit lifts. Dropping it is what left the project with sessions in
+        // needs_attention and no Director able to decide anything.
+        const queued = t.queued.splice(0);
+        const pending = queued.length > 0
+          ? `${next.text}\n\n${renderPrompt('director.observation', { observations: queued.map((q) => q.text).join('\n') })}`
+          : next.text;
+        upsertPendingWake({ runId, message: pending, reason: outage.reason, detail: outage.detail, retryAt: outage.retryAt });
+        addActivity(runId, 'state', `${outage.reason} — work is preserved; the Director picks this up again at ${fmtRetryAt(outage.retryAt)}`);
+        broadcastRun(runId);
+        break;
+      }
+      // The provider just answered, so any wait recorded earlier is over in
+      // fact, whatever time was parsed out of the refusal. Bring it forward so
+      // the sweeper says it now and the work guard lifts — a reset time read
+      // from a sentence must never be able to hold a project for a whole day.
+      if (getPendingWake(runId)) { expediteWake(runId); broadcastRun(runId); }
       await processAfterTurn(runId);
       // compact only when nothing is waiting — a queued observation (a failed
       // session needing a decision) must never sit behind a multi-minute compact
@@ -182,14 +214,19 @@ async function directorAutoCompact(runId: string): Promise<void> {
   }
 }
 
-/** One real Claude turn for the Director on the Project Chat. */
-async function runDirectorTurn(runId: string, message: string): Promise<void> {
+/**
+ * One real Claude turn for the Director on the Project Chat. Returns the
+ * provider outage when the call was refused by a usage/session limit — the
+ * caller's signal to persist what it was trying to say and wait, rather than
+ * dropping it and leaving the project with no decision-maker.
+ */
+async function runDirectorTurn(runId: string, message: string): Promise<(ProviderOutage & { detail: string }) | null> {
   const run = getRun(runId);
-  if (!run) return;
+  if (!run) return null;
   const chat = getChat(run.chatId);
   const project = getProject(chat?.projectId ?? '');
-  if (!chat || !project) return;
-  if (isRunning(chat.id)) return; // a turn is already live (belt and braces)
+  if (!chat || !project) return null;
+  if (isRunning(chat.id)) return null; // a turn is already live (belt and braces)
 
   const settings = getSettings();
   // no rootPath in the ctx: Director turns may run while sessions hold the
@@ -223,12 +260,22 @@ async function runDirectorTurn(runId: string, message: string): Promise<void> {
         .run(result.sessionId, 'claude-code', chat.id);
     }
     if (!result.ok && !result.stopped) {
-      addEvent(chat.id, 'error', { message: 'Director call failed', detail: result.error, source: 'director', retryable: true });
+      // a temporary provider limit is not a Director failure: the caller keeps
+      // what it was saying and re-says it once the limit lifts
+      const outage = classifyProviderOutage(result.error, Date.now(), 'Claude');
+      addEvent(chat.id, 'error', {
+        message: outage ? `Director paused — ${outage.reason}` : 'Director call failed',
+        detail: outage ? `${result.error}\nRetrying automatically at ${fmtRetryAt(outage.retryAt)}.` : result.error,
+        source: 'director',
+        retryable: true,
+      });
+      return outage ? { ...outage, detail: result.error ?? '' } : null;
     }
   } finally {
     releaseCtx(ctx);
     setChatRunning(chat.id, false);
   }
+  return null;
 }
 
 // ---------------------------------------------------------------- review plumbing
@@ -317,7 +364,18 @@ async function processAfterTurn(runId: string): Promise<void> {
     addActivity(runId, 'review', `Plan review round ${round}: findings returned`);
     patchRun(runId, { plan_review_round: round + 1 });
     const key = round === 1 ? 'director.plan_findings_message' : 'director.plan_final_message';
-    await runDirectorTurn(runId, renderPrompt(key, { findings: review.findingsText }));
+    const findingsMessage = renderPrompt(key, { findings: review.findingsText });
+    const planOutage = await runDirectorTurn(runId, findingsMessage);
+    if (planOutage) {
+      // The Director never saw these findings. Give the round BACK — recursing
+      // now would re-review a plan that was never revised, walk the counter to
+      // the policy cap and accept a plan the reviewer rejected twice, with two
+      // real review rounds spent on a provider fault.
+      patchRun(runId, { plan_review_round: round });
+      upsertPendingWake({ runId, message: findingsMessage, reason: planOutage.reason, detail: planOutage.detail, retryAt: planOutage.retryAt });
+      addActivity(runId, 'state', `${planOutage.reason} — plan review round ${round} is re-offered at ${fmtRetryAt(planOutage.retryAt)}`);
+      return;
+    }
     await processAfterTurn(runId); // the resubmission bumped state; continue the loop
     return;
   }
@@ -326,6 +384,13 @@ async function processAfterTurn(runId: string): Promise<void> {
   if (raw.pending_recovery) {
     let pending: any;
     try { pending = JSON.parse(raw.pending_recovery); } catch { patchRun(runId, { pending_recovery: null }); return; }
+    // already through its review, only held back by a provider limit — apply it
+    // as it stands rather than paying for the same review a second time
+    if (pending.approved) {
+      patchRun(runId, { pending_recovery: null });
+      await applyRecovery(runId, pending);
+      return;
+    }
     const round = pending.round as number;
     if (round >= 3) {
       patchRun(runId, { pending_recovery: null });
@@ -350,7 +415,17 @@ async function processAfterTurn(runId: string): Promise<void> {
     pending.awaitingRevision = true;
     patchRun(runId, { pending_recovery: JSON.stringify(pending) });
     const key = round === 1 ? 'director.recovery_findings_message' : 'director.recovery_final_message';
-    await runDirectorTurn(runId, renderPrompt(key, { findings: review.findingsText }));
+    const recoveryMessage = renderPrompt(key, { findings: review.findingsText });
+    const recoveryOutage = await runDirectorTurn(runId, recoveryMessage);
+    if (recoveryOutage) {
+      // same reasoning as the plan loop, and worse if left: the cap path calls
+      // applyRecovery, which restarts a session directly
+      pending.round = round;
+      patchRun(runId, { pending_recovery: JSON.stringify(pending) });
+      upsertPendingWake({ runId, message: recoveryMessage, reason: recoveryOutage.reason, detail: recoveryOutage.detail, retryAt: recoveryOutage.retryAt });
+      addActivity(runId, 'state', `${recoveryOutage.reason} — the recovery decision for ${pending.sessionKey} is re-offered at ${fmtRetryAt(recoveryOutage.retryAt)}`);
+      return;
+    }
     await processAfterTurn(runId);
   }
 }
@@ -759,6 +834,14 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   const pending = getPendingReview(chatId);
   // completion is a fact regardless of pause; a pause only reinterprets
   // interruptions (stop/timeout/failure during the pause) as preservation
+  // A Builder call refused by a usage/session limit is NOT a failed session:
+  // the work on disk is intact and the SAME session continues once the limit
+  // lifts. Calling it a failure sent it to needs_attention, whose only exit is
+  // a Director decision — and the Director was blocked by that same limit, so
+  // the project stopped dead. Preserve it instead, exactly like a pause.
+  const outage = !pausing && outcome.phase !== 'stopped' && !outcome.timedOut && (outcome.failed || outcome.phase === 'failed')
+    ? classifyProviderOutage(outcome.errorText, Date.now(), 'Claude')
+    : null;
   let status: PdSession['status'];
   // the standing wait survives interruptions too: a retry stopped by the user
   // or a project pause leaves the pending review in place, and the sweeper
@@ -767,11 +850,15 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   else if (outcome.phase === 'finished' && !outcome.failed && !outcome.timedOut) status = 'completed';
   else if (outcome.phase === 'stopped') status = 'paused';
   else if (pausing) status = 'paused';
+  else if (outage) status = 'paused';
   else if (outcome.timedOut) status = 'timeout';
   else if (outcome.failed || outcome.phase === 'failed') status = 'failed';
   else status = 'failed';
   // the persisted stop INTENT keeps these cases distinct forever after
-  const stopReason: PdSession['stopReason'] = status !== 'paused' ? null : pausing ? 'project_pause' : 'user_stop';
+  const stopReason: PdSession['stopReason'] = status !== 'paused' ? null
+    : pausing ? 'project_pause'
+      : outage ? 'provider_outage'
+        : 'user_stop';
 
   patchSession(runId, key, {
     status,
@@ -787,7 +874,9 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   addActivity(runId, 'session',
     status === 'completed' ? `${key} completed${outcome.reviewVerdict ? ` · reviewer: ${outcome.reviewVerdict}` : ''}`
       : status === 'awaiting_review' ? `${key} implementation complete — waiting for Reviewer (${pending!.reason}); retry at ${fmtRetryAt(pending!.retryAt)}`
-        : status === 'paused' ? (stopReason === 'user_stop' ? `${key} stopped by the user and preserved` : `${key} preserved (project pause)`)
+        : status === 'paused' ? (stopReason === 'user_stop' ? `${key} stopped by the user and preserved`
+          : stopReason === 'provider_outage' ? `${key} hit the ${outage!.reason} — work preserved, continues at ${fmtRetryAt(outage!.retryAt)}`
+            : `${key} preserved (project pause)`)
           : status === 'timeout' ? `${key} timed out`
             : `${key} failed`);
   refreshLiveBlock(runId);
@@ -808,6 +897,25 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   if (pausing) {
     // no observations while pausing/paused — nothing may wake orchestration
     finishPauseIfDone(runId);
+    return;
+  }
+
+  if (stopReason === 'provider_outage') {
+    // Do NOT wake the Director now: it would decide what to do about a session
+    // the provider is still refusing, and most likely relaunch it straight back
+    // into the same limit. Persist the observation and deliver it when the
+    // limit lifts — that single wake is what restarts the project.
+    upsertPendingWake({
+      runId,
+      message: `Session ${key} could not continue because of a provider limit (${outage!.reason}); that limit has now lifted. `
+        + `Its work on disk and its chat are intact and it is NOT a failure — nothing about the result was judged. `
+        + `Resume it with resume_sessions (do not rebuild it from scratch), and continue the project. `
+        + `Any other session paused by the same limit is in the same position.`,
+      reason: outage!.reason,
+      detail: outcome.errorText.slice(0, 2_000),
+      retryAt: outage!.retryAt,
+    });
+    broadcastRun(runId);
     return;
   }
 
@@ -963,8 +1071,12 @@ function stopBlocksRequiredPath(runId: string, key: string): boolean {
   // milestone outside the stopped milestone's dependent closure.
   const progressable =
     // awaiting_review counts: its scheduled review retry completes the session
-    // without any launch, so the project can still legitimately move forward
-    all.some((s) => s.key !== key && ['running', 'timeout', 'needs_attention', 'awaiting_review'].includes(s.status))
+    // without any launch, so the project can still legitimately move forward.
+    // A session paused by a provider limit is the same shape of promise — it
+    // has a persisted wake that will pick it back up — so pausing the whole
+    // project over it would strand that wake behind a manual Resume.
+    all.some((s) => s.key !== key && (['running', 'timeout', 'needs_attention', 'awaiting_review'].includes(s.status)
+      || (s.status === 'paused' && s.stopReason === 'provider_outage')))
     || all.some((s) => s.status === 'planned' && !dependents.has(s.key))
     || run.milestones.some((m) => m.key !== owner.key && !msDeps.has(m.key) && m.status !== 'completed');
   return !progressable;
@@ -1087,6 +1199,20 @@ export async function applyRecovery(runId: string, pending: any): Promise<void> 
   const state = getRunRaw(runId)?.state;
   if (!['RUNNING', 'RESUMING', 'PLANNING'].includes(state)) {
     addActivity(runId, 'recovery', `Recovery for ${key} not applied — the project is ${state}`);
+    return;
+  }
+  // This is the real choke point for the provider guard: recover_session only
+  // RECORDS a decision, and the launch happens here — after an awaited review
+  // that can easily outlast the start of an outage — so the handleDirectorTool
+  // check alone would let a Builder spawn straight back into the live limit.
+  // The decision stays pending and is applied by the wake that ends the wait.
+  const wait = providerWaitActive(runId);
+  if (wait) {
+    // Both callers clear pending_recovery BEFORE calling this, so simply
+    // returning would throw the decision away. Put it back, flagged as already
+    // reviewed, so the next pass applies it without spending another round.
+    patchRun(runId, { pending_recovery: JSON.stringify({ ...pending, approved: true }) });
+    addActivity(runId, 'recovery', `Recovery for ${key} held — ${wait.reason} until ${fmtRetryAt(wait.retryAt)}; the decision is kept and applied then`);
     return;
   }
   addActivity(runId, 'recovery', `Recovery applied for ${key}: ${pending.action}`, pending.reasoning?.slice(0, 1_500));
@@ -1233,6 +1359,11 @@ async function driveRestartWake(runId: string, observation: string): Promise<voi
   // stuck, so hand it back with the reason attached.
   if (getRunRaw(runId)?.state !== 'RESUMING') return;
   if (sessionsByStatus(runId, ['running']).length > 0) return;
+  // A provider limit is not "nothing happened" — the turn is persisted and the
+  // sweeper delivers it when the limit lifts. Pausing here would strand it,
+  // because the sweeper leaves paused projects alone, and the manual Resume
+  // this whole path exists to remove would be back.
+  if (getPendingWake(runId)) return;
   setRunState(runId, 'PAUSED', 'Automatic resume after the restart could not get the Director going — press Resume to try again');
   refreshLiveBlock(runId);
 }
@@ -1304,6 +1435,17 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
   // completes until the user presses Resume (which wakes you in RESUMING)
   if (['PAUSING', 'PAUSED'].includes(run.state) && op !== 'get_state') {
     return { ok: false, error: `The project is ${run.state}. Nothing can start, change, or complete while it is paused — answer the user in the chat from the existing state, and ask them to press Resume when they are ready.` };
+  }
+  // A provider limit blocks the work, not the thinking: planning and answering
+  // stay open, but anything that would SPAWN a Builder run is refused until the
+  // limit lifts. Without this the Director relaunches straight back into the
+  // same refusal and burns the session's recovery attempts on a provider fault.
+  const LAUNCHES_WORK = ['start_sessions', 'resume_sessions', 'recover_session', 'integrate_milestone', 'deliver'];
+  if (LAUNCHES_WORK.includes(op)) {
+    const wait = providerWaitActive(runId);
+    if (wait) {
+      return { ok: false, error: `Blocked by a ${wait.reason} until ${fmtRetryAt(wait.retryAt)} — starting work now would be refused again and would waste a recovery attempt on a provider fault. Everything already on disk is preserved. You will be woken automatically when the limit lifts; until then, answer the user from the existing state and start nothing.` };
+    }
   }
   try {
     switch (op) {

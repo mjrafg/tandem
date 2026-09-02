@@ -647,8 +647,8 @@ export interface PdSession {
   cwd: string | null;      // worktree dir or the project root
   /** event seq just before the latest run's trigger — the outcome window base */
   lastBaselineSeq?: number | null;
-  /** why a paused session stopped: the user's own stop, a project-wide pause, or a Tandem restart */
-  stopReason?: 'user_stop' | 'project_pause' | 'restart' | null;
+  /** why a paused session stopped: the user's own stop, a project-wide pause, a Tandem restart, or a provider limit */
+  stopReason?: 'user_stop' | 'project_pause' | 'restart' | 'provider_outage' | null;
   resultSummary: string | null;
   reviewVerdict: 'pass' | 'findings' | null;
   /** set while status is awaiting_review: why the review is waiting and when it retries */
@@ -694,6 +694,8 @@ export interface ProjectRun {
   createdAt: number;
   updatedAt: number;
   milestones: PdMilestone[];
+  /** set while a provider usage/session limit is blocking work; clears itself */
+  providerWait?: { reason: string; retryAt: number } | null;
 }
 
 /** live project execution block in the Project Chat — ONE event, updated in place */

@@ -114,6 +114,22 @@ export function ProjectDrawer({ runId, open, onClose }: { runId: string; open: b
               </div>
             </div>
 
+            {run.providerWait && run.providerWait.retryAt > Date.now() && (
+              // a project blocked on a provider limit used to look identical to
+              // one that had simply stopped — say what it is waiting for. Only
+              // a live project picks itself back up: the sweeper leaves paused
+              // ones alone, so promising them an automatic resume would lie.
+              <div className="border-b border-linesoft bg-warn/5 px-3.5 py-2 text-[11.5px] leading-snug text-warn">
+                Waiting on the {run.providerWait.reason}
+                <span className="text-dim">
+                  {' · work is preserved · '}
+                  {['RUNNING', 'RESUMING', 'PLANNING'].includes(run.state)
+                    ? `resumes automatically at ${new Date(run.providerWait.retryAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+                    : 'picked up when you resume the project'}
+                </span>
+              </div>
+            )}
+
             <div className="flex gap-1 border-b border-linesoft px-3 py-1.5 text-[12px]">
               {(['milestones', 'activity'] as const).map((t) => (
                 <button key={t} onClick={() => setTab(t)}
@@ -181,6 +197,9 @@ function SessionLine({ session: s }: { session: PdSession }) {
       )}
       {s.resultSummary && s.status === 'completed' && <div className="mt-0.5 pl-[18px] text-[11px] leading-snug text-dim">{s.resultSummary}{s.reviewVerdict ? ` · reviewer: ${s.reviewVerdict === 'pass' ? 'accepted' : 'findings'}` : ''}</div>}
       {s.status === 'planned' && s.dependsOn.length > 0 && <div className="mt-0.5 pl-[18px] text-[11px] text-dim">Waiting for {s.dependsOn.join(', ')}</div>}
+      {s.status === 'paused' && s.stopReason === 'provider_outage' && (
+        <div className="mt-0.5 pl-[18px] text-[11px] leading-snug text-warn">Paused by a provider limit — work preserved, not a failure</div>
+      )}
       {s.status === 'awaiting_review' && (
         <div className="mt-0.5 pl-[18px] text-[11px] leading-snug">
           <span className="text-dim">Implementation complete · </span>

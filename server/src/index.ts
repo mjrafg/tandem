@@ -12,9 +12,11 @@ import { registerIntegrationRoutes } from './integrationRoutes';
 import { registerAgentRoutes } from './agents/routes';
 import { registerObservabilityRoutes } from './observability/routes';
 import { seedAgents } from './agents/store';
-import { migrateContextDefaults } from './settings';
+import { getSettings, migrateContextDefaults, resolveDirectorRole } from './settings';
+import { getChat } from './db';
+import { performNativeCompaction } from './engine/providerContext';
 import { recoverInterruptedRuns } from './engine/run';
-import { backfillModelWindows } from './context';
+import { backfillModelWindows, computeUsage } from './context';
 import { recoverDirectorRuns } from './director/engine';
 import { shutdownBrowsers, startBrowserReaper } from './engine/browserHost';
 import { startReviewRetrySweeper } from './reviewRetrySweeper';
@@ -36,6 +38,40 @@ if (process.argv[2] === 'set-password') {
     console.log(`Password updated for ${config.adminEmail}.`);
     process.exit(0);
   });
+} else if (process.argv[2] === 'compact') {
+  // Maintenance: compact a chat's provider context from the command line.
+  //   node dist/index.js compact <chatId> [<chatId> …]
+  // Same path the Compact button takes, including the Project Chat's Director
+  // model override — this exists so an operator can reach it without a browser
+  // session (a long-running project can leave several chats far above the
+  // auto-compact ceiling at once). It refuses a chat the server has flagged as
+  // running, and it writes the same compaction event the UI reads.
+  void (async () => {
+    const ids = process.argv.slice(3);
+    if (ids.length === 0) {
+      console.error('usage: compact <chatId> [<chatId> …]');
+      process.exit(1);
+    }
+    let failed = 0;
+    for (const id of ids) {
+      const chat = getChat(id);
+      if (!chat) { console.error(`${id}: no such chat`); failed += 1; continue; }
+      if (chat.running) { console.error(`${id}: a run is active — refusing`); failed += 1; continue; }
+      const before = computeUsage(chat);
+      const outcome = chat.kind === 'project'
+        ? await performNativeCompaction(chat, 'manual', { provider: 'claude-code', model: resolveDirectorRole(getSettings()).model })
+        : await performNativeCompaction(chat, 'manual');
+      if (!outcome.ok) { console.error(`${id}: FAILED — ${outcome.error}`); failed += 1; continue; }
+      console.log(JSON.stringify({
+        chatId: id, title: chat.title,
+        beforeTokens: outcome.beforeTokens ?? before.total,
+        afterTokens: outcome.afterTokens,
+        windowTokens: outcome.windowTokens,
+        source: outcome.source, durationMs: outcome.durationMs,
+      }));
+    }
+    process.exit(failed > 0 ? 1 : 0);
+  })();
 } else {
   void main();
 }

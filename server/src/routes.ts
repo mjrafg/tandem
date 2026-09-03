@@ -26,6 +26,7 @@ import {
 import { activeCtx } from './engine/run';
 import { handleBrowserTool, releaseBrowsers } from './engine/browserHost';
 import { deletePendingReview } from './engine/reviewWait';
+import { deleteLedger } from './engine/reviewLedger';
 import { terminateProcGroup } from './engine/procGroups';
 import { deleteAgentSnapshot } from './agents/store';
 import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
@@ -115,6 +116,7 @@ export function registerRoutes(app: FastifyInstance): void {
     void terminateProcGroup(chat.id); // background processes die with their chat
     deletePendingReview(chat.id); // and no orphaned review retry either
     deleteAgentSnapshot(chat.id);
+    deleteLedger(chat.id); // the task's review budget goes with it
     db.prepare('DELETE FROM events WHERE chat_id = ?').run(chat.id);
     db.prepare('DELETE FROM chats WHERE id = ?').run(chat.id);
     broadcast({ type: 'chat_deleted', chatId: chat.id });

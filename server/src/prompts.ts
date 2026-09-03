@@ -204,6 +204,15 @@ export const PROMPT_DEFS: PromptDef[] = [
     default: '# The user\'s original request\n{{original_request}}',
   },
   {
+    key: 'reviewer.continuation_section',
+    name: 'Reviewer — later instructions in the session',
+    description: 'Shown when the reviewed run was a continuation (resume, recovery). The original request stays the request; these are appended context.',
+    group: 'reviewer',
+    roles: ['reviewer'],
+    placeholders: ['continuation'],
+    default: '# Later instructions in this session (context, not the request)\nThe run under review was started by this instruction, which continues the task above rather than replacing it:\n{{continuation}}',
+  },
+  {
     key: 'reviewer.changed_section',
     name: 'Reviewer — changed-files section',
     description: 'Presents the objective changed-files evidence.',

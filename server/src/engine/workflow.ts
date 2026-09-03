@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AttachmentMeta, Finding, FindingsPayload } from '../../../shared/types';
 import { computeUsage, recentConversation, shouldAutoCompact } from '../context';
-import { getBuilderSession, getChat, getEvent, getProject, setBuilderSession } from '../db';
+import { db, getBuilderSession, getChat, getEvent, getProject, setBuilderSession } from '../db';
 import { addEvent, updateEvent } from '../events';
 import { getSettings } from '../settings';
 import { builderSystemText, getPrompt, renderPrompt, reviewerSystemText } from '../prompts';
@@ -12,7 +12,7 @@ import {
   RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, repoBusyBy, setChatRunning, stopRun,
 } from './run';
 import { adoptRepo, finishGitRun, summaryText } from './gitFlow';
-import { captureWorktree, diffWorktrees, type DeltaNoteKind } from './snapshot';
+import { captureWorktree, diffWorktrees, revisionHash, type DeltaNoteKind } from './snapshot';
 import {
   classifyProviderOutage, deletePendingReview, fmtRetryAt, getPendingReview, upsertPendingReview,
 } from './reviewWait';
@@ -24,7 +24,7 @@ export { setGitWorkflow } from './gitFlow';
 const BUILDER_TIMEOUT = 30 * 60_000;
 const REVIEW_TIMEOUT = 15 * 60_000;
 /** the review-loop cap — enforced by the orchestration below, not by prompts */
-const MAX_REVIEW_ROUNDS = 2;
+import { MAX_REVIEW_ROUNDS, deriveLegacyLedger, getLedger, openTask, recordRepair, recordReview, revisionOf, type ReviewLedger } from './reviewLedger';
 
 /** wording for the changed-files note comes from the prompt registry */
 interface ReviewDelta { files: string[]; note: string }
@@ -65,7 +65,7 @@ export async function startRun(
   chatId: string,
   userText: string,
   attachments: AttachmentMeta[] = [],
-  runOpts: { review: boolean; timeoutMs?: number } = { review: true },
+  runOpts: { review: boolean; timeoutMs?: number; task?: 'new' | 'continue' } = { review: true },
 ): Promise<void> {
   const chat = getChat(chatId);
   if (!chat || isRunning(chatId)) return;
@@ -93,17 +93,27 @@ export async function startRun(
 
   const h = new RunHandle(ctx, chat, project, attachments);
   try {
+    // A run either OPENS a task or CONTINUES one, and the caller knows which:
+    // a user message in a chat or a Director launching a session is a new
+    // request; a resume or a recovery decision continues the task that stands.
+    // The distinction is what keeps the review budget and the original request
+    // with the TASK instead of restarting both on every invocation.
+    const ledger: ReviewLedger = runOpts.task === 'continue'
+      ? (getLedger(chatId) ?? deriveLegacyLedger(chatId) ?? openTask(chatId, userText))
+      : openTask(chatId, userText);
     // a NEW request replaces the result an older waiting review was about —
     // that review is superseded, never silently resumed against new work
-    if (getPendingReview(chatId)) {
+    if (runOpts.task !== 'continue' && getPendingReview(chatId)) {
       deletePendingReview(chatId);
       h.status('The pending review of the previous result was superseded by this new request.');
     }
     h.gitFlow = (await adoptRepo(h)) ?? undefined;
-    const ok = await runWorkflow(h, userText, runOpts);
+    const ok = await runWorkflow(h, userText, runOpts, ledger);
     // 'awaiting' = implementation done but the required review is waiting on
     // the provider: no checkpoint/merge (nothing is integrated unreviewed)
-    if (ok === true && !ctx.stopped) await finishGitRun(h, userText);
+    // the checkpoint names the TASK — a continuation's commit must not read
+    // "tandem: Your previous run in this session was interrupted…"
+    if (ok === true && !ctx.stopped) await finishGitRun(h, ledger.originalRequest);
     addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
   } catch (err) {
     h.error({ message: 'The run failed unexpectedly', detail: String(err), source: 'engine' });
@@ -116,7 +126,7 @@ export async function startRun(
   }
 }
 
-async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean; timeoutMs?: number }): Promise<boolean | 'awaiting'> {
+async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: boolean; timeoutMs?: number; task?: 'new' | 'continue' }, ledger: ReviewLedger): Promise<boolean | 'awaiting'> {
   // per-run override so an orchestrator (or a recovery decision) can grant
   // more time; the default stays the module constant
   const builderTimeout = Math.min(runOpts.timeoutMs ?? BUILDER_TIMEOUT, 90 * 60_000);
@@ -164,8 +174,23 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   const subject = subjectFor(delta, first.resultText);
   if (!subject) return true; // the run produced neither changes nor a response
 
-  const phase = await runReviewPhase(h, userText, {
-    round: 1, subject, before, startDir, builderTimeout, retry: false,
+  // The budget belongs to the task, not to this invocation. A continuation of a
+  // task whose two rounds are spent gets no third opinion — exactly the cap the
+  // policy already promises for the final repair — and says so.
+  const consumed = ledger.reviewsConsumed;
+  if (consumed >= MAX_REVIEW_ROUNDS) {
+    h.status(`The review budget for this task is already spent (${consumed} of ${MAX_REVIEW_ROUNDS} rounds) — this continuation is not re-reviewed; the result stands as the task's final, unreviewed repair.`);
+    recordRepair(h.chat.id, true);
+    return true;
+  }
+  // a revision the Reviewer already accepted has nothing new to judge
+  if (ledger.lastVerdict === 'pass' && ledger.reviewedRevision === revisionOf(revisionHash(h.project.rootPath, captureWorktree(h.project.rootPath)), subject)) {
+    h.status('This result is the revision the Reviewer already accepted — nothing new to review.');
+    return true;
+  }
+  const phase = await runReviewPhase(h, ledger.originalRequest, {
+    round: (consumed + 1) as 1 | 2, subject, before, startDir, builderTimeout, retry: false,
+    steering: runOpts.task === 'continue' ? userText : undefined,
   });
   if (phase === 'done') return true;
   if (phase === 'awaiting') return 'awaiting';
@@ -192,6 +217,8 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   builderTimeout: number;
   /** true when re-entered by the retry sweeper (a provider-wait already stands) */
   retry: boolean;
+  /** the continuation/recovery instruction this run was started with, if any */
+  steering?: string;
 }): Promise<PhaseOutcome> {
   // repairs run on the SAME snapshot the first turn used — an admin editing the
   // Agent template mid-session never changes what this session executes
@@ -199,7 +226,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   let subject2 = opts.subject;
 
   if (opts.round === 1) {
-    const round1 = await review(h, userText, opts.subject, 1);
+    const round1 = await review(h, userText, opts.subject, 1, opts.steering);
     if (h.stopped || 'stopped' in round1) return 'stopped';
     if ('outage' in round1) return recordReviewWait(h, userText, 1, opts.subject, round1.outage);
     if ('failure' in round1) return reviewerFailed(h, userText, 1, opts.subject, round1.failure, opts.retry);
@@ -221,6 +248,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
       timeoutMs: opts.builderTimeout,
     });
     if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId, 'claude-code');
+    recordRepair(h.chat.id, false);
     if (h.stopped) return 'stopped';
     if (!repair.ok) {
       h.error({ message: 'Builder repair call failed', detail: repair.error, source: 'builder', retryable: true });
@@ -242,30 +270,44 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   }
 
   // ---- round 2 (the last review)
-  const round2 = await review(h, userText, subject2, 2);
+  const round2 = await review(h, userText, subject2, 2, opts.steering);
   if (h.stopped || 'stopped' in round2) return 'stopped';
   if ('outage' in round2) return recordReviewWait(h, userText, 2, subject2, round2.outage);
   if ('failure' in round2) return reviewerFailed(h, userText, 2, subject2, round2.failure, opts.retry);
   if (round2.verdict === 'pass') return 'done';
 
   // ---- final repair — hard cap: never re-reviewed
+  return finalRepair(h, round2, subject2.kind, opts.builderTimeout);
+}
+
+/**
+ * The unreviewed final repair after a round-2 FINDINGS verdict — and the
+ * completion of a task whose final repair was interrupted (a crash inside it on
+ * the outage-retry path). `final_repair_done` in the ledger gates it, so a
+ * replay finishes the same repair instead of skipping it or starting another.
+ */
+async function finalRepair(
+  h: RunHandle, round2: { eventId: string; items: Finding[] }, subjectKind: ReviewSubject['kind'], builderTimeout: number,
+): Promise<PhaseOutcome> {
+  const builderCfg = builderExecFor(h.chat.id, h.settings);
   const final = await runClaudeTurn(h, {
     role: 'final_repair',
     model: builderCfg.model,
     effort: builderCfg.effort,
     systemAppendix: builderSystemText(h.settings, 'final_repair', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
     message: renderPrompt(
-      subject2.kind === 'answer' ? 'repair.answer_final_message' : 'repair.final_message',
+      subjectKind === 'answer' ? 'repair.answer_final_message' : 'repair.final_message',
       { findings: findingsAsText(round2.items) },
     ),
     cwd: h.project.rootPath,
     resumeSessionId: getBuilderSession(h.chat.id),
     withTandemTools: true,
-    timeoutMs: opts.builderTimeout,
+    timeoutMs: builderTimeout,
   });
   if (final.sessionId) setBuilderSession(h.chat.id, final.sessionId, 'claude-code');
   if (!h.stopped && final.ok) {
     updateEvent(round2.eventId, { finalRepairNotReviewed: true });
+    recordRepair(h.chat.id, true);
     h.status('Final repair applied. The review loop is capped at two rounds, so this final repair was not re-reviewed.');
     return 'done';
   }
@@ -273,6 +315,14 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     h.error({ message: 'Final repair call failed', detail: final.error, source: 'builder', retryable: true });
   }
   return h.stopped ? 'stopped' : 'failed';
+}
+
+/** The most recent verdict of `round` in a chat — what an interrupted final repair was repairing. */
+function lastFindings(chatId: string, round: number): { eventId: string; items: Finding[] } | null {
+  const r = db.prepare("SELECT id, payload FROM events WHERE chat_id = ? AND kind = 'findings' ORDER BY seq DESC LIMIT 1").get(chatId) as { id: string; payload: string } | undefined;
+  if (!r) return null;
+  const p = JSON.parse(r.payload) as FindingsPayload;
+  return p.round === round ? { eventId: r.id, items: p.items ?? [] } : null;
 }
 
 /**
@@ -353,9 +403,41 @@ export function startReviewRetry(chatId: string): Promise<void> | null {
         return;
       }
       h.gitFlow = (await adoptRepo(h)) ?? undefined;
-      h.status(`Retrying the required review (round ${pending.round}, attempt ${pending.attempts + 1}) against the same result.`);
-      const outcome = await runReviewPhase(h, pending.userText, {
-        round: pending.round,
+      // the ledger, not the pending row, owns the round and the request: the
+      // pending row was written by whichever invocation was refused, and that
+      // may have been a continuation carrying the recovery text as its request
+      const ledger = getLedger(chatId) ?? deriveLegacyLedger(chatId);
+      const originalRequest = ledger?.originalRequest ?? pending.userText;
+      // A verdict can commit and the process die before this row is deleted —
+      // the final repair runs for minutes between the two. Then the review this
+      // wait was for is already recorded, and retrying it would be a third
+      // round: the row is stale, not the review.
+      if (ledger && ledger.reviewsConsumed >= MAX_REVIEW_ROUNDS) {
+        const finalPending = ledger.lastVerdict === 'findings' && !ledger.finalRepairDone;
+        h.status(`The review this wait was for has already been recorded (${ledger.reviewsConsumed} of ${MAX_REVIEW_ROUNDS} rounds spent, last verdict: ${ledger.lastVerdict}) — nothing to retry.${finalPending ? ' Its final repair was interrupted; finishing it now (not re-reviewed, as the cap already says).' : ''}`);
+        if (finalPending) {
+          // the row stays until the repair is RECORDED: it is the durable
+          // "work outstanding" marker that brings the sweeper back after another
+          // crash, and the ledger makes that replay finish the same repair
+          const last = lastFindings(chatId, MAX_REVIEW_ROUNDS);
+          const outcome = last ? await finalRepair(h, last, pending.subject.kind, BUILDER_TIMEOUT) : 'done';
+          if (outcome !== 'done') {
+            const p = getPendingReview(chatId);
+            if (p) upsertPendingReview({ ...p, retryAt: Date.now() + 15 * 60_000, attempts: p.attempts });
+            addEvent(chatId, 'run', { phase: outcome === 'stopped' ? 'stopped' : 'failed' }, { runId: ctx.runId });
+            return;
+          }
+        }
+        deletePendingReview(chatId);
+        if (!ctx.stopped) await finishGitRun(h, originalRequest);
+        addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
+        return;
+      }
+      const round = (ledger ? ledger.reviewsConsumed + 1 : pending.round) as 1 | 2;
+      h.status(`Retrying the required review (round ${round}, attempt ${pending.attempts + 1}) against the same result.`);
+      const outcome = await runReviewPhase(h, originalRequest, {
+        round,
+        steering: ledger && pending.userText.trim() !== ledger.originalRequest.trim() ? pending.userText : undefined,
         subject: pending.subject,
         before: captureWorktree(h.project.rootPath),
         startDir: h.project.rootPath,
@@ -364,7 +446,7 @@ export function startReviewRetry(chatId: string): Promise<void> | null {
       });
       if (outcome === 'done') {
         deletePendingReview(chatId);
-        if (!ctx.stopped) await finishGitRun(h, pending.userText);
+        if (!ctx.stopped) await finishGitRun(h, originalRequest); // the checkpoint names the task
       } else if (outcome === 'failed' || outcome === 'stopped') {
         // an interrupted or failed retry must not hot-loop the sweeper: the wait
         // stands, but the next attempt backs off instead of firing immediately
@@ -432,7 +514,7 @@ type ReviewResult =
   | { failure: string }                                             // any other Reviewer failure
   | { stopped: true };
 
-async function review(h: RunHandle, userText: string, subject: ReviewSubject, round: number): Promise<ReviewResult> {
+async function review(h: RunHandle, originalRequest: string, subject: ReviewSubject, round: number, steering?: string): Promise<ReviewResult> {
   h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is checking the repaired result…');
   const cfg = h.settings.roles.reviewer;
   const evidence = subject.kind === 'changes'
@@ -442,7 +524,9 @@ async function review(h: RunHandle, userText: string, subject: ReviewSubject, ro
     })
     : renderPrompt('reviewer.answer_section', { builder_answer: capText(subject.answer, ANSWER_CAP) });
   const prompt = [
-    renderPrompt('reviewer.request_section', { original_request: userText }),
+    renderPrompt('reviewer.request_section', { original_request: originalRequest }),
+    // a continuation is context the Reviewer should know about, never the request
+    ...(steering && steering.trim() !== originalRequest.trim() ? [renderPrompt('reviewer.continuation_section', { continuation: steering })] : []),
     evidence,
     renderPrompt('reviewer.round_section', { review_round: round, max_review_rounds: MAX_REVIEW_ROUNDS }),
     getPrompt('reviewer.output_format'),
@@ -474,7 +558,14 @@ async function review(h: RunHandle, userText: string, subject: ReviewSubject, ro
 
   const { verdict, items } = parseVerdict(result.text);
   const payload: FindingsPayload = { verdict, round, items };
-  const ev = addEvent(h.chat.id, 'findings', payload, { runId: h.ctx.runId });
+  // the verdict and the round it consumed are one fact: either both are
+  // durable or neither is, so no crash can leave a review spent but unrecorded
+  // (or recorded but unspent)
+  const ev = db.transaction(() => {
+    const e = addEvent(h.chat.id, 'findings', payload, { runId: h.ctx.runId });
+    recordReview(h.chat.id, round, verdict, revisionOf(revisionHash(h.project.rootPath, captureWorktree(h.project.rootPath)), subject));
+    return e;
+  })();
   return { verdict, items, eventId: ev.id };
 }
 

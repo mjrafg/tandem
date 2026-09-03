@@ -7,6 +7,7 @@ import { broadcast } from '../sse';
 import { getAgentSnapshot } from '../agents/store';
 import { signalRunState } from '../observability/signals';
 import { getPendingWake } from './pendingWake';
+import { MAX_REVIEW_ROUNDS, getLedger } from '../engine/reviewLedger';
 
 /**
  * Persistence for the Project Director. Everything here is project-level
@@ -478,7 +479,10 @@ export function stateSnapshot(runId: string): string {
           ? `implementation done, required review NOT run (${s.reviewWait.reason}); retries automatically at ${new Date(s.reviewWait.retryAt).toISOString().slice(11, 16)} UTC — not complete, dependents stay blocked`
           : '',
         s.resultSummary ? `result: ${s.resultSummary.slice(0, 120)}` : '',
-        s.reviewVerdict ? `review: ${s.reviewVerdict}` : '',
+        // the task's durable review budget, so the Director never expects a
+        // round that the policy will not grant
+        (() => { const l = s.chatId ? getLedger(s.chatId) : null;
+          return l ? `reviews ${Math.min(l.reviewsConsumed, MAX_REVIEW_ROUNDS)}/${MAX_REVIEW_ROUNDS} spent${l.lastVerdict ? ` · last verdict: ${l.lastVerdict}` : ''}` : (s.reviewVerdict ? `review: ${s.reviewVerdict}` : ''); })(),
       ].filter(Boolean).join(' · ');
       lines.push(`  ${s.key} ${s.name} [${s.status}]${dep} — ${extras}`);
     }

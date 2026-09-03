@@ -773,7 +773,9 @@ export async function resumeSession(runId: string, key: string, note?: string): 
   const baseline = chatMaxSeq(session.chatId);
   patchSession(runId, key, { lastBaselineSeq: baseline });
   addEvent(session.chatId, 'user_message', { text });
-  void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true }));
+  // a resume continues the task that stands — its review budget and its
+  // original request stay with the task, never restart with this invocation
+  void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true, task: 'continue' }));
 }
 
 /**
@@ -1261,7 +1263,7 @@ async function resumeSessionWithTimeout(runId: string, key: string, note: string
   patchSession(runId, key, { lastBaselineSeq: baseline });
   addEvent(session.chatId, 'user_message', { text });
   const timeoutMs = Math.min(extraMinutes ?? DEFAULT_SESSION_TIMEOUT_MIN, MAX_SESSION_TIMEOUT_MIN) * 60_000;
-  void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true, timeoutMs }));
+  void monitorSession(runId, key, session.chatId, baseline, startRun(session.chatId, text, [], { review: true, timeoutMs, task: 'continue' }));
 }
 
 // ---------------------------------------------------------------- pause / resume
@@ -1361,6 +1363,17 @@ async function driveRestartWake(runId: string, observation: string): Promise<voi
   // stuck, so hand it back with the reason attached.
   if (getRunRaw(runId)?.state !== 'RESUMING') return;
   if (sessionsByStatus(runId, ['running']).length > 0) return;
+  // A session waiting for its review retry is work in progress too: the sweeper
+  // completes it — but only for a RUNNING/RESUMING/PLANNING project, so pausing
+  // here would park exactly the session the restart interrupted. The Director
+  // was right to launch nothing (relaunching it is refused); the project must
+  // simply be running for the retry to be delivered.
+  const waiting = sessionsByStatus(runId, ['awaiting_review']).filter((s) => s.chatId && getPendingReview(s.chatId));
+  if (waiting.length > 0) {
+    setRunState(runId, 'RUNNING', `Resumed after the restart — ${waiting.map((s) => s.key).join(', ')} waiting for the Reviewer; the retry runs when due`);
+    refreshLiveBlock(runId);
+    return;
+  }
   // A provider limit is not "nothing happened" — the turn is persisted and the
   // sweeper delivers it when the limit lifts. Pausing here would strand it,
   // because the sweeper leaves paused projects alone, and the manual Resume

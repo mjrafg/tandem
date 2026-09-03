@@ -332,12 +332,13 @@ function lastFindings(chatId: string, round: number): { eventId: string; items: 
  */
 function recordReviewWait(
   h: RunHandle, userText: string, round: 1 | 2, subject: ReviewSubject,
-  outage: { reason: string; retryAt: number; detail: string },
+  outage: { reason: string; retryAt: number; detail: string; transient?: boolean },
 ): PhaseOutcome {
-  upsertPendingReview({
+  const wait = upsertPendingReview({
     chatId: h.chat.id, round, userText, subject,
-    reason: outage.reason, detail: outage.detail, retryAt: outage.retryAt,
+    reason: outage.reason, detail: outage.detail, retryAt: outage.retryAt, transient: outage.transient,
   });
+  outage = { ...outage, retryAt: wait.retryAt };
   h.status(`Implementation complete — the required review could not run: ${outage.reason}. `
     + `Retry at ${fmtRetryAt(outage.retryAt)}. This result has NOT been reviewed and is not complete; `
     + 'work that depends on it stays blocked until the review succeeds.');

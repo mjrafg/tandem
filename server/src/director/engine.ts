@@ -135,8 +135,8 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
         const pending = queued.length > 0
           ? `${next.text}\n\n${renderPrompt('director.observation', { observations: queued.map((q) => q.text).join('\n') })}`
           : next.text;
-        upsertPendingWake({ runId, message: pending, reason: outage.reason, detail: outage.detail, retryAt: outage.retryAt });
-        addActivity(runId, 'state', `${outage.reason} — work is preserved; the Director picks this up again at ${fmtRetryAt(outage.retryAt)}`);
+        const wake = upsertPendingWake({ runId, message: pending, reason: outage.reason, detail: outage.detail, retryAt: outage.retryAt, transient: outage.transient });
+        addActivity(runId, 'state', `${outage.reason} — work is preserved; the Director picks this up again at ${fmtRetryAt(wake.retryAt)}`);
         broadcastRun(runId);
         break;
       }
@@ -371,8 +371,8 @@ async function processAfterTurn(runId: string): Promise<void> {
       // the policy cap and accept a plan the reviewer rejected twice, with two
       // real review rounds spent on a provider fault.
       patchRun(runId, { plan_review_round: round });
-      upsertPendingWake({ runId, message: findingsMessage, reason: planOutage.reason, detail: planOutage.detail, retryAt: planOutage.retryAt });
-      addActivity(runId, 'state', `${planOutage.reason} — plan review round ${round} is re-offered at ${fmtRetryAt(planOutage.retryAt)}`);
+      const wake = upsertPendingWake({ runId, message: findingsMessage, reason: planOutage.reason, detail: planOutage.detail, retryAt: planOutage.retryAt, transient: planOutage.transient });
+      addActivity(runId, 'state', `${planOutage.reason} — plan review round ${round} is re-offered at ${fmtRetryAt(wake.retryAt)}`);
       return;
     }
     await processAfterTurn(runId); // the resubmission bumped state; continue the loop
@@ -421,8 +421,8 @@ async function processAfterTurn(runId: string): Promise<void> {
       // applyRecovery, which restarts a session directly
       pending.round = round;
       patchRun(runId, { pending_recovery: JSON.stringify(pending) });
-      upsertPendingWake({ runId, message: recoveryMessage, reason: recoveryOutage.reason, detail: recoveryOutage.detail, retryAt: recoveryOutage.retryAt });
-      addActivity(runId, 'state', `${recoveryOutage.reason} — the recovery decision for ${pending.sessionKey} is re-offered at ${fmtRetryAt(recoveryOutage.retryAt)}`);
+      const wake = upsertPendingWake({ runId, message: recoveryMessage, reason: recoveryOutage.reason, detail: recoveryOutage.detail, retryAt: recoveryOutage.retryAt, transient: recoveryOutage.transient });
+      addActivity(runId, 'state', `${recoveryOutage.reason} — the recovery decision for ${pending.sessionKey} is re-offered at ${fmtRetryAt(wake.retryAt)}`);
       return;
     }
     await processAfterTurn(runId);
@@ -908,13 +908,14 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     // limit lifts — that single wake is what restarts the project.
     upsertPendingWake({
       runId,
-      message: `Session ${key} could not continue because of a provider limit (${outage!.reason}); that limit has now lifted. `
+      message: `Session ${key} could not continue because the provider refused (${outage!.reason}); that condition has now lifted. `
         + `Its work on disk and its chat are intact and it is NOT a failure — nothing about the result was judged. `
         + `Resume it with resume_sessions (do not rebuild it from scratch), and continue the project. `
         + `Any other session paused by the same limit is in the same position.`,
       reason: outage!.reason,
       detail: outcome.errorText.slice(0, 2_000),
       retryAt: outage!.retryAt,
+      transient: outage!.transient,
     });
     broadcastRun(runId);
     return;

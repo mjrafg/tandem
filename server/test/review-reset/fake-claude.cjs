@@ -27,6 +27,24 @@ try { fs.appendFileSync(path.join(process.env.FAKE_STATE_DIR || '/tmp', 'claude-
 
 function ctxTokens() { return fs.existsSync(marker) ? 9100 : 42300; }
 
+// test hook: the Nth call of a role is refused exactly as the real CLI reported
+// an Anthropic overload — exit 0, a result with is_error and the API message
+const FAIL_TEXT = process.env.FAKE_CLAUDE_FAIL_TEXT
+  || 'API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com.';
+function countCall(role) {
+  const f = path.join(process.env.FAKE_STATE_DIR || '/tmp', `${role}-call-count`);
+  let n = 0; try { n = Number(fs.readFileSync(f, 'utf8')) || 0; } catch {}
+  n += 1; fs.writeFileSync(f, String(n)); return n;
+}
+function refuse() {
+  emit({ type: 'system', subtype: 'init', session_id: SID, model: 'fake-model' });
+  emit({ type: 'assistant', message: { content: [{ type: 'text', text: FAIL_TEXT }] } });
+  emit({ type: 'result', subtype: 'success', is_error: true, result: FAIL_TEXT, num_turns: 1, session_id: SID,
+    usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, iterations: [] },
+    modelUsage: { 'fake-model': { contextWindow: 1000000 } } });
+  process.exit(0);
+}
+
 if (prompt === '/context') {
   emit({ is_error: false, subtype: 'success', session_id: sid, num_turns: 0, total_cost_usd: 0,
     result: `## Context Usage\n\n**Model:** fake-model  \n**Tokens:** ${(ctxTokens() / 1000).toFixed(1)}k / 200k (${Math.round(ctxTokens() / 2000)}%)\n` });
@@ -76,6 +94,8 @@ async function runDirector() {
   const scriptFile = process.env.FAKE_DIRECTOR_SCRIPT;
   let script = [];
   try { script = JSON.parse(fs.readFileSync(scriptFile, 'utf8')); } catch {}
+  // a refused turn does not advance the script: the engine re-says it later
+  if (String(countCall('director')) === String(process.env.FAKE_DIRECTOR_FAIL_ON_TURN || '')) refuse();
   const stateFile = path.join(process.env.FAKE_STATE_DIR || '/tmp', `director-step-${process.env.TANDEM_CHAT_ID}`);
   let step = 0;
   try { step = Number(fs.readFileSync(stateFile, 'utf8')) || 0; } catch {}
@@ -100,6 +120,7 @@ async function runDirector() {
 
 // ------------------------------------------------- builder session behavior
 async function runBuilder() {
+  if (String(countCall('builder')) === String(process.env.FAKE_CLAUDE_FAIL_ON_CALL || '')) refuse();
   emit({ type: 'system', subtype: 'init', session_id: SID, model: 'fake-model' });
   // exercise the session-naming tool exactly like a real Builder would: only
   // when the engine served it (env flag) and the prompt carries a NAMEME marker

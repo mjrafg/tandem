@@ -16,6 +16,7 @@
  * provider's own error message, bounded, and already visible in the chat.
  */
 import { db } from '../db';
+import { transientRetryAt } from '../engine/reviewWait';
 
 export interface PendingWake {
   runId: string;
@@ -59,9 +60,11 @@ export function getPendingWake(runId: string): PendingWake | null {
  * keeps BOTH messages and the LATER reset — nothing may be dropped, and the run
  * cannot proceed until the last limit has lifted.
  */
-export function upsertPendingWake(p: Omit<PendingWake, 'attempts'>): PendingWake {
+export function upsertPendingWake(p: Omit<PendingWake, 'attempts'> & { transient?: boolean }): PendingWake {
   const now = Date.now();
   const existing = getPendingWake(p.runId);
+  // a provider that is down names no reset time: the Nth consecutive wake backs off
+  if (p.transient) p = { ...p, retryAt: Math.max(p.retryAt, transientRetryAt(existing ? existing.attempts + 1 : 1, now)) };
   const merged: PendingWake = existing
     ? {
       runId: p.runId,

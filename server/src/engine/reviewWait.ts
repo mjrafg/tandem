@@ -36,10 +36,12 @@ export function getPendingReview(chatId: string): PendingReview | null {
   };
 }
 
-export function upsertPendingReview(p: Omit<PendingReview, 'attempts'> & { attempts?: number }): PendingReview {
+export function upsertPendingReview(p: Omit<PendingReview, 'attempts'> & { attempts?: number; transient?: boolean }): PendingReview {
   const now = Date.now();
   const existing = getPendingReview(p.chatId);
   const attempts = p.attempts ?? (existing ? existing.attempts + 1 : 1);
+  // a provider that is down names no reset time: the Nth consecutive wait backs off
+  if (p.transient) p = { ...p, retryAt: Math.max(p.retryAt, transientRetryAt(attempts, now)) };
   db.prepare(`INSERT INTO pending_reviews (chat_id, round, user_text, subject, reason, detail, retry_at, attempts, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(chat_id) DO UPDATE SET round = excluded.round, user_text = excluded.user_text, subject = excluded.subject,
@@ -75,10 +77,29 @@ export function duePendingReviews(now = Date.now()): PendingReview[] {
 export interface ProviderOutage {
   reason: string;   // short label for humans and the Director
   retryAt: number;  // when to retry (provider-supplied, or a default backoff)
+  /**
+   * The provider was DOWN rather than out of budget (an overload, another 5xx,
+   * a dead connection). Equally temporary, but it names no reset time and can
+   * last an hour: retries start short and back off (transientRetryAt).
+   */
+  transient?: boolean;
 }
 
 /** default backoff when the provider names no reset time */
 const DEFAULT_RETRY_MS = 15 * 60_000;
+/** first retry after an overload / server error / dead connection */
+const TRANSIENT_RETRY_MS = 5 * 60_000;
+/** the backoff stops growing here — an incident that long is checked hourly */
+const TRANSIENT_RETRY_MAX_MS = 60 * 60_000;
+
+/**
+ * When to retry a transient outage on its Nth consecutive attempt:
+ * 5, 10, 20, 40, 60, 60… minutes. Bounded, self-clearing, and cheap while the
+ * provider keeps refusing — a refused call costs no tokens.
+ */
+export function transientRetryAt(attempts: number, now = Date.now()): number {
+  return now + Math.min(TRANSIENT_RETRY_MS * 2 ** Math.max(0, attempts - 1), TRANSIENT_RETRY_MAX_MS);
+}
 /** a stated reset already this far behind us is a rounding race, not yesterday */
 const JUST_MISSED_MS = 20 * 60_000;
 /** how soon to look again after such a near miss */
@@ -87,11 +108,29 @@ const NEAR_RETRY_MS = 3 * 60_000;
 const RESET_GRACE_MS = 60_000;
 
 /**
- * Is this Reviewer failure a TEMPORARY provider condition (usage limit, quota,
- * rate limit)? This parses the provider's error contract — like parseVerdict,
- * it is protocol handling, not intent detection. Anything not clearly in the
- * quota family (model errors, auth errors, crashes, timeouts) returns null and
- * keeps its existing handling.
+ * A provider that is DOWN rather than out of budget: an overload (529),
+ * another 5xx, or a connection that died mid-call. The one incident that
+ * stalled a project was an Anthropic "529 Overloaded" hour — three sessions
+ * and three Director turns died of it, none was classified as an outage, and
+ * nothing retried. Matched against the provider's own error contract: status
+ * codes only next to "API Error"/"status"/"HTTP", never `file.js:503:7` or a
+ * number in the model's prose.
+ */
+function classifyTransient(text: string): 'overload' | 'server error' | 'connection error' | null {
+  if (/\boverloaded\b|(?:API Error|status(?: code)?|HTTP)\D{0,5}529\b/i.test(text)) return 'overload';
+  if (/internal server error|bad gateway|service unavailable|gateway time-?out|server had an error while processing|temporarily unavailable|(?:API Error|status(?: code)?|HTTP)\D{0,5}50[0234]\b/i.test(text)) return 'server error';
+  if (/ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|stream disconnected|TypeError: fetch failed/i.test(text)) return 'connection error';
+  return null;
+}
+
+/**
+ * Is this failure a TEMPORARY provider condition? Two families: out of budget
+ * (usage limit, quota, rate limit — the provider names when it lifts) and down
+ * (overload, 5xx, dead connection — it does not; see classifyTransient). This
+ * parses the provider's error contract — like parseVerdict, it is protocol
+ * handling, not intent detection. Anything not clearly in either family (model
+ * errors, auth errors, crashes, timeouts) returns null and keeps its existing
+ * handling.
  */
 export function classifyProviderOutage(errorText: string | undefined, now = Date.now(), provider = 'Codex'): ProviderOutage | null {
   const text = (errorText ?? '').slice(0, 4_000);
@@ -100,7 +139,10 @@ export function classifyProviderOutage(errorText: string | undefined, now = Date
   // or another number that happens to contain it. "session limit" is Claude
   // Code's wording for the same condition ("You've hit your session limit").
   const quota = /usage[ _-]?limit|rate[ _-]?limit|session[ _-]?limit|\bquota\b|too many requests|(?<![:\d.])429(?![:\d])|usage_limit_reached|rate_limit_exceeded/i;
-  if (!quota.test(text)) return null;
+  if (!quota.test(text)) {
+    const down = classifyTransient(text);
+    return down ? { reason: `${provider} ${down}`, retryAt: now + TRANSIENT_RETRY_MS, transient: true } : null;
+  }
 
   const kind = /session[ _-]?limit/i.test(text) ? 'session limit'
     : /rate[ _-]?limit/i.test(text) && !/usage/i.test(text) ? 'rate limit'

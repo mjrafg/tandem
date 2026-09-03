@@ -2,6 +2,7 @@
 # Deterministic reproduction of the review-budget reset and the restart-during-review-wait pause.
 # Overridable: DIST PORT LABEL FAKE_FINDINGS_FOR SETTLE RESUME_AFTER_RESTART. Work dirs live under ./.work (gitignored).
 #   run.sh SCENARIO   where SCENARIO ∈ NONE | AFTER_R1 | DURING_R2 | DURING_FINAL | DOUBLE_FINAL | QUOTA_R2 | QUOTA_CRASH_FINAL | QUOTA_WAIT_RESTART
+#                                     | OVERLOAD_BUILDER (Builder call 1 refused with a 529) | OVERLOAD_DIRECTOR (Director turn 1 refused with a 529)
 # Each scenario boots an isolated Tandem with fake CLIs, drives ONE Director session through
 # Round 1 (FINDINGS) → repair → Round 2 (FINDINGS) → final repair, kills the server at the
 # named boundary, restarts it, lets auto-resume + the scripted Director resume the session,
@@ -26,7 +27,8 @@ QUOTA_ON=""; case "$SCENARIO" in QUOTA_R2|QUOTA_CRASH_FINAL|QUOTA_WAIT_RESTART) 
 ENV=(DATA_DIR="$DD" PORT=$PORT HOST=127.0.0.1 TANDEM_INTERNAL_TOKEN=devtoken TANDEM_REVIEW_SWEEP_MS=2000
      TANDEM_CLAUDE_BIN="$RR/fake-claude.cjs" TANDEM_CODEX_BIN="$RR/fake-codex.cjs"
      FAKE_STATE_DIR="$STATE" FAKE_DIRECTOR_SCRIPT="$RR/dscript.json" FAKE_BUILDER_RECIPES="$RECIPES"
-     FAKE_CODEX_SLEEP_ON_CALL="$SLEEP_ON" FAKE_CODEX_QUOTA_ON_CALL="$QUOTA_ON" FAKE_FINDINGS_FOR="${FAKE_FINDINGS_FOR:-2}")
+     FAKE_CODEX_SLEEP_ON_CALL="$SLEEP_ON" FAKE_CODEX_QUOTA_ON_CALL="$QUOTA_ON" FAKE_FINDINGS_FOR="${FAKE_FINDINGS_FOR:-2}"
+     FAKE_CLAUDE_FAIL_ON_CALL="$([ "$SCENARIO" = OVERLOAD_BUILDER ] && echo 1)" FAKE_DIRECTOR_FAIL_ON_TURN="$([ "$SCENARIO" = OVERLOAD_DIRECTOR ] && echo 1)")
 boot(){ env "${ENV[@]}" node "$DIST" >> "$DD/server.log" 2>&1 & echo $! > "$DD/pid"
         for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && return 0; sleep 0.5; done; echo "boot failed"; exit 1; }
 stop(){ kill -9 "$(cat "$DD/pid")" 2>/dev/null; sleep 1; }
@@ -49,6 +51,11 @@ echo "== project chat $PCHAT — kicking the Director"
 KICK=$(curl -s -b "$CJ" -H 'content-type: application/json' -d '{"text":"Build the RR demo project."}' "http://127.0.0.1:$PORT/api/chats/$PCHAT/messages")
 echo "== kick response: ${KICK:0:200}"
 
+# a refused provider call leaves a persisted wake; press the Retry button the way an operator would
+expedite(){ echo "== waiting for the persisted wake"; waitfor "SELECT COUNT(*) FROM pending_wakes" 60 || { echo "no wake was persisted"; stop; exit 1; }
+            q "SELECT reason || ' @ ' || datetime(retry_at/1000,'unixepoch') FROM pending_wakes" | sed 's/^/== wake: /'
+            sleep 2; RUNID=$(q "SELECT id FROM project_runs"); curl -s -b "$CJ" -X POST "http://127.0.0.1:$PORT/api/project-runs/$RUNID/retry-reviews" | head -c 120; echo; }
+[ "$SCENARIO" = OVERLOAD_DIRECTOR ] && expedite
 SESS="SELECT chat_id FROM pd_sessions WHERE key='S1.1' AND chat_id IS NOT NULL"
 waitfor "$SESS" 60 || { echo "session never launched"; stop; exit 1; }
 SCHAT=$(q "$SESS"); echo "== session chat $SCHAT"
@@ -65,12 +72,14 @@ case "$SCENARIO" in
   DURING_FINAL) crash_at "final repair in flight (after r2)"   "$F2" 3 ;;
   DOUBLE_FINAL) crash_at "final repair in flight (after r2)"   "$F2" 3 ;;
   QUOTA_R2) echo "== no crash: round 2 is refused by a usage limit, the wait must persist and retry at round 2" ;;
+  OVERLOAD_BUILDER) echo "== no crash: the Builder's first call is refused with a 529; the session must pause and a wake must persist"; expedite ;;
+  OVERLOAD_DIRECTOR) ;;
   QUOTA_WAIT_RESTART) crash_at "review wait recorded, retry not yet due" "SELECT COUNT(*) FROM pending_reviews WHERE chat_id='$SCHAT'" 2 ;;
   QUOTA_CRASH_FINAL) crash_at "retry path: final repair in flight (after the retried r2)" "$F2" 3 ;;
   NONE) ;;
 esac
 # only a crashed server is restarted (QUOTA_R2 never crashes; a second boot on a live port is a zombie)
-if [ "$SCENARIO" != NONE ] && [ "$SCENARIO" != QUOTA_R2 ]; then
+if [ "$SCENARIO" != NONE ] && [ "$SCENARIO" != QUOTA_R2 ] && [ "$SCENARIO" != OVERLOAD_BUILDER ] && [ "$SCENARIO" != OVERLOAD_DIRECTOR ]; then
   echo "== restart #1"; boot
   if [ "$SCENARIO" = DOUBLE_FINAL ]; then
     # crash again while the CONTINUATION builder is working (its recipe sleeps 12s)

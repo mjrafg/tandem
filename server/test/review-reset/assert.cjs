@@ -50,5 +50,16 @@ commits.forEach((c) => { if (/interrupted|Continue exactly/i.test(c)) fails.push
 console.log(`  checkpoint commits: ${commits.length ? commits.map(c => JSON.stringify(c.slice(0, 70))).join(' ; ') : '(none)'}`);
 // I9 — a completed review records the revision it accepted, so a replay can be deduplicated
 if (findings.length > 0 && (!ledger || !ledger.reviewed_revision)) fails.push('I9 ledger has no reviewed_revision after a review');
+// I10 — an overload is a wait, not a failure: the wake was persisted and consumed, the session was never failed
+if (scenario.startsWith('OVERLOAD')) {
+  const runId = db.prepare("SELECT run_id FROM pd_sessions WHERE chat_id=?").get(schat).run_id;
+  const acts = db.prepare("SELECT text FROM pd_activity WHERE run_id=? ORDER BY ts").all(runId).map((a) => a.text);
+  const wakesLeft = db.prepare("SELECT COUNT(*) c FROM pending_wakes WHERE run_id=?").get(runId).c;
+  const expect = scenario === 'OVERLOAD_BUILDER' ? /S1\.1 hit the Claude overload — work preserved/ : /Claude overload — work is preserved; the Director picks this up again/;
+  if (!acts.some((t) => expect.test(t))) fails.push(`I10 no activity line recorded the overload as a wait (${expect})`);
+  if (acts.some((t) => /^S1\.1 failed/.test(t))) fails.push('I10 the overload was recorded as a session FAILURE');
+  if (wakesLeft > 0) fails.push('I10 a pending wake was left behind');
+  console.log(`  overload activity: ${acts.filter((t) => /overload/i.test(t)).map((t) => JSON.stringify(t.slice(0, 90))).join(' ; ') || '(none)'}`);
+}
 console.log(fails.length ? `\nFAIL\n  - ${fails.join('\n  - ')}` : '\nPASS — all invariants hold');
 process.exit(fails.length ? 1 : 0);

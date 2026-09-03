@@ -63,7 +63,7 @@ const TOOLS = [
   },
   {
     name: 'browser_screenshot',
-    description: 'Capture a screenshot of the current page. You receive the image for visual inspection, and it is stored in the chat timeline for the user. fullPage captures beyond the viewport.',
+    description: 'Capture a screenshot of the current page. You receive the image for visual inspection, and it is stored in the chat timeline for the user \u2014 you never need to save it yourself, and never need to read it back with Read. fullPage captures beyond the viewport.',
     inputSchema: { type: 'object', properties: { fullPage: { type: 'boolean' } } },
   },
   {

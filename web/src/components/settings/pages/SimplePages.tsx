@@ -66,6 +66,7 @@ export function ContextPage() {
         <div className="grid grid-cols-1 gap-x-5 gap-y-3.5 sm:grid-cols-2">
           <Field label="Warning threshold" hint="% of provider window"><Num value={draft.context.warnPct} onChange={(v) => set((d) => { d.context.warnPct = v; })} /></Field>
           <Field label="Auto compact at" hint="% of provider window"><Num value={draft.context.compactPct} onChange={(v) => set((d) => { d.context.compactPct = v; })} /></Field>
+          <Field label="…or at" hint="tokens — whichever comes first. A % of a 1M window is far past the point where re-reading context dominates cost."><Num value={draft.context.compactMaxTokens} onChange={(v) => set((d) => { d.context.compactMaxTokens = v; })} /></Field>
           <Field label="Critical threshold" hint="% of provider window"><Num value={draft.context.critPct} onChange={(v) => set((d) => { d.context.critPct = v; })} /></Field>
           <Field label="Recent context seeded on a new session" hint="tokens"><Num value={draft.context.preserveRecentTokens} onChange={(v) => set((d) => { d.context.preserveRecentTokens = v; })} /></Field>
         </div>

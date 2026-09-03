@@ -32,9 +32,23 @@ export function repoBusyBy(rootPath: string, exceptChatId: string): string | nul
 }
 
 const active = new Map<string, RunCtx>();
+/**
+ * Chats inside a provider-native compaction. A compaction is not a RunCtx —
+ * it registers no child and cannot be stopped — but it drives the SAME provider
+ * session for minutes (`/context`, `/compact`, `/context` again). Both workflow
+ * call sites launch it from a run's `finally`, i.e. AFTER releaseCtx, so
+ * without this the chat looks idle for the whole compaction and the next turn
+ * would resume the same session id concurrently. That was survivable while
+ * auto-compaction was off and its trigger unreachable; it is the normal
+ * end-of-run path now.
+ */
+const compacting = new Set<string>();
+
+export function beginCompaction(chatId: string): void { compacting.add(chatId); }
+export function endCompaction(chatId: string): void { compacting.delete(chatId); }
 
 export function isRunning(chatId: string): boolean {
-  return active.has(chatId);
+  return active.has(chatId) || compacting.has(chatId);
 }
 
 export function activeCtx(chatId: string): RunCtx | undefined {

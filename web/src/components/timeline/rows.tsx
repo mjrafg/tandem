@@ -119,7 +119,9 @@ export function ReadGroupRow({ events }: { events: ChatEvent[] }) {
         {reads.map((r, i) => (
           <div key={i} className="flex items-baseline justify-between gap-3 py-[2px]">
             <span className="mono min-w-0 truncate text-[12px] text-mut">{r.path}</span>
-            {r.lines != null && <span className="shrink-0 text-[11px] tabular-nums text-dim">{r.lines} lines</span>}
+            {r.error
+              ? <span className="shrink-0 text-[11px] text-warn" title={r.error}>not read</span>
+              : r.lines != null && <span className="shrink-0 text-[11px] tabular-nums text-dim">{r.lines} lines</span>}
           </div>
         ))}
       </div>

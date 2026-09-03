@@ -63,7 +63,7 @@ export const PROMPT_DEFS: PromptDef[] = [
     description: 'Explains the internal browser capability to the Builder.',
     group: 'builder',
     roles: ['builder', 'final repair'],
-    default: 'A real internal browser (headless Chromium) is available through the browser_* tools: open any URL including localhost and file://, inspect page structure, click, type, resize the viewport to any dimensions, read the console, and take screenshots you can see. Use it whenever actually rendering or driving a page would help; skip it when it would not.',
+    default: 'A real internal browser (headless Chromium) is available through the browser_* tools: open any URL including localhost and file://, inspect page structure, click, type, resize the viewport to any dimensions, read the console, and take screenshots you can see. Use it whenever actually rendering or driving a page would help; skip it when it would not. Two things about images: browser_screenshot already shows you the image and already stores it for the user, so never save a screenshot and then read the file back \u2014 that puts the same picture in the conversation twice. And when you write image files as deliverable evidence, reference them by path; do not open them with Read unless you genuinely need to look at one. Every image you open stays in this session\'s context and is re-read on every later step, so a single full-resolution screenshot can cost more than all the code you write.',
   },
   {
     key: 'builder.deploy_guardrail',

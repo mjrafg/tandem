@@ -467,7 +467,19 @@ const handlers: Record<string, Handler> = {
 
   async browser_screenshot(inst, args) {
     await ensurePage(inst);
-    const buf = await inst.page.screenshot({ type: 'jpeg', quality: 80, fullPage: !!args.fullPage, timeout: 15_000 });
+    // `scale: 'css'` pins the capture to CSS pixels, so a deviceScaleFactor of
+    // 2 or 3 no longer multiplies the image by 4x or 9x. A screenshot is read
+    // once by the model but then re-read from cache on EVERY later request in
+    // the session, so its size is paid hundreds of times over — a full-page
+    // capture, which is unbounded in height, is compressed harder for that
+    // reason. Visual verification does not need the extra bytes.
+    const buf = await inst.page.screenshot({
+      type: 'jpeg',
+      quality: args.fullPage ? 55 : 70,
+      scale: 'css',
+      fullPage: !!args.fullPage,
+      timeout: 15_000,
+    });
     const info = await pageInfo(inst);
     let file: string | undefined;
     if (shotsDir && inst.chatId) {
@@ -494,7 +506,9 @@ const handlers: Record<string, Handler> = {
     await ensurePage(inst);
     const width = Math.min(Math.max(Math.round(args.width), 200), 4000);
     const height = Math.min(Math.max(Math.round(args.height), 200), 4000);
-    const newDsr = args.deviceScaleFactor ? Math.min(Math.max(Number(args.deviceScaleFactor), 1), 4) : inst.dsr;
+    // capped at 2: screenshots are captured at CSS scale anyway, and a higher
+    // factor only inflates what every later request re-reads
+    const newDsr = args.deviceScaleFactor ? Math.min(Math.max(Number(args.deviceScaleFactor), 1), 2) : inst.dsr;
     inst.viewport = { width, height };
     let note = '';
     if (newDsr !== inst.dsr) {

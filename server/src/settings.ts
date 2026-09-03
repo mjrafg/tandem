@@ -24,7 +24,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
     warnPct: 70,
     compactPct: 75,
     critPct: 88,
-    autoCompact: false,
+    // A percentage of a window that grew from 200k to 1M silently went inert:
+    // 75% of 1M is 750k, and no session ever reached it, so compaction never
+    // ran once. Cost is close to linear in context size x request count, so the
+    // real ceiling is expressed in TOKENS and whichever limit trips first wins.
+    compactMaxTokens: 200_000,
+    autoCompact: true,
     preserveRecentTokens: 12_000,
   },
 };
@@ -46,6 +51,32 @@ export function resolveDirectorRole(s: AppSettings): { model: string; effort: Ef
 }
 
 // All built-in instruction text lives in prompts.ts (Admin → AI Prompts).
+
+/**
+ * One-time upgrade for installations that predate the token ceiling.
+ *
+ * `autoCompact` used to mean "compact at compactPct% of the window". That was
+ * written when windows were 200k, and silently became a 750k trigger when they
+ * grew to 1M — past anything a session ever reached, so compaction never ran
+ * once and the switch was inert whichever way it was set. It now means "compact
+ * at compactMaxTokens, or compactPct%, whichever comes first", which is a
+ * different and actually reachable promise.
+ *
+ * Turning a switch back on that was never doing anything is not overriding a
+ * working preference. It happens exactly once, keyed on the absence of the new
+ * field, and the admin can turn it straight back off — that choice then sticks,
+ * because compactMaxTokens is present from then on.
+ */
+export function migrateContextDefaults(): void {
+  const stored = kvGet<AppSettings>('settings');
+  if (!stored?.context || stored.context.compactMaxTokens !== undefined) return;
+  const merged = getSettings();
+  merged.context.compactMaxTokens = DEFAULT_SETTINGS.context.compactMaxTokens;
+  merged.context.autoCompact = true;
+  kvSet('settings', merged);
+  console.log(`[tandem] context: auto-compact enabled at ${merged.context.compactMaxTokens} tokens `
+    + `(the old percentage trigger sat above any reachable context and never fired)`);
+}
 
 export function getSettings(): AppSettings {
   const stored = kvGet<AppSettings>('settings');
@@ -101,6 +132,7 @@ export function putSettings(patch: Partial<AppSettings>): AppSettings {
   c.compactPct = clamp(c.compactPct, 10, 99);
   c.critPct = clamp(c.critPct, 10, 99);
   c.preserveRecentTokens = clamp(c.preserveRecentTokens, 0, 200_000);
+  c.compactMaxTokens = clamp(c.compactMaxTokens, 50_000, 2_000_000);
   kvSet('settings', merged);
   return merged;
 }

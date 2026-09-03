@@ -155,7 +155,9 @@ export function computeUsage(chat: Chat): ContextUsage {
     usedTokens = p.response!.usage!.contextTokens!;
     model = p.model;
     source = 'provider';
-    anchorSeq = lastCall.seq;
+    // the turn's own tool events sit above its ai_call row but are already
+    // inside contextTokens — anchor at completion so they are not counted twice
+    anchorSeq = p.completedSeq ?? lastCall.seq;
   }
 
   let pendingTokens = 0;
@@ -179,8 +181,27 @@ export function computeUsage(chat: Chat): ContextUsage {
     windowTokens,
     pendingTokens,
     pct: total != null && windowTokens ? Math.round((total / windowTokens) * 100) : null,
+    total,
     source,
   };
+}
+
+/**
+ * Should this session compact now? Two limits, whichever trips first.
+ *
+ * The percentage alone was a fixed fraction of a moving target: it was written
+ * when provider windows were 200k (75% = a 150k trigger) and quietly became a
+ * 750k trigger when they grew to 1M — above anything a session ever reached, so
+ * it never fired once. The absolute ceiling is what actually bounds cost, since
+ * every request re-reads the whole context.
+ */
+export function shouldAutoCompact(
+  usage: { pct: number | null; total: number | null },
+  ctx: { autoCompact: boolean; compactPct: number; compactMaxTokens: number },
+): boolean {
+  if (!ctx.autoCompact) return false;
+  if (usage.total != null && ctx.compactMaxTokens > 0 && usage.total >= ctx.compactMaxTokens) return true;
+  return usage.pct != null && usage.pct >= ctx.compactPct;
 }
 
 /**

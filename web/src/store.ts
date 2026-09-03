@@ -239,6 +239,10 @@ function openStream(): void {
     // catch up on anything missed while disconnected
     const s = useStore.getState();
     void s.refreshAll();
+    // settings are fetched once per page load, so a tab open across a server
+    // upgrade keeps a pre-upgrade copy and would write it back on the next save,
+    // silently reverting anything the upgrade changed
+    void s.loadSettings();
     for (const [chatId, isLoaded] of Object.entries(s.loaded)) {
       if (isLoaded) void s.loadChat(chatId);
     }

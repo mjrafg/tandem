@@ -87,7 +87,7 @@ export function ContextMeter({ usage, onCompact }: { usage: ContextUsage | undef
               <Row k="Since last report" v={`+ ~${fmtTokens(usage.pendingTokens)} (estimate)`} />
             )}
             <Row k="Provider window" v={usage.windowTokens ? `${fmtTokens(usage.windowTokens)} tokens` : 'unknown'} />
-            {settings?.context.autoCompact && <Row k="Auto compact" v={`at ${settings.context.compactPct}%`} />}
+            {settings?.context.autoCompact && <Row k="Auto compact" v={`at ${settings.context.compactPct}% or ${Math.round(settings.context.compactMaxTokens / 1000)}k tokens`} />}
             <div className="my-1.5 border-t border-linesoft" />
             <Row k="Source" v={usage.source === 'provider' ? providerName(usage.provider) : usage.source === 'estimated' ? 'estimated' : '—'} />
             {usage.model && <Row k="Model" v={usage.model} />}

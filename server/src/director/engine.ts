@@ -12,7 +12,7 @@ import { findOrCreateProject } from '../projectRoutes';
 import { runClaudeTurn } from '../engine/claude';
 import { runCodexReview } from '../engine/codex';
 import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, repoBusyBy, stopRun } from '../engine/run';
-import { computeUsage } from '../context';
+import { computeUsage, shouldAutoCompact } from '../context';
 import { performNativeCompaction } from '../engine/providerContext';
 import { releaseBrowsers } from '../engine/browserHost';
 import { parseVerdict, startReviewRetry, startRun } from '../engine/workflow';
@@ -196,8 +196,7 @@ async function directorAutoCompact(runId: string): Promise<void> {
     if (!chatId) return;
     const chat = getChat(chatId);
     if (!chat || isRunning(chatId)) return;
-    const usage = computeUsage(chat);
-    if (usage.pct == null || usage.pct < settings.context.compactPct) return;
+    if (!shouldAutoCompact(computeUsage(chat), settings.context)) return;
     if ((compactFailedAt.get(chatId) ?? 0) > Date.now() - COMPACT_RETRY_COOLDOWN) return;
     // the Project Chat's session belongs to the DIRECTOR (always claude-code),
     // so compaction targets the Director's model — not the Builder provider
@@ -989,7 +988,10 @@ function readOutcome(chatId: string, sinceSeq: number): Outcome {
     if (r.kind === 'error') {
       const text = `${p.message}${p.detail ? ` — ${p.detail}` : ''}`.slice(0, 400);
       if (FAIL_MESSAGES.has(p.message)) { failed = true; errorText = text; }
-      if (/timed out/i.test(text)) { timedOut = true; if (!errorText) errorText = text; }
+      // a compaction runs asynchronously in the same chat and reports its own
+      // failures; its "timed out" is the context tool's, not the session's, and
+      // must not turn a completed session into a timeout needing recovery
+      if (p.source !== 'context' && /timed out/i.test(text)) { timedOut = true; if (!errorText) errorText = text; }
     }
   }
   return { phase, failed, timedOut, summary: summary || errorText, reviewVerdict, errorText };

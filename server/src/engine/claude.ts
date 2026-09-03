@@ -5,6 +5,7 @@ import type { AiUsage, ChangedFile, ChatEvent, Effort } from '../../../shared/ty
 import { config, internalBase, shotsDir } from '../config';
 import {
   addEvent, appendAssistantText, beginAssistantMessage, finishAssistantMessage, updateEvent,
+  maxSeq,
 } from '../events';
 import { spawnStreaming } from './procs';
 import { recordModelWindow } from '../context';
@@ -72,6 +73,14 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     '--include-partial-messages',
     '--model', opts.model,
     '--permission-mode', 'bypassPermissions',
+    // Move the per-machine sections (cwd, env, memory paths, git status) out of
+    // the system prompt and into the first user message. Git status changes
+    // constantly inside a Builder session, and while it sits in the cached
+    // PREFIX every resumed turn invalidates the cache and rewrites the whole
+    // context at 1.25x instead of re-reading it at 0.1x. Cache writes were 26%
+    // of one audited project's entire spend. Applies with the default system
+    // prompt, which is what Tandem uses (it only appends).
+    '--exclude-dynamic-system-prompt-sections',
   ];
   if (opts.readOnly) {
     // deny-list beats bypassPermissions (verified on CLI 2.1.233); without the
@@ -82,6 +91,22 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   }
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
   args.push('--append-system-prompt', systemAppendix);
+
+  // Keep oversized images out of the context. An image is read once but re-read
+  // from cache on every later request in the session, so one full-resolution
+  // screenshot can outweigh all the code a session writes. The guard refuses
+  // only large images, and fails open on any error.
+  const guardScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'hook-read-guard.cjs');
+  if (fs.existsSync(guardScript)) {
+    args.push('--settings', JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          matcher: 'Read',
+          hooks: [{ type: 'command', command: `${process.execPath} ${guardScript}` }],
+        }],
+      },
+    }));
+  }
 
   let mcpConfigFile: string | null = null;
   if (opts.withTandemTools) {
@@ -245,6 +270,11 @@ export async function runClaudeTurn(h: RunHandle, opts: {
           usage = {
             inputTokens: (ev.usage.input_tokens ?? 0) + (ev.usage.cache_read_input_tokens ?? 0) + (ev.usage.cache_creation_input_tokens ?? 0),
             outputTokens: ev.usage.output_tokens ?? 0,
+            // kept apart: these three differ in price by 12.5x, and the summed
+            // figure above cannot tell an expensive call from a cheap one
+            freshInputTokens: ev.usage.input_tokens ?? 0,
+            cacheWriteTokens: ev.usage.cache_creation_input_tokens ?? 0,
+            cacheReadTokens: ev.usage.cache_read_input_tokens ?? 0,
           };
           // the FINAL turn's tokens describe the session's current context size;
           // the cumulative numbers above describe what the call consumed
@@ -294,6 +324,9 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       TANDEM_CHAT_ID: h.chat.id,
       TANDEM_INTERNAL_TOKEN: config.internalToken,
       TANDEM_SHOTS_DIR: shotsDir,
+      // the read guard must never refuse an image the user deliberately
+      // attached to the conversation — that is the whole point of attaching it
+      TANDEM_ATTACHMENTS_DIR: path.join(config.dataDir, 'attachments'),
       TANDEM_BROWSER_ROLE: opts.role,
       TANDEM_ROLE: opts.role,
       TANDEM_TOOL_TEXT: toolTextEnv(),
@@ -320,6 +353,8 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   updateEvent(aiCall.id, {
     status: stopped ? 'stopped' : ok ? 'done' : 'failed',
     durationMs,
+    // everything this turn produced is already inside the reported context
+    completedSeq: maxSeq(h.chat.id),
     response: resultText || usage ? { text: resultText, usage } : undefined,
     cli: { command: cliShown, cwd: opts.cwd, exitCode: proc.exitCode },
     ...(error ? { error } : {}),
@@ -442,8 +477,14 @@ function resolveToolResult(pending: { eventId: string; kind: string; startedAt: 
       status: block.is_error ? 'failed' : 'done',
     });
   } else if (pending.kind === 'file_read') {
-    const lines = text ? text.split('\n').length : undefined;
-    if (lines) updateEvent(pending.eventId, { lines });
+    // a refused read (permission hook, missing file) returns is_error with the
+    // reason as its text — recording only a line count would show it as a
+    // successful read of a file the model never actually saw
+    if (block.is_error) updateEvent(pending.eventId, { error: text.slice(0, 400) || 'Read was refused.' });
+    else {
+      const lines = text ? text.split('\n').length : undefined;
+      if (lines) updateEvent(pending.eventId, { lines });
+    }
   } else if (pending.kind === 'search') {
     const matches: { path: string; line: number; preview: string }[] = [];
     for (const line of text.split('\n')) {

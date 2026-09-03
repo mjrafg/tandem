@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AttachmentMeta, Finding, FindingsPayload } from '../../../shared/types';
-import { computeUsage, recentConversation } from '../context';
+import { computeUsage, recentConversation, shouldAutoCompact } from '../context';
 import { getBuilderSession, getChat, getEvent, getProject, setBuilderSession } from '../db';
 import { addEvent, updateEvent } from '../events';
 import { getSettings } from '../settings';
@@ -554,15 +554,21 @@ function latestCompactionSummary(h: RunHandle): string | null {
  * orchestration: the provider that owns the session compacts its own context.
  * Runs only when the meter has a real provider-reported percentage.
  */
+/** a failed compaction backs off instead of re-erroring after every run */
+const compactFailedAt = new Map<string, number>();
+const COMPACT_RETRY_COOLDOWN = 15 * 60_000;
+
 async function maybeAutoCompact(chatId: string): Promise<void> {
   try {
     const settings = getSettings();
     if (!settings.context.autoCompact) return;
     const chat = getChat(chatId);
     if (!chat || isRunning(chatId)) return;
-    const usage = computeUsage(chat);
-    if (usage.pct == null || usage.pct < settings.context.compactPct) return;
-    await performNativeCompaction(chat, 'auto'); // emits its own compaction/error events
+    if (!shouldAutoCompact(computeUsage(chat), settings.context)) return;
+    if ((compactFailedAt.get(chatId) ?? 0) > Date.now() - COMPACT_RETRY_COOLDOWN) return;
+    const outcome = await performNativeCompaction(chat, 'auto'); // emits its own compaction/error events
+    if (outcome.ok) compactFailedAt.delete(chatId);
+    else compactFailedAt.set(chatId, Date.now());
   } catch (err) {
     addEvent(chatId, 'error', { message: 'Automatic native compaction failed', detail: String(err), source: 'context' });
   }

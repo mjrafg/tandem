@@ -6,6 +6,7 @@ import { getBuilderSession, getBuilderSessionProvider, getProject } from '../db'
 import { builderExecFor } from '../agents/exec';
 import { addEvent } from '../events';
 import { getSettings } from '../settings';
+import { beginCompaction, endCompaction } from './run';
 
 /**
  * Provider-native context management. Tandem never summarizes conversations
@@ -92,7 +93,29 @@ async function runNativeCompact(provider: Provider, ref: SessionRef): Promise<{ 
  * compact natively, read again, record one honest compaction event.
  * On failure: one honest error event, session untouched, nothing simulated.
  */
+/**
+ * A compaction drives the chat's provider session for minutes and registers no
+ * RunCtx, so without this the chat reads as idle throughout and the next turn
+ * would resume the SAME session id concurrently. Both workflow call sites
+ * launch it from a run's `finally` — after releaseCtx — which is exactly when
+ * that race is open. Marking the chat busy makes startRun, startReviewRetry,
+ * the sweeper and the manual /compact route all wait, as they already do for a
+ * live run. The lock is released on every exit path, including a throw.
+ */
 export async function performNativeCompaction(
+  chat: Chat,
+  reason: 'manual' | 'auto',
+  override?: { provider: Provider; model: string },
+): Promise<CompactOutcome> {
+  beginCompaction(chat.id);
+  try {
+    return await compactInner(chat, reason, override);
+  } finally {
+    endCompaction(chat.id);
+  }
+}
+
+async function compactInner(
   chat: Chat,
   reason: 'manual' | 'auto',
   /** compaction target when the chat's conversation is NOT the Builder's —

@@ -38,6 +38,11 @@ export function addEvent<K extends EventKind>(
   return event;
 }
 
+/** highest seq currently in a chat — the honest anchor for "since this turn" */
+export function maxSeq(chatId: string): number {
+  return (db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM events WHERE chat_id = ?').get(chatId) as any).s as number;
+}
+
 export function updateEvent(id: string, patch: Record<string, unknown>, opts: { silent?: boolean } = {}): ChatEvent | null {
   const existing = getEvent(id);
   if (!existing) return null;

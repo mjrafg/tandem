@@ -72,6 +72,8 @@ export interface ContextConfig {
   warnPct: number;
   /** % at which auto-compact (when enabled) triggers */
   compactPct: number;
+  /** hard token ceiling for auto-compact — whichever limit trips first wins */
+  compactMaxTokens: number;
   /** % at which the meter turns red */
   critPct: number;
   autoCompact: boolean;
@@ -209,7 +211,7 @@ export interface CommandPayload {
   status: StepStatus;
 }
 
-export interface FileReadPayload { path: string; lines?: number }
+export interface FileReadPayload { path: string; lines?: number; error?: string }
 
 export interface SearchMatch { path: string; line: number; preview: string }
 export interface SearchPayload { query: string; tool: string; matches: SearchMatch[] }
@@ -234,6 +236,16 @@ export interface AiUsage {
   contextTokens?: number;
   /** the provider-reported context window of the model that served this call */
   contextWindow?: number;
+  /**
+   * The components behind inputTokens, kept apart because they do NOT cost the
+   * same: a cache read is ~0.1x an input token and a cache write ~1.25x — a
+   * 12.5x spread. Summing them into inputTokens (as this record did until now)
+   * makes a bill dominated by cheap cache reads indistinguishable from one
+   * dominated by expensive writes, and hides where the money actually goes.
+   */
+  freshInputTokens?: number;
+  cacheWriteTokens?: number;
+  cacheReadTokens?: number;
 }
 
 export interface AiCallPayload {
@@ -248,6 +260,14 @@ export interface AiCallPayload {
   cli?: { command: string; cwd: string; exitCode: number | null };
   startedAt: number;
   durationMs?: number;
+  /**
+   * Highest chat seq at the moment this call FINISHED. The ai_call row is
+   * inserted when the turn starts, so its own seq sits below every tool event
+   * the turn then produced — and those are already inside the provider's
+   * reported contextTokens. Anchoring "pending activity" at the start therefore
+   * counted the same work twice and inflated the context meter.
+   */
+  completedSeq?: number;
   /** true while the engine is a simulation (milestone 1) */
   simulated?: boolean;
   error?: string;
@@ -407,6 +427,8 @@ export interface ContextUsage {
   pendingTokens: number;
   /** (usedTokens + pendingTokens) / windowTokens — null when either side is unknown */
   pct: number | null;
+  /** usedTokens + pendingTokens — the absolute size the next request will carry */
+  total: number | null;
   /** where usedTokens comes from: provider report · estimate · nothing yet */
   source: 'provider' | 'estimated' | 'none';
 }

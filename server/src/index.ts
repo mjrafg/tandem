@@ -12,6 +12,7 @@ import { registerIntegrationRoutes } from './integrationRoutes';
 import { registerAgentRoutes } from './agents/routes';
 import { registerObservabilityRoutes } from './observability/routes';
 import { seedAgents } from './agents/store';
+import { migrateContextDefaults } from './settings';
 import { recoverInterruptedRuns } from './engine/run';
 import { backfillModelWindows } from './context';
 import { recoverDirectorRuns } from './director/engine';
@@ -54,6 +55,7 @@ async function main(): Promise<void> {
   ensureUser();
   seedIfEmpty();
   seedAgents(); // once per installation; admin edits/deletions are never overwritten
+  migrateContextDefaults(); // once: the compaction trigger became reachable
   // repair chat rows first: this only touches the database, and everything
   // below assumes no chat is still flagged as running
   const interruptedChats = recoverInterruptedRuns();

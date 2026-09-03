@@ -25,7 +25,7 @@ const prompt = args[args.length - 1];
 const emit = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 // test hook: record every invocation's argv for assertion (BEFORE any stdin
 // read — slash-command spawns never write stdin and must not block here)
-try { fs.appendFileSync(path.join(process.env.FAKE_STATE_DIR || '/tmp', 'claude-argv.log'), JSON.stringify(args) + '\n'); } catch {}
+try { fs.appendFileSync(path.join(process.env.FAKE_STATE_DIR || '/tmp', 'claude-argv.log'), JSON.stringify({ argv: args, autoCompactWindow: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? null }) + '\n'); } catch {}
 
 function ctxTokens() { return fs.existsSync(marker) ? 9100 : 42300; }
 

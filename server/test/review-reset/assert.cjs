@@ -17,6 +17,8 @@ const prompts = log.split(/=====PROMPT kind=session n=\d+=====\n/).slice(1);
 const original = prompts.map(p => (/# The user's original request\n([^\n]*)/.exec(p) || [, ''])[1]);
 const steering = prompts.map(p => { const m = /# Later instructions in this session[^\n]*\n(?:[^\n]*\n)?([^\n]*)/.exec(p); return m ? m[1] : null; });
 const argv = (() => { try { return fs.readFileSync(`${stateDir}/claude-argv.log`, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)); } catch { return []; } })();
+// I11 — every Claude CLI call carried Tandem's compaction ceiling as the CLI's own auto-compact window (mid-run compaction)
+const noWindow = argv.filter((l) => l && typeof l === 'object' && !Array.isArray(l) && l.autoCompactWindow !== '200000' && !(l.argv || []).some((x) => x === '/context' || x === '/compact'));
 const continuationBuilders = calls.filter(r => r.p.role === 'builder' && rows.some(u => u.kind === 'user_message' && u.seq < r.seq && /interrupted/.test(u.p.text || '') && !rows.some(v => v.kind === 'user_message' && v.seq > u.seq && v.seq < r.seq)));
 
 console.log(`\n=========== ${scenario} ===========`);
@@ -61,5 +63,6 @@ if (scenario.startsWith('OVERLOAD')) {
   if (wakesLeft > 0) fails.push('I10 a pending wake was left behind');
   console.log(`  overload activity: ${acts.filter((t) => /overload/i.test(t)).map((t) => JSON.stringify(t.slice(0, 90))).join(' ; ') || '(none)'}`);
 }
+if (noWindow.length > 0) fails.push(`I11 ${noWindow.length} Claude CLI call(s) ran without CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000`);
 console.log(fails.length ? `\nFAIL\n  - ${fails.join('\n  - ')}` : '\nPASS — all invariants hold');
 process.exit(fails.length ? 1 : 0);

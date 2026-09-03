@@ -28,6 +28,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     // 75% of 1M is 750k, and no session ever reached it, so compaction never
     // ran once. Cost is close to linear in context size x request count, so the
     // real ceiling is expressed in TOKENS and whichever limit trips first wins.
+    // also handed to the Claude Code CLI as CLAUDE_CODE_AUTO_COMPACT_WINDOW, so
+    // the CLI compacts INSIDE a run as it nears this size (it keeps a ~16% buffer)
     compactMaxTokens: 200_000,
     autoCompact: true,
     preserveRecentTokens: 12_000,

@@ -316,6 +316,14 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: '',
       ...(EFFORT_THINKING[opts.effort] ? { MAX_THINKING_TOKENS: EFFORT_THINKING[opts.effort] } : {}),
+      // Tandem's own compaction runs BETWEEN runs (the CLI owns the session
+      // during one). Inside a run only the CLI can compact, and by default it
+      // does so near the model's full window — 1M for Opus, which a session
+      // never reaches, so one run could grow to 600k+ (S4.3: 649k). Handing it
+      // the same ceiling makes "compact at 200k" hold mid-run too: the CLI
+      // treats the window as this many tokens and compacts as it nears it.
+      ...(h.settings.context.autoCompact && h.settings.context.compactMaxTokens > 0
+        ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(h.settings.context.compactMaxTokens) } : {}),
       // read-only turns: git must not take optional locks in the ro-bound repo
       ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: '0' } : {}),
       // inherited by the tandem MCP stdio servers (workdir + browser)

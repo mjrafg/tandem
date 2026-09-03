@@ -15,10 +15,12 @@ const { spawn, execSync } = require('child_process');
 
 const args = process.argv.slice(2);
 const arg = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
-const marker = path.join(process.env.FAKE_STATE_DIR || '/tmp', 'fake-compacted');
 const SID = 'fake-sess-' + (process.env.TANDEM_CHAT_ID || '0001').slice(0, 8);
 const resumeIdx = args.indexOf('--resume');
 const sid = resumeIdx >= 0 ? args[resumeIdx + 1] : SID;
+// the "compacted" state is per provider SESSION, as it is for the real CLI —
+// one chat's compaction must not change what another chat's /context reports
+const marker = path.join(process.env.FAKE_STATE_DIR || '/tmp', `fake-compacted-${sid}`);
 const prompt = args[args.length - 1];
 const emit = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 // test hook: record every invocation's argv for assertion (BEFORE any stdin
@@ -51,8 +53,10 @@ if (prompt === '/context') {
   process.exit(0);
 }
 if (prompt === '/compact') {
-  fs.writeFileSync(marker, '1');
-  emit({ is_error: false, subtype: 'success', session_id: sid, num_turns: 0, total_cost_usd: 0.02, result: '' });
+  // FAKE_COMPACT_NOOP=1: answer success but leave the session exactly as it was —
+  // what the real CLI did under the 2026-09-03 overload
+  if (!process.env.FAKE_COMPACT_NOOP) fs.writeFileSync(marker, '1');
+  emit({ is_error: false, subtype: 'success', session_id: sid, num_turns: 0, total_cost_usd: 0.02, result: process.env.FAKE_COMPACT_RESULT || '' });
   process.exit(0);
 }
 let stdin = '';
@@ -148,9 +152,11 @@ async function runBuilder() {
   }
   const text = `Session work done (${did}).`;
   emit({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+  // FAKE_BIG_CONTEXT: report a context far past the auto-compact ceiling, for the Builder too
+  const bcr = process.env.FAKE_BIG_CONTEXT ? 800000 : 4000;
   emit({ type: 'result', subtype: 'success', is_error: false, result: text, num_turns: 1, session_id: SID,
-    usage: { input_tokens: 500, output_tokens: 60, cache_read_input_tokens: 4000, cache_creation_input_tokens: 100,
-      iterations: [{ input_tokens: 500, cache_read_input_tokens: 4000, cache_creation_input_tokens: 100, output_tokens: 60 }] },
+    usage: { input_tokens: 500, output_tokens: 60, cache_read_input_tokens: bcr, cache_creation_input_tokens: 100,
+      iterations: [{ input_tokens: 500, cache_read_input_tokens: bcr, cache_creation_input_tokens: 100, output_tokens: 60 }] },
     modelUsage: { 'fake-model': { contextWindow: 1000000 } } });
   process.exit(0);
 }

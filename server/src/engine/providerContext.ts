@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { classifyProviderOutage } from './reviewWait';
 import type { Chat, CompactionPayload, CompactOutcome, Provider } from '../../../shared/types';
 import { config } from '../config';
 import { computeUsage } from '../context';
@@ -72,10 +73,19 @@ export async function readNativeContext(provider: Provider, ref: SessionRef): Pr
  * `codex exec`; it compacts automatically inside long invocations, which is
  * its native behavior and needs no request from Tandem.
  */
-async function runNativeCompact(provider: Provider, ref: SessionRef): Promise<{ ok: boolean; error?: string }> {
+async function runNativeCompact(provider: Provider, ref: SessionRef): Promise<{ ok: boolean; error?: string; resultText?: string }> {
   if (provider === 'claude-code') {
     const res = await claudeSlash(ref, '/compact', 10 * 60_000);
-    return res.ok ? { ok: true } : { ok: false, error: res.error };
+    if (!res.ok) return { ok: false, error: res.error };
+    // The CLI's envelope says "success" even when the summarization call inside
+    // it was refused — during the 2026-09-03 overload two sessions "compacted"
+    // for minutes and came back the same size. The refusal, when it is
+    // reported at all, is in the result text.
+    const refused = classifyProviderOutage(res.resultText, Date.now(), 'Claude');
+    if (refused || /\bAPI Error\b|error (?:while )?compacting|compaction failed/i.test(res.resultText)) {
+      return { ok: false, error: `Claude Code accepted /compact but reported: ${res.resultText.slice(0, 400)}` };
+    }
+    return { ok: true, resultText: res.resultText };
   }
   return {
     ok: false,
@@ -168,6 +178,17 @@ async function compactInner(
   if (!compacted.ok) return fail(compacted.error ?? 'Unknown error.');
 
   const after = await readNativeContext(provider, ref);
+  // A compaction that changed nothing is a failure whatever the CLI said: its
+  // summarization is a model call, and under a provider outage it can return
+  // success with the session untouched. Recording that as a compaction would
+  // anchor the meter at the same size and hide that nothing happened; failing
+  // it records the truth and lets the next run's end try again.
+  const shrankFrom = before.ok ? before.usedTokens : undefined;
+  const shrankTo = after.ok ? after.usedTokens : undefined;
+  if (shrankFrom != null && shrankTo != null && shrankTo >= shrankFrom * 0.95) {
+    return fail(`The provider accepted /compact but the context did not shrink (${shrankFrom.toLocaleString()} → ${shrankTo.toLocaleString()} tokens) — `
+      + 'its summarization call most likely failed (an overload or a limit). It is retried after the next run, or now with /compact.');
+  }
   const payload: CompactionPayload = {
     provider,
     model,

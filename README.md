@@ -6,6 +6,10 @@ it, a configurable **Compactor** keeps the context small. Everything the agents
 do — commands, file reads, searches, diffs, every AI call with its exact prompt
 and response — is visible in the timeline as compact expandable rows.
 
+## Maintainer documentation
+
+The complete technical handbook — architecture, lifecycles, state machines, recovery, security model, maintainer cookbook and code index — is [`TANDEM_TECHNICAL_HANDBOOK.md`](./TANDEM_TECHNICAL_HANDBOOK.md).
+
 ## Layout
 
 - `server/` — Node/Fastify backend: auth, SQLite persistence, SSE streaming,

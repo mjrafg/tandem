@@ -26,6 +26,32 @@ export interface ClaudeTurnResult {
   error?: string;
 }
 
+/** headroom kept inside the turn so a timed-out command can still be reported */
+const BASH_TIMEOUT_HEADROOM_MS = 120_000;
+/** a long foreground wait is free; this only bounds how long the CLI will allow one */
+const BASH_DEFAULT_CAP_MS = 15 * 60_000;
+
+/**
+ * Bash timeouts for one Claude Code invocation, derived from that invocation's
+ * own budget. Verified against the installed CLI (2.1.266), which reads
+ * `BASH_DEFAULT_TIMEOUT_MS` (else 120000) and `BASH_MAX_TIMEOUT_MS` (else
+ * 600000) and clamps the max to at least the default.
+ *
+ * Only the ceiling moves. A command still ends the moment it exits, so a fast
+ * command is unaffected; what changes is that a slow FINITE one — a test suite,
+ * a build — is no longer taken away at 120s and handed back as a background id
+ * with no result. Nothing here disables background execution: a dev server the
+ * Builder starts with `&` or `run_in_background` is untouched, because that is
+ * the workflow this must not break.
+ */
+function bashTimeoutEnv(turnTimeoutMs: number): Record<string, string> {
+  const max = Math.max(60_000, turnTimeoutMs - BASH_TIMEOUT_HEADROOM_MS);
+  return {
+    BASH_DEFAULT_TIMEOUT_MS: String(Math.min(BASH_DEFAULT_CAP_MS, max)),
+    BASH_MAX_TIMEOUT_MS: String(max),
+  };
+}
+
 const EFFORT_THINKING: Record<Effort, string> = { low: '', medium: '12000', high: '30000' };
 
 /** chats already told (once) that the read-only boundary is degraded here */
@@ -329,6 +355,17 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       // treats the window as this many tokens and compacts as it nears it.
       ...(h.settings.context.autoCompact && h.settings.context.compactMaxTokens > 0
         ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(h.settings.context.compactMaxTokens) } : {}),
+      // Keep a finite command in the FOREGROUND for as long as this turn can
+      // afford. The CLI's Bash timeout defaults to 120s and a command that
+      // exceeds it is moved to the background — which is how a 7-minute test
+      // suite came back in 120s with no result, leaving the model to invent a
+      // wait it does not have (S9.1's 385 `echo waiting` calls; M11.INT handed
+      // the Reviewer an unfinished run). While a foreground command runs the
+      // model is genuinely idle and costs nothing, so the fix is simply to let
+      // it run: budget the timeout from this turn's own limit, keeping two
+      // minutes back so a command that does hit the ceiling still leaves the
+      // turn time to report it.
+      ...bashTimeoutEnv(opts.timeoutMs),
       // read-only turns: git must not take optional locks in the ro-bound repo
       ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: '0' } : {}),
       // inherited by the tandem MCP stdio servers (workdir + browser)

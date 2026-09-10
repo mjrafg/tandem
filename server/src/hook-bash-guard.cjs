@@ -20,6 +20,14 @@
  *   B. The identical command five times in a row in one session is refused.
  *      That is polling, and by the fifth repeat the answer has not changed.
  *
+ * What this is NOT: a cap on spend. Rule B bounds consecutive ACCEPTED
+ * identical commands, not model calls. The sixth request was already generated
+ * and paid for before the hook saw it, and after a refusal the model is free to
+ * retry, vary the command, or poll something else. The real fix for waiting is
+ * upstream — a foreground Bash timeout long enough that a finite command simply
+ * finishes (see bashTimeoutEnv in engine/claude.ts). This guard is the floor
+ * under the pathological case, not the mechanism that makes waiting cheap.
+ *
  * Both refusals name the idiom that actually blocks, so the model can carry on
  * instead of guessing. Anything unexpected — bad input, unwritable state dir,
  * an internal error — exits 0 and allows the call: a guard that breaks a

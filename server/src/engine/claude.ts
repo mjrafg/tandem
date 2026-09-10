@@ -366,6 +366,17 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       // minutes back so a command that does hit the ceiling still leaves the
       // turn time to report it.
       ...bashTimeoutEnv(opts.timeoutMs),
+      // The two variables above are fixed for the whole invocation, so they
+      // cannot know that a command beginning 20 minutes into a 30-minute turn
+      // has ten minutes left, not fifteen. The deadline lets the Bash guard —
+      // which runs per call — clamp each command to the time actually
+      // remaining, keeping the same reporting reserve. Set only for turns that
+      // may write: a read-only turn's Bash is CLI-denied or jailed, and this
+      // hook must never be in a position to look like it is granting one.
+      ...(opts.readOnly ? {} : {
+        TANDEM_TURN_DEADLINE_MS: String(Date.now() + opts.timeoutMs),
+        TANDEM_TURN_RESERVE_MS: String(BASH_TIMEOUT_HEADROOM_MS),
+      }),
       // read-only turns: git must not take optional locks in the ro-bound repo
       ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: '0' } : {}),
       // inherited by the tandem MCP stdio servers (workdir + browser)

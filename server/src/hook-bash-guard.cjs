@@ -12,7 +12,17 @@
  * `until <check>; do sleep N; done` were both moved to the background and
  * returned in under 10ms.
  *
- * Two rules, both narrow, both failing open:
+ * It also keeps a long command inside the time the TURN actually has left.
+ * The Bash timeout is an environment variable fixed when the CLI starts, so a
+ * 15-minute default still applies to a command begun 20 minutes into a
+ * 30-minute turn — and Tandem kills the whole invocation at the turn limit,
+ * taking the model's chance to report with it. This hook runs per call, so it
+ * is the one place that knows how much time is genuinely left: it rewrites the
+ * call's own `timeout` down to the remaining budget minus the reporting
+ * reserve. That is a rewrite, not a refusal — the command still runs, and if it
+ * cannot finish it now fails as a command instead of killing the turn.
+ *
+ * Three rules, all narrow, all failing open:
  *
  *   A. A command whose ENTIRE body is a no-op — `echo <word>`, `:`, `true` —
  *      is refused. There is no redirection, no pipe, no separator and no
@@ -42,6 +52,8 @@ const crypto = require('node:crypto');
 
 /** identical consecutive calls tolerated before the sixth is refused */
 const REPEAT_LIMIT = 5;
+/** never hand a command a timeout below this; below it, it may as well fail fast */
+const MIN_TIMEOUT_MS = 1_000;
 
 /* A single no-op: one `echo`/`:`/`true`, nothing chained, nothing redirected,
  * no substitution. `echo "$(date)" >> log` and `echo x | tee f` are real work
@@ -105,6 +117,27 @@ process.stdin.on('end', () => {
           + `has not changed. ${HOW_TO_WAIT}\n`,
         );
         return process.exit(2);
+      }
+    }
+    // ---- C. fit the call inside the time this turn has left
+    // Tandem sets the deadline only for turns where it also grants the long
+    // foreground budget; when it is absent this does nothing at all.
+    const deadline = Number(process.env.TANDEM_TURN_DEADLINE_MS);
+    if (Number.isFinite(deadline) && deadline > 0) {
+      const reserve = Number(process.env.TANDEM_TURN_RESERVE_MS) || 120_000;
+      const budget = deadline - Date.now() - reserve;
+      const asked = Number(input.tool_input.timeout);
+      const effective = Number.isFinite(asked) && asked > 0
+        ? asked
+        : Number(process.env.BASH_DEFAULT_TIMEOUT_MS) || 120_000;
+      if (effective > budget) {
+        const timeout = Math.max(MIN_TIMEOUT_MS, Math.floor(budget));
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            updatedInput: { ...input.tool_input, timeout },
+          },
+        }));
       }
     }
     return process.exit(0);

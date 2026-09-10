@@ -26,7 +26,9 @@ export interface ClaudeTurnResult {
   error?: string;
 }
 
-/** headroom kept inside the turn so a timed-out command can still be reported */
+/** slack left below the turn limit when sizing the ceiling — a margin at turn
+ *  START, not an enforced reserve: nothing tracks elapsed time, so a command
+ *  begun late in a turn can still run past it (see the note below) */
 const BASH_TIMEOUT_HEADROOM_MS = 120_000;
 /** a long foreground wait is free; this only bounds how long the CLI will allow one */
 const BASH_DEFAULT_CAP_MS = 15 * 60_000;
@@ -43,6 +45,17 @@ const BASH_DEFAULT_CAP_MS = 15 * 60_000;
  * with no result. Nothing here disables background execution: a dev server the
  * Builder starts with `&` or `run_in_background` is untouched, because that is
  * the workflow this must not break.
+ *
+ * Two things this deliberately does NOT do, both still open:
+ *  - Exceeding the timeout still MOVES the command to the background (verified
+ *    in the installed CLI's own message). It never fails it. Raising the
+ *    ceiling makes that rarer; it does not change what happens at the ceiling.
+ *  - These values are fixed when the CLI starts, so they cannot account for
+ *    time already spent. A command begun 20 minutes into a 30-minute turn still
+ *    gets this budget, and spawnStreaming's timer then kills the whole
+ *    invocation at the turn limit. A per-call clamp on the remaining time was
+ *    tried and reverted (3aa8e9c): it could not enforce a reporting reserve
+ *    either, and its floor spawned fresh background tasks near the deadline.
  */
 function bashTimeoutEnv(turnTimeoutMs: number): Record<string, string> {
   const max = Math.max(60_000, turnTimeoutMs - BASH_TIMEOUT_HEADROOM_MS);
@@ -366,17 +379,6 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       // minutes back so a command that does hit the ceiling still leaves the
       // turn time to report it.
       ...bashTimeoutEnv(opts.timeoutMs),
-      // The two variables above are fixed for the whole invocation, so they
-      // cannot know that a command beginning 20 minutes into a 30-minute turn
-      // has ten minutes left, not fifteen. The deadline lets the Bash guard —
-      // which runs per call — clamp each command to the time actually
-      // remaining, keeping the same reporting reserve. Set only for turns that
-      // may write: a read-only turn's Bash is CLI-denied or jailed, and this
-      // hook must never be in a position to look like it is granting one.
-      ...(opts.readOnly ? {} : {
-        TANDEM_TURN_DEADLINE_MS: String(Date.now() + opts.timeoutMs),
-        TANDEM_TURN_RESERVE_MS: String(BASH_TIMEOUT_HEADROOM_MS),
-      }),
       // read-only turns: git must not take optional locks in the ro-bound repo
       ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: '0' } : {}),
       // inherited by the tandem MCP stdio servers (workdir + browser)

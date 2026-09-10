@@ -1,6 +1,6 @@
 #!/bin/bash
 # Deterministic reproduction of the review-budget reset and the restart-during-review-wait pause.
-# Overridable: DIST PORT LABEL FAKE_FINDINGS_FOR SETTLE RESUME_AFTER_RESTART. Work dirs live under ./.work (gitignored).
+# Overridable: DIST PORT LABEL FAKE_FINDINGS_FOR FAKE_CODEX_CRASH_ON_CALL SETTLE RESUME_AFTER_RESTART. Work dirs live under ./.work (gitignored).
 #   run.sh SCENARIO   where SCENARIO ∈ NONE | AFTER_R1 | DURING_R2 | DURING_FINAL | DOUBLE_FINAL | QUOTA_R2 | QUOTA_CRASH_FINAL | QUOTA_WAIT_RESTART
 #                                     | OVERLOAD_BUILDER (Builder call 1 refused with a 529) | OVERLOAD_DIRECTOR (Director turn 1 refused with a 529)
 # Each scenario boots an isolated Tandem with fake CLIs, drives ONE Director session through
@@ -28,6 +28,7 @@ ENV=(DATA_DIR="$DD" PORT=$PORT HOST=127.0.0.1 TANDEM_INTERNAL_TOKEN=devtoken TAN
      TANDEM_CLAUDE_BIN="$RR/fake-claude.cjs" TANDEM_CODEX_BIN="$RR/fake-codex.cjs"
      FAKE_STATE_DIR="$STATE" FAKE_DIRECTOR_SCRIPT="$RR/dscript.json" FAKE_BUILDER_RECIPES="$RECIPES"
      FAKE_CODEX_SLEEP_ON_CALL="$SLEEP_ON" FAKE_CODEX_QUOTA_ON_CALL="$QUOTA_ON" FAKE_FINDINGS_FOR="${FAKE_FINDINGS_FOR:-2}"
+     FAKE_CODEX_CRASH_ON_CALL="${FAKE_CODEX_CRASH_ON_CALL:-}"
      FAKE_CLAUDE_FAIL_ON_CALL="$([ "$SCENARIO" = OVERLOAD_BUILDER ] && echo 1)" FAKE_DIRECTOR_FAIL_ON_TURN="$([ "$SCENARIO" = OVERLOAD_DIRECTOR ] && echo 1)")
 boot(){ env "${ENV[@]}" node "$DIST" >> "$DD/server.log" 2>&1 & echo $! > "$DD/pid"
         for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && return 0; sleep 0.5; done; echo "boot failed"; exit 1; }

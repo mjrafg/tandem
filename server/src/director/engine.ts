@@ -873,7 +873,7 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     reviewRetryAt: status === 'awaiting_review' ? pending!.retryAt : null,
   });
   addActivity(runId, 'session',
-    status === 'completed' ? `${key} completed${outcome.reviewVerdict ? ` · reviewer: ${outcome.reviewVerdict}` : ''}`
+    status === 'completed' ? `${key} completed${outcome.reviewVerdict ? ` · reviewer: ${outcome.reviewVerdict}` : ' · NOT reviewed'}`
       : status === 'awaiting_review' ? `${key} implementation complete — waiting for Reviewer (${pending!.reason}); retry at ${fmtRetryAt(pending!.retryAt)}`
         : status === 'paused' ? (stopReason === 'user_stop' ? `${key} stopped by the user and preserved`
           : stopReason === 'provider_outage' ? `${key} hit the ${outage!.reason} — work preserved, continues at ${fmtRetryAt(outage!.retryAt)}`
@@ -948,7 +948,7 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
       }
     }
     const ready = readySessions(runId);
-    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict ? ` Reviewer verdict: ${outcome.reviewVerdict}.` : ''} Result summary: ${outcome.summary.slice(0, 600) || '(no summary)'}${ready.length ? ` Sessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
+    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict === 'pass' ? ' Reviewer verdict: PASS.' : outcome.reviewVerdict === 'findings' ? ' Reviewer verdict: FINDINGS — the review cap was reached, so the findings below stand OPEN and unrepaired; decide whether they need a follow-up session.' : ' NOTE: no reviewer verdict was recorded, so this result carries NO reviewer approval — treat it as unverified when deciding what depends on it.'} Result summary: ${outcome.summary.slice(0, 600) || '(no summary)'}${ready.length ? ` Sessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
   } else if (status === 'paused') {
     // a deliberate user stop is NOT a failure: no needs_attention, no forced
     // recovery review. Whether the PROJECT continues depends on the canonical

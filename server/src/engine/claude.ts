@@ -97,15 +97,20 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   // screenshot can outweigh all the code a session writes. The guard refuses
   // only large images, and fails open on any error.
   const guardScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'hook-read-guard.cjs');
-  if (fs.existsSync(guardScript)) {
-    args.push('--settings', JSON.stringify({
-      hooks: {
-        PreToolUse: [{
-          matcher: 'Read',
-          hooks: [{ type: 'command', command: `${process.execPath} ${guardScript}` }],
-        }],
-      },
-    }));
+  // And keep the model from using its own latency as a timer: a no-op `echo
+  // waiting`, or the same probe five times over, is a full round trip that
+  // re-reads the whole context to learn nothing. Both guards fail open.
+  const bashGuard = path.resolve(path.dirname(process.argv[1] ?? '.'), 'hook-bash-guard.cjs');
+  const preToolUse = [
+    ...(fs.existsSync(guardScript)
+      ? [{ matcher: 'Read', hooks: [{ type: 'command', command: `${process.execPath} ${guardScript}` }] }]
+      : []),
+    ...(fs.existsSync(bashGuard)
+      ? [{ matcher: 'Bash', hooks: [{ type: 'command', command: `${process.execPath} ${bashGuard}` }] }]
+      : []),
+  ];
+  if (preToolUse.length > 0) {
+    args.push('--settings', JSON.stringify({ hooks: { PreToolUse: preToolUse } }));
   }
 
   let mcpConfigFile: string | null = null;

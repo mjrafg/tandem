@@ -60,6 +60,22 @@ export function readOnlyJailArgs(projectPath: string, cwd: string): string[] {
   roEnsureFile(path.join(home, '.claude', 'CLAUDE.md'), '');
   rw(shotsDir);                                       // browser screenshots stay writable
   rw(path.join(config.dataDir, 'tmp'));
+  // Test runners are not read-only tools. Vite's config loader bundles the
+  // config to `node_modules/.vite-temp/<name>.timestamp-*.mjs` and reads it
+  // back, so a reviewer asked to run `vitest --config …` failed with EROFS
+  // before the first test — and reported it as if the product were at fault.
+  // These are tool scratch directories inside `node_modules`, never product
+  // source: making exactly them writable lets verification run while every
+  // tracked file in the project stays read-only. (`--configLoader runner`
+  // avoids the write on Vite 6+; this covers the tools that have no such flag.)
+  const modules = path.join(projectPath, 'node_modules');
+  if (fs.existsSync(modules)) {
+    for (const scratch of ['.vite-temp', '.cache', '.vitest', '.tmp']) {
+      const dir = path.join(modules, scratch);
+      try { fs.mkdirSync(dir, { recursive: true }); } catch { /* best effort */ }
+      rw(dir);
+    }
+  }
   args.push('--die-with-parent', '--chdir', cwd, '--');
   return args;
 }

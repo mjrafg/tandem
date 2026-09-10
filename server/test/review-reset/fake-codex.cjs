@@ -5,6 +5,8 @@
 //  - plan / recovery reviews always PASS
 //  - FAKE_CODEX_SLEEP_ON_CALL=n : session-review call n sleeps 20s (a crash window)
 //  - FAKE_CODEX_QUOTA_ON_CALL=n : session-review call n fails like a usage limit (retry named in 1 min)
+//  - FAKE_CODEX_CRASH_ON_CALL=n : session-review call n dies with a generic, NON-outage error
+//    (the path where the Reviewer simply failed — it must never be read as an approval)
 //  - every prompt is appended to $FAKE_STATE_DIR/codex-prompts.log with its ordinal
 const fs = require('fs'); const path = require('path');
 let stdin = ''; try { stdin = fs.readFileSync(0, 'utf8'); } catch {}
@@ -17,6 +19,10 @@ const emit = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 if (isSession && String(n) === String(process.env.FAKE_CODEX_QUOTA_ON_CALL || '')) {
   process.stderr.write('You have hit your usage limit. Try again in 1 minute.\n');
   process.exit(1);
+}
+if (isSession && String(n) === String(process.env.FAKE_CODEX_CRASH_ON_CALL || '')) {
+  process.stderr.write('codex: fatal: unexpected internal error while starting the session\n');
+  process.exit(3);
 }
 if (isSession && String(n) === String(process.env.FAKE_CODEX_SLEEP_ON_CALL || '')) {
   const until = Date.now() + 20_000; while (Date.now() < until) { require('child_process').execSync('sleep 1'); }

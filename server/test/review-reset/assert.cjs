@@ -64,5 +64,24 @@ if (scenario.startsWith('OVERLOAD')) {
   console.log(`  overload activity: ${acts.filter((t) => /overload/i.test(t)).map((t) => JSON.stringify(t.slice(0, 90))).join(' ; ') || '(none)'}`);
 }
 if (noWindow.length > 0) fails.push(`I11 ${noWindow.length} Claude CLI call(s) ran without CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000`);
+
+// I12 — the cap never spends a Builder invocation nobody can review.
+// A repair only runs while a review round remains to verify it; when the cap is
+// reached the findings are reported open instead. This is the invariant that
+// replaced the "final repair, not re-reviewed" round.
+const finalRepairCalls = calls.filter((r) => r.p.role === 'final_repair');
+if (finalRepairCalls.length > 0) fails.push(`I12 ${finalRepairCalls.length} unreviewed final-repair call(s) ran (seq ${finalRepairCalls.map((r) => r.seq).join(',')})`);
+if (ledger && ledger.final_repair_done) fails.push('I12 ledger records a final repair as done');
+const capped = findings.filter((f) => f.round === 2 && f.verdict === 'findings');
+for (const f of capped) {
+  if (!f.repairSkippedAtCap) fails.push(`I12 round-2 findings (seq ${f.seq}) are not marked repairSkippedAtCap`);
+}
+if (capped.length > 0 && !rows.some((r) => r.kind === 'status' && /no review round remains/i.test(r.p.text || ''))) {
+  fails.push('I12 the cap was reached but no status reported the open findings');
+}
+// I13 — a findings verdict is never reported as an approval
+if (capped.length > 0 && ledger && ledger.last_verdict !== 'findings') {
+  fails.push(`I13 ledger last_verdict is ${ledger.last_verdict} after a round-2 findings verdict`);
+}
 console.log(fails.length ? `\nFAIL\n  - ${fails.join('\n  - ')}` : '\nPASS — all invariants hold');
 process.exit(fails.length ? 1 : 0);

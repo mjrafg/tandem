@@ -288,7 +288,10 @@ export interface FindingsPayload {
   round: number;
   items: Finding[];
   /** set on the event that closes the loop after the un-reviewed final repair */
+  /** historical: a round-2 findings verdict followed by an unreviewed final repair */
   finalRepairNotReviewed?: boolean;
+  /** the review cap was reached, so no repair was started for these findings */
+  repairSkippedAtCap?: boolean;
 }
 
 export interface CompactionPayload {

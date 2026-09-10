@@ -302,9 +302,9 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
       <div className="flex items-center gap-2 border-b border-warn/15 px-3.5 py-2">
         <AlertTriangle size={14} className="text-warn" />
         <span className="text-[13px] font-medium text-warn">Reviewer findings · round {p.round}</span>
-        {p.finalRepairNotReviewed && (
+        {(p.repairSkippedAtCap || p.finalRepairNotReviewed) && (
           <span className="ml-auto rounded-full border border-line px-2 py-[1px] text-[10.5px] text-dim">
-            final repair not re-reviewed
+            {p.repairSkippedAtCap ? 'open — review cap reached, no repair' : 'final repair not re-reviewed'}
           </span>
         )}
       </div>

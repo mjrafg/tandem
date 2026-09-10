@@ -179,8 +179,9 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   // policy already promises for the final repair — and says so.
   const consumed = ledger.reviewsConsumed;
   if (consumed >= MAX_REVIEW_ROUNDS) {
-    h.status(`The review budget for this task is already spent (${consumed} of ${MAX_REVIEW_ROUNDS} rounds) — this continuation is not re-reviewed; the result stands as the task's final, unreviewed repair.`);
-    recordRepair(h.chat.id, true);
+    h.status(`The review budget for this task is already spent (${consumed} of ${MAX_REVIEW_ROUNDS} rounds) — `
+      + 'this continuation is NOT reviewed. It is preserved as delivered, and it carries no reviewer approval: '
+      + `the last recorded verdict for this task is ${ledger.lastVerdict ?? 'none'}.`);
     return true;
   }
   // a revision the Reviewer already accepted has nothing new to judge
@@ -203,11 +204,14 @@ type PhaseOutcome = 'done' | 'awaiting' | 'stopped' | 'failed';
 
 /**
  * The capped review loop from a given round onward: review → repair → last
- * review → final repair. Entered at round 1 by every normal run, and re-entered
- * at the PERSISTED round by a review retry after a Reviewer provider outage —
- * so a failed provider attempt never consumes a round, and a successful retry
- * continues the exact same policy (findings → repair → last review; the final
- * repair stays unreviewed by the cap).
+ * review. Entered at round 1 by every normal run, and re-entered at the
+ * PERSISTED round by a review retry after a Reviewer provider outage — so a
+ * failed provider attempt never consumes a round, and a successful retry
+ * continues the exact same policy.
+ *
+ * A repair only ever runs when a review round remains to verify it. When the
+ * cap is reached the findings are reported and the work is preserved as it
+ * stands; the loop no longer spends a Builder invocation nobody will check.
  */
 async function runReviewPhase(h: RunHandle, userText: string, opts: {
   round: 1 | 2;
@@ -233,6 +237,14 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     if (round1.verdict === 'pass') return 'done';
 
     // ---- repair
+    // A due compaction belongs HERE, at a boundary where no CLI is live and the
+    // session is resumable, rather than only after the whole run: the repair and
+    // the last review would otherwise each carry the full pre-compaction
+    // context. Inside a run the chat is legitimately "running", so this boundary
+    // call says so explicitly.
+    await maybeAutoCompact(h.chat.id, { atRunBoundary: true });
+    h.refresh();
+
     const repair = await runClaudeTurn(h, {
       role: 'builder',
       model: builderCfg.model,
@@ -276,48 +288,19 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   if ('failure' in round2) return reviewerFailed(h, userText, 2, subject2, round2.failure, opts.retry);
   if (round2.verdict === 'pass') return 'done';
 
-  // ---- final repair — hard cap: never re-reviewed
-  return finalRepair(h, round2, subject2.kind, opts.builderTimeout);
+  // ---- the cap is reached: report the findings, repair nothing
+  // A repair with no round left to verify it is a Builder invocation whose
+  // result nobody checks. The workflow used to spend one anyway and label it
+  // "not re-reviewed"; the open findings are the honest deliverable instead.
+  updateEvent(round2.eventId, { repairSkippedAtCap: true });
+  const open = round2.items.map((f) => `${f.severity}: ${f.title}`).join(' · ').slice(0, 600);
+  h.status(`Review complete: ${MAX_REVIEW_ROUNDS} of ${MAX_REVIEW_ROUNDS} rounds spent and the verdict is FINDINGS. `
+    + 'No further repair was started, because no review round remains to verify one — the work is preserved '
+    + `exactly as the Reviewer last saw it. Open findings: ${open || '(see the findings above)'}`);
+  return 'done';
 }
 
-/**
- * The unreviewed final repair after a round-2 FINDINGS verdict — and the
- * completion of a task whose final repair was interrupted (a crash inside it on
- * the outage-retry path). `final_repair_done` in the ledger gates it, so a
- * replay finishes the same repair instead of skipping it or starting another.
- */
-async function finalRepair(
-  h: RunHandle, round2: { eventId: string; items: Finding[] }, subjectKind: ReviewSubject['kind'], builderTimeout: number,
-): Promise<PhaseOutcome> {
-  const builderCfg = builderExecFor(h.chat.id, h.settings);
-  const final = await runClaudeTurn(h, {
-    role: 'final_repair',
-    model: builderCfg.model,
-    effort: builderCfg.effort,
-    systemAppendix: builderSystemText(h.settings, 'final_repair', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
-    message: renderPrompt(
-      subjectKind === 'answer' ? 'repair.answer_final_message' : 'repair.final_message',
-      { findings: findingsAsText(round2.items) },
-    ),
-    cwd: h.project.rootPath,
-    resumeSessionId: getBuilderSession(h.chat.id),
-    withTandemTools: true,
-    timeoutMs: builderTimeout,
-  });
-  if (final.sessionId) setBuilderSession(h.chat.id, final.sessionId, 'claude-code');
-  if (!h.stopped && final.ok) {
-    updateEvent(round2.eventId, { finalRepairNotReviewed: true });
-    recordRepair(h.chat.id, true);
-    h.status('Final repair applied. The review loop is capped at two rounds, so this final repair was not re-reviewed.');
-    return 'done';
-  }
-  if (!h.stopped && !final.ok) {
-    h.error({ message: 'Final repair call failed', detail: final.error, source: 'builder', retryable: true });
-  }
-  return h.stopped ? 'stopped' : 'failed';
-}
-
-/** The most recent verdict of `round` in a chat — what an interrupted final repair was repairing. */
+/** The most recent verdict of `round` in a chat. */
 function lastFindings(chatId: string, round: number): { eventId: string; items: Finding[] } | null {
   const r = db.prepare("SELECT id, payload FROM events WHERE chat_id = ? AND kind = 'findings' ORDER BY seq DESC LIMIT 1").get(chatId) as { id: string; payload: string } | undefined;
   if (!r) return null;
@@ -409,26 +392,15 @@ export function startReviewRetry(chatId: string): Promise<void> | null {
       // may have been a continuation carrying the recovery text as its request
       const ledger = getLedger(chatId) ?? deriveLegacyLedger(chatId);
       const originalRequest = ledger?.originalRequest ?? pending.userText;
-      // A verdict can commit and the process die before this row is deleted —
-      // the final repair runs for minutes between the two. Then the review this
-      // wait was for is already recorded, and retrying it would be a third
-      // round: the row is stale, not the review.
+      // A verdict can commit and the process die before this row is deleted.
+      // Then the review this wait was for is already recorded, and retrying it
+      // would be a third round: the row is stale, not the review. Nothing is
+      // repaired here either — the cap that forbids an unverifiable repair
+      // during the run forbids it on the replay too.
       if (ledger && ledger.reviewsConsumed >= MAX_REVIEW_ROUNDS) {
-        const finalPending = ledger.lastVerdict === 'findings' && !ledger.finalRepairDone;
-        h.status(`The review this wait was for has already been recorded (${ledger.reviewsConsumed} of ${MAX_REVIEW_ROUNDS} rounds spent, last verdict: ${ledger.lastVerdict}) — nothing to retry.${finalPending ? ' Its final repair was interrupted; finishing it now (not re-reviewed, as the cap already says).' : ''}`);
-        if (finalPending) {
-          // the row stays until the repair is RECORDED: it is the durable
-          // "work outstanding" marker that brings the sweeper back after another
-          // crash, and the ledger makes that replay finish the same repair
-          const last = lastFindings(chatId, MAX_REVIEW_ROUNDS);
-          const outcome = last ? await finalRepair(h, last, pending.subject.kind, BUILDER_TIMEOUT) : 'done';
-          if (outcome !== 'done') {
-            const p = getPendingReview(chatId);
-            if (p) upsertPendingReview({ ...p, retryAt: Date.now() + 15 * 60_000, attempts: p.attempts });
-            addEvent(chatId, 'run', { phase: outcome === 'stopped' ? 'stopped' : 'failed' }, { runId: ctx.runId });
-            return;
-          }
-        }
+        const openFindings = ledger.lastVerdict === 'findings';
+        h.status(`The review this wait was for has already been recorded (${ledger.reviewsConsumed} of ${MAX_REVIEW_ROUNDS} rounds spent, last verdict: ${ledger.lastVerdict}) — nothing to retry.`
+          + (openFindings ? ' Its findings stand open: no repair is started without a review round to verify it.' : ''));
         deletePendingReview(chatId);
         if (!ctx.stopped) await finishGitRun(h, originalRequest);
         addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
@@ -650,12 +622,18 @@ function latestCompactionSummary(h: RunHandle): string | null {
 const compactFailedAt = new Map<string, number>();
 const COMPACT_RETRY_COOLDOWN = 15 * 60_000;
 
-async function maybeAutoCompact(chatId: string): Promise<void> {
+/**
+ * @param opts.atRunBoundary called from INSIDE a live run, at a point where no
+ * CLI is running and the provider session is resumable. The chat is legitimately
+ * marked running then, so the busy check that protects external callers would
+ * otherwise skip the compaction that boundary exists for.
+ */
+async function maybeAutoCompact(chatId: string, opts: { atRunBoundary?: boolean } = {}): Promise<void> {
   try {
     const settings = getSettings();
     if (!settings.context.autoCompact) return;
     const chat = getChat(chatId);
-    if (!chat || isRunning(chatId)) return;
+    if (!chat || (!opts.atRunBoundary && isRunning(chatId))) return;
     if (!shouldAutoCompact(computeUsage(chat), settings.context)) return;
     if ((compactFailedAt.get(chatId) ?? 0) > Date.now() - COMPACT_RETRY_COOLDOWN) return;
     const outcome = await performNativeCompaction(chat, 'auto'); // emits its own compaction/error events

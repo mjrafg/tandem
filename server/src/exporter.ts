@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
-  AiCallPayload, BrowserActionPayload, Chat, ChatEvent, CommandPayload, CompactionPayload, ContextUsage,
+  AiCallPayload, AiUsage, BrowserActionPayload, Chat, ChatEvent, CommandPayload, CompactionPayload, ContextUsage,
   FileChangePayload, FileReadPayload, FindingsPayload, Project, SearchPayload,
 } from '../../shared/types';
 import { shotsDir } from './config';
@@ -21,6 +21,27 @@ const fmtSize = (n: number) => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixe
 const fmtTok = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 
 /** Active provider context, provider vs estimate always labeled, unknown stays unknown. */
+/**
+ * Usage, decomposed. `inputTokens` is a cumulative counter summing fresh input,
+ * cache writes and cache reads across every internal iteration of one call —
+ * three things whose prices differ by more than tenfold. Reported as one number
+ * it reads as "this call consumed 169 million tokens of input" when the fresh
+ * input was 846. Anything the provider did not report stays unknown rather than
+ * being inferred or zeroed.
+ */
+function usageLine(u: AiUsage): string {
+  const n = (v: number) => v.toLocaleString();
+  const known = u.freshInputTokens != null || u.cacheReadTokens != null || u.cacheWriteTokens != null;
+  if (!known) return `${n(u.inputTokens)} in / ${n(u.outputTokens)} out tokens (fresh/cache split not reported)`;
+  const parts = [
+    `${u.freshInputTokens != null ? n(u.freshInputTokens) : 'unknown'} fresh in`,
+    `${u.cacheWriteTokens != null ? n(u.cacheWriteTokens) : 'unknown'} cache write`,
+    `${u.cacheReadTokens != null ? n(u.cacheReadTokens) : 'unknown'} cache read`,
+    `${n(u.outputTokens)} out`,
+  ];
+  return `${parts.join(' · ')} (${n(u.inputTokens)} total in)`;
+}
+
 function contextLine(u: ContextUsage): string {
   const providerName = u.provider === 'claude-code' ? 'Claude Code' : 'Codex';
   if (u.usedTokens == null) return `no provider report yet · provider ${providerName}`;
@@ -113,7 +134,7 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       const title = `${p.provider === 'claude-code' ? 'Claude' : 'Codex'} · ${roleLabel(p.role)}`;
       const lines = [`<details><summary><b>AI call — ${title}</b> · ${p.model} · ${p.effort} effort · ${fmtDur(p.durationMs)}${p.simulated ? ' · simulated' : ''} · ${p.status}</summary>`, ''];
       if (p.cli) lines.push(`- CLI: \`${p.cli.command}\` (cwd \`${p.cli.cwd}\`, exit ${p.cli.exitCode ?? '—'})`);
-      if (p.response?.usage) lines.push(`- Usage: ${p.response.usage.inputTokens.toLocaleString()} in / ${p.response.usage.outputTokens.toLocaleString()} out tokens`);
+      if (p.response?.usage) lines.push(`- Usage: ${usageLine(p.response.usage)}`);
       lines.push('', '**Request:**', '', '```', p.request.prompt, '```');
       if (p.response) lines.push('', '**Response:**', '', '```', p.response.text, '```');
       if (p.tools?.length) {
@@ -127,7 +148,7 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
     case 'findings': {
       const p = e.payload as FindingsPayload;
       if (p.verdict === 'pass') return [`✅ **Reviewer PASS** (round ${p.round})`];
-      const lines = [`⚠️ **Reviewer findings** (round ${p.round})${p.finalRepairNotReviewed ? ' — final repair afterwards was **not re-reviewed**' : ''}:`, ''];
+      const lines = [`⚠️ **Reviewer findings** (round ${p.round})${p.repairSkippedAtCap ? ' — open: review cap reached, no repair started' : p.finalRepairNotReviewed ? ' — final repair afterwards was **not re-reviewed**' : ''}:`, ''];
       for (const f of p.items) {
         lines.push(`- **[${f.severity}] ${f.title}**${f.file ? ` — \`${f.file}${f.line ? `:${f.line}` : ''}\`` : ''}`);
         lines.push(`  ${f.detail}`);
@@ -326,7 +347,7 @@ function eventToHtml(e: ChatEvent, chatId: string): string {
       const p = e.payload as AiCallPayload;
       const who = p.provider === 'claude-code' ? 'Claude' : 'Codex';
       return `<div class="ev"><details><summary>Asked ${who} · ${roleLabel(p.role)} · ${escapeHtml(p.model)} · ${fmtDur(p.durationMs)}${p.simulated ? ' · simulated' : ''}</summary><div class="body">
-<div class="kv">provider ${p.provider} · effort ${p.effort} · status ${p.status} · started ${fmtTime(p.startedAt)}${p.response?.usage ? ` · ${p.response.usage.inputTokens.toLocaleString()} in / ${p.response.usage.outputTokens.toLocaleString()} out` : ''}</div>
+<div class="kv">provider ${p.provider} · effort ${p.effort} · status ${p.status} · started ${fmtTime(p.startedAt)}${p.response?.usage ? ` · ${usageLine(p.response.usage)}` : ''}</div>
 ${p.cli ? `<div class="kv">cli <code>${escapeHtml(p.cli.command)}</code> · cwd <code>${escapeHtml(p.cli.cwd)}</code> · exit ${p.cli.exitCode ?? '—'}</div>` : ''}
 <h4>Request</h4><pre>${escapeHtml(p.request.prompt)}</pre>
 ${p.response ? `<h4>Response</h4><pre>${escapeHtml(p.response.text)}</pre>` : ''}
@@ -337,7 +358,7 @@ ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
     case 'findings': {
       const p = e.payload as FindingsPayload;
       if (p.verdict === 'pass') return `<div class="ev"><span class="pass">✓ Reviewer PASS</span> <span class="kv">(round ${p.round})</span></div>`;
-      return `<div class="ev"><details open><summary><span class="warn">Reviewer findings</span> · round ${p.round}${p.finalRepairNotReviewed ? ' · final repair not re-reviewed' : ''}</summary><div class="body"><ul>${p.items.map((f) => `<li><span class="sev ${f.severity}">${f.severity}</span><b>${escapeHtml(f.title)}</b>${f.file ? ` — <code>${escapeHtml(f.file)}${f.line ? ':' + f.line : ''}</code>` : ''}<br>${escapeHtml(f.detail)}${f.recommendation ? `<br><i>Recommendation: ${escapeHtml(f.recommendation)}</i>` : ''}</li>`).join('')}</ul></div></details></div>`;
+      return `<div class="ev"><details open><summary><span class="warn">Reviewer findings</span> · round ${p.round}${p.repairSkippedAtCap ? ' · open — review cap reached, no repair' : p.finalRepairNotReviewed ? ' · final repair not re-reviewed' : ''}</summary><div class="body"><ul>${p.items.map((f) => `<li><span class="sev ${f.severity}">${f.severity}</span><b>${escapeHtml(f.title)}</b>${f.file ? ` — <code>${escapeHtml(f.file)}${f.line ? ':' + f.line : ''}</code>` : ''}<br>${escapeHtml(f.detail)}${f.recommendation ? `<br><i>Recommendation: ${escapeHtml(f.recommendation)}</i>` : ''}</li>`).join('')}</ul></div></details></div>`;
     }
     case 'compaction': {
       const p = e.payload as CompactionPayload;

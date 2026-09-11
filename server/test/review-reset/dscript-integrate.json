@@ -1,0 +1,114 @@
+[
+  {
+    "reply": "Planned one milestone and started its session.",
+    "tools": [
+      {
+        "name": "project_set_plan",
+        "args": {
+          "title": "RR Integrate",
+          "summary": "One session, then integrate.",
+          "milestones": [
+            {
+              "key": "M1",
+              "name": "Feature",
+              "goal": "Create a.txt",
+              "acceptance": "a.txt exists"
+            }
+          ]
+        }
+      },
+      {
+        "name": "plan_milestone_sessions",
+        "args": {
+          "milestone": "M1",
+          "reasoning": "one session",
+          "sessions": [
+            {
+              "key": "S1.1",
+              "name": "Feature",
+              "purpose": "create the file",
+              "prompt": "RECIPE_BUILD Implement the feature: create a.txt with the letter a. CANONICAL_TASK_MARKER_7731"
+            }
+          ]
+        }
+      },
+      {
+        "name": "start_sessions",
+        "args": {
+          "keys": [
+            "S1.1"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "reply": "Integrating the milestone.",
+    "tools": [
+      {
+        "name": "integrate_milestone",
+        "args": {
+          "milestone": "M1",
+          "instructions": "Merge and validate M1."
+        }
+      }
+    ]
+  },
+  {
+    "reply": "Integrating the milestone.",
+    "tools": [
+      {
+        "name": "integrate_milestone",
+        "args": {
+          "milestone": "M1",
+          "instructions": "Merge and validate M1."
+        }
+      }
+    ]
+  },
+  {
+    "reply": "Integrating the milestone.",
+    "tools": [
+      {
+        "name": "integrate_milestone",
+        "args": {
+          "milestone": "M1",
+          "instructions": "Merge and validate M1."
+        }
+      }
+    ]
+  },
+  {
+    "reply": "Integrating the milestone.",
+    "tools": [
+      {
+        "name": "integrate_milestone",
+        "args": {
+          "milestone": "M1",
+          "instructions": "Merge and validate M1."
+        }
+      }
+    ]
+  },
+  {
+    "reply": "Integrating the milestone.",
+    "tools": [
+      {
+        "name": "integrate_milestone",
+        "args": {
+          "milestone": "M1",
+          "instructions": "Merge and validate M1."
+        }
+      }
+    ]
+  },
+  {
+    "reply": "Standing by."
+  },
+  {
+    "reply": "Standing by."
+  },
+  {
+    "reply": "Standing by."
+  }
+]

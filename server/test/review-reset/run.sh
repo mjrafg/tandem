@@ -1,6 +1,6 @@
 #!/bin/bash
 # Deterministic reproduction of the review-budget reset and the restart-during-review-wait pause.
-# Overridable: DIST PORT LABEL FAKE_FINDINGS_FOR FAKE_CODEX_CRASH_ON_CALL NO_GIT SETTLE RESUME_AFTER_RESTART. Work dirs live under ./.work (gitignored).
+# Overridable: DIST PORT LABEL FAKE_FINDINGS_FOR FAKE_CODEX_CRASH_ON_CALL NO_GIT DSCRIPT FAKE_DIRTY_FILE COMMIT_REPAIR SETTLE RESUME_AFTER_RESTART. Work dirs live under ./.work (gitignored).
 #   run.sh SCENARIO   where SCENARIO ∈ NONE | AFTER_R1 | DURING_R2 | DURING_FINAL | DOUBLE_FINAL | QUOTA_R2 | QUOTA_CRASH_FINAL | QUOTA_WAIT_RESTART
 #                                     | OVERLOAD_BUILDER (Builder call 1 refused with a 529) | OVERLOAD_DIRECTOR (Director turn 1 refused with a 529)
 # Each scenario boots an isolated Tandem with fake CLIs, drives ONE Director session through
@@ -29,15 +29,17 @@ else
 lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null; sleep 0.3
 
 # recipes: first marker found in the prompt wins (object order)
+REPAIR_RECIPE='["sleep 8","echo b > a.txt"]'
+[ "${COMMIT_REPAIR:-}" = 1 ] && REPAIR_RECIPE='["echo b >> a.txt","git add -A","git -c user.name=t -c user.email=t@t commit -q -m \"repair: committed by the builder\""]'
 RECIPES='{"Final repair round":["sleep 25","echo c > a.txt"],
-          "returned these findings":["sleep 8","echo b > a.txt"],
+          "returned these findings":'"$REPAIR_RECIPE"',
           "Continue exactly where you left off":["sleep 12","echo d > d.txt"],
           "RECIPE_BUILD":["echo a > a.txt"]}'
 SLEEP_ON=""; [ "$SCENARIO" = DURING_R2 ] && SLEEP_ON=2
 QUOTA_ON=""; case "$SCENARIO" in QUOTA_R2|QUOTA_CRASH_FINAL|QUOTA_WAIT_RESTART) QUOTA_ON=2 ;; esac
 ENV=(DATA_DIR="$DD" PORT=$PORT HOST=127.0.0.1 TANDEM_INTERNAL_TOKEN=devtoken TANDEM_REVIEW_SWEEP_MS=2000
      TANDEM_CLAUDE_BIN="$RR/fake-claude.cjs" TANDEM_CODEX_BIN="$RR/fake-codex.cjs"
-     FAKE_STATE_DIR="$STATE" FAKE_DIRECTOR_SCRIPT="$RR/dscript.json" FAKE_BUILDER_RECIPES="$RECIPES"
+     FAKE_STATE_DIR="$STATE" FAKE_DIRECTOR_SCRIPT="$RR/${DSCRIPT:-dscript.json}" FAKE_DIRTY_FILE="${FAKE_DIRTY_FILE:-}" FAKE_BUILDER_RECIPES="$RECIPES"
      FAKE_CODEX_SLEEP_ON_CALL="$SLEEP_ON" FAKE_CODEX_QUOTA_ON_CALL="$QUOTA_ON" FAKE_FINDINGS_FOR="${FAKE_FINDINGS_FOR:-2}"
      FAKE_CODEX_CRASH_ON_CALL="${FAKE_CODEX_CRASH_ON_CALL:-}"
      FAKE_CLAUDE_FAIL_ON_CALL="$([ "$SCENARIO" = OVERLOAD_BUILDER ] && echo 1)" FAKE_DIRECTOR_FAIL_ON_TURN="$([ "$SCENARIO" = OVERLOAD_DIRECTOR ] && echo 1)")

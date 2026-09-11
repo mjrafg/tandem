@@ -108,6 +108,12 @@ async function runDirector() {
 
   emit({ type: 'system', subtype: 'init', session_id: SID, model: 'fake-model' });
   let toolResults = [];
+  // FAKE_DIRTY_FILE: leave an uncommitted file in the project immediately before
+  // the turn's tools run, so a decision that must inspect the WORKING TREE (not
+  // just branch ancestry) is exercised deterministically, with HEAD unchanged.
+  if (process.env.FAKE_DIRTY_FILE) {
+    try { fs.writeFileSync(process.env.FAKE_DIRTY_FILE, `uncommitted ${Date.now()}\n`); } catch {}
+  }
   if (turn.tools && turn.tools.length) {
     toolResults = await mcpCall(mcpServers.tandem_director, turn.tools);
   }

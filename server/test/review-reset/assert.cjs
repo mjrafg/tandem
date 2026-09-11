@@ -34,7 +34,11 @@ for (let i = 1; i < findings.length; i++) if (findings[i].round <= findings[i - 
 if (findings.length > 2) fails.push(`I2 ${findings.length} reviews recorded for one task (cap 2)`);
 if (ledger && ledger.reviews_consumed > 2) fails.push(`I2 ledger reviews_consumed=${ledger.reviews_consumed} > 2`);
 // I3 — every Reviewer saw the canonical request, never the recovery text
-original.forEach((o, i) => { if (!o.includes(CANON)) fails.push(`I3 prompt #${i + 1} original request is not the canonical task: ${JSON.stringify(o.slice(0, 60))}`);
+// An INTEGRATION session is a different task by design: its original request is
+// the integration contract, not the session's. Judge only the session's own.
+const INTEGRATION = /^This is a milestone INTEGRATION session/;
+original.forEach((o, i) => { if (INTEGRATION.test(o)) return;
+                             if (!o.includes(CANON)) fails.push(`I3 prompt #${i + 1} original request is not the canonical task: ${JSON.stringify(o.slice(0, 60))}`);
                               if (/interrupted|Continue exactly/i.test(o)) fails.push(`I3 prompt #${i + 1} original request IS the recovery message`); });
 // I4 — a review of a continuation carries the continuation as steering, not as the request
 if (['AFTER_R1', 'DURING_R2'].includes(scenario) && !steering.some(s => s && /interrupted/i.test(s))) fails.push('I4 no reviewer prompt carried the continuation as steering context');
@@ -47,7 +51,8 @@ for (const c of continuationBuilders) if (!/--resume/.test(String(c.p.cli?.comma
 if (['QUOTA_R2', 'QUOTA_CRASH_FINAL', 'QUOTA_WAIT_RESTART'].includes(scenario)) { const r2 = findings.filter(f => f.round === 2); if (r2.length !== 1) fails.push(`I7 expected exactly one round-2 verdict after the quota retry, got ${r2.length}`); }
 // I8 — the checkpoint commit names the task, never the recovery message (finishGitRun)
 const commits = (() => { try { return require('child_process').execFileSync('git', ['--no-optional-locks', '-C', projDir, 'log', '--all', '--format=%h %s'], { encoding: 'utf8' }).split('\n').filter(l => / tandem: /.test(l)); } catch (e) { return []; } })();
-commits.forEach((c) => { if (/interrupted|Continue exactly/i.test(c)) fails.push(`I8 checkpoint commit carries the recovery message: ${JSON.stringify(c.slice(0, 80))}`);
+commits.forEach((c) => { if (/tandem: This is a milestone INTEGRATION session/.test(c)) return; // the integration session's own task
+                         if (/interrupted|Continue exactly/i.test(c)) fails.push(`I8 checkpoint commit carries the recovery message: ${JSON.stringify(c.slice(0, 80))}`);
                          if (!/tandem: RECIPE_BUILD Implement the feature/.test(c)) fails.push(`I8 checkpoint commit does not name the task: ${JSON.stringify(c.slice(0, 80))}`); });
 console.log(`  checkpoint commits: ${commits.length ? commits.map(c => JSON.stringify(c.slice(0, 70))).join(' ; ') : '(none)'}`);
 // I9 — a completed review records the revision it accepted, so a replay can be deduplicated

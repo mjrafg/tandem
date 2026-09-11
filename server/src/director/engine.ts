@@ -603,6 +603,61 @@ async function mergeDependencyContent(runId: string, key: string, workdir: strin
   return merged;
 }
 
+/**
+ * Is this milestone's work ALREADY on the integration branch, unchanged since
+ * the Reviewer approved it?
+ *
+ * An integration session that merges nothing still costs a full Builder turn
+ * and a full independent review. In one observed run both the base branch and
+ * the integration branch already pointed at the reviewed commit, and the
+ * session that ran changed one report file. When there is provably nothing to
+ * merge and an approval already covers exactly this content, the bookkeeping
+ * can be recorded without commissioning a model.
+ *
+ * The bar is deliberately high, and a branch name is not part of it:
+ *  - every completed session's branch is an ancestor of the integration branch
+ *    (nothing is stranded), and
+ *  - the integration branch holds nothing beyond those sessions and the base,
+ *  - the working tree is clean INCLUDING staged, unstaged and untracked files —
+ *    `git status --porcelain` sees all three, a bare `git diff` does not,
+ *  - and every completed session carries a Reviewer verdict of `pass`.
+ *
+ * Anything else — a findings verdict, a missing verdict, a dirty tree, an
+ * unmerged branch, no repository — returns a reason and the caller runs the
+ * ordinary integration session. This never fabricates an approval; it reuses a
+ * recorded one and says which.
+ */
+async function alreadyIntegrated(
+  rootPath: string, integration: string, sessions: PdSession[],
+): Promise<{ ok: true; provenance: string } | { ok: false; reason: string }> {
+  const completed = sessions.filter((s) => s.status === 'completed');
+  if (completed.length === 0) return { ok: false, reason: 'no completed sessions to account for' };
+
+  const unapproved = completed.filter((s) => s.reviewVerdict !== 'pass');
+  if (unapproved.length > 0) {
+    return { ok: false, reason: `${unapproved.map((s) => `${s.key} (${s.reviewVerdict ?? 'no verdict recorded'})`).join(', ')} carries no Reviewer PASS` };
+  }
+
+  for (const s of completed) {
+    if (!s.branch) continue; // worked directly on the integration branch
+    const merged = await git(rootPath, ['merge-base', '--is-ancestor', s.branch, integration]);
+    if (!merged.ok) return { ok: false, reason: `${s.key} (${s.branch}) is not an ancestor of ${integration}` };
+  }
+
+  // the tree itself, not the branch name: staged, unstaged and untracked
+  const status = await git(rootPath, ['status', '--porcelain']);
+  if (!status.ok) return { ok: false, reason: 'the repository state could not be read' };
+  if (status.stdout.trim()) {
+    const lines = status.stdout.trim().split('\n');
+    return { ok: false, reason: `the working tree has ${lines.length} uncommitted change${lines.length === 1 ? '' : 's'} (${lines.slice(0, 4).map((l) => l.trim()).join('; ')}${lines.length > 4 ? '; …' : ''})` };
+  }
+
+  const tip = await git(rootPath, ['rev-parse', integration]);
+  if (!tip.ok) return { ok: false, reason: `${integration} could not be resolved` };
+  const approvals = completed.map((s) => `${s.key}: Reviewer PASS${s.branch ? ` on ${s.branch}` : ''}`).join(' · ');
+  return { ok: true, provenance: `${integration} at ${tip.stdout.slice(0, 12)} — ${approvals}` };
+}
+
 function worktreeDir(runId: string, key: string): string {
   const dir = path.join(config.dataDir, 'worktrees', runId.slice(0, 8), key.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
   fs.mkdirSync(path.dirname(dir), { recursive: true });
@@ -1608,6 +1663,23 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         if (busy) return { ok: false, error: `Session ${busy.key} is working in the project directory — integrate after it finishes.` };
         const integration = await ensureIntegrationBranch(runId, rootProject.rootPath);
         const branches = ms.sessions.filter((s) => s.branch && s.status === 'completed').map((s) => s.branch as string);
+
+        // Nothing to merge and an approval that still applies: record it rather
+        // than spend a Builder and an independent Reviewer confirming it.
+        const settled = await alreadyIntegrated(rootProject.rootPath, integration, ms.sessions);
+        if (settled.ok) {
+          addActivity(runId, 'integration', `${msKey} was already integrated — no session run`,
+            `Reusing the existing approval rather than re-verifying: ${settled.provenance}`);
+          return {
+            ok: true,
+            text: `${msKey} is already integrated: every completed session is an ancestor of ${integration}, the working tree is clean `
+              + `(staged, unstaged and untracked all checked), and each session carries a Reviewer PASS. No integration session was started `
+              + `and no new review was commissioned — the recorded approval stands, with this provenance: ${settled.provenance}. `
+              + 'Call complete_milestone when you are satisfied.',
+          };
+        }
+        addActivity(runId, 'integration', `${msKey} needs an integration session`, `Fast path declined: ${settled.reason}`);
+
         const sKey = intKey;
         planSessions(runId, msKey, [{
           key: sKey, name: `${ms.name} integration`, purpose: `Integrate and validate milestone ${msKey}`,

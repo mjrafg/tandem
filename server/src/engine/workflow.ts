@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { config } from '../config';
 import type { AiCallPayload, AttachmentMeta, Finding, FindingsPayload } from '../../../shared/types';
 import { computeUsage, recentConversation, shouldAutoCompact } from '../context';
 import { db, getBuilderSession, getChat, getEvent, getProject, setBuilderSession } from '../db';
@@ -12,7 +14,7 @@ import {
   RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, repoBusyBy, setChatRunning, stopRun,
 } from './run';
 import { adoptRepo, finishGitRun, summaryText } from './gitFlow';
-import { captureWorktree, changedSince, diffForPaths, diffWorktrees, revisionHash, signatureMap, type DeltaNoteKind } from './snapshot';
+import { captureReviewBaseline, captureWorktree, changedSince, diffWorktrees, releaseReviewBaseline, repairDiff, revisionHash, signatureMap, type DeltaNoteKind } from './snapshot';
 import {
   classifyProviderOutage, deletePendingReview, fmtRetryAt, getPendingReview, upsertPendingReview,
 } from './reviewWait';
@@ -240,10 +242,12 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     if (round1.verdict === 'pass') return 'done';
 
     // ---- repair
-    // The signature of the tree the Reviewer just judged. Compared after the
-    // repair it yields the paths the repair actually touched — which git
-    // porcelain cannot tell apart from the edit before it.
-    const reviewedSig = signatureMap(h.project.rootPath);
+    // The state the Reviewer just judged: content signatures, the commit it saw,
+    // and private copies of whatever git cannot baseline. Compared after the
+    // repair this yields the paths the repair actually touched — which git
+    // porcelain cannot tell apart from the edit before it — and a diff that
+    // survives the Builder committing its own repair.
+    const reviewedBaseline = captureReviewBaseline(h.project.rootPath, path.join(config.dataDir, 'tmp'));
 
     // A due compaction belongs HERE, at a boundary where no CLI is live and the
     // session is resumable, rather than only after the whole run: the repair and
@@ -276,13 +280,16 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     }
 
     // what the repair actually changed, independent of what it said it changed
-    const changedPaths = changedSince(reviewedSig, signatureMap(h.project.rootPath));
+    const changedPaths = changedSince(reviewedBaseline.signatures, signatureMap(h.project.rootPath));
+    const rd = repairDiff(h.project.rootPath, reviewedBaseline, changedPaths, 12_000);
+    releaseReviewBaseline(reviewedBaseline);
     repairContext = {
       previousFindings: round1.items,
       previousReview: round1.text,
       handoff: repair.resultText,
       changedPaths,
-      ...(() => { const d = diffForPaths(h.project.rootPath, changedPaths, 12_000); return { diff: d.text, diffNote: d.note }; })(),
+      diff: rd.text,
+      diffNote: rd.note,
     };
 
     // the repair may have produced files — re-check the disk before deciding

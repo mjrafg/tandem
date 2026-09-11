@@ -182,58 +182,170 @@ export function changedSince(before: Map<string, string>, after: Map<string, str
 }
 
 /**
- * The real diff for specific paths, plus an honest note when there is none.
+ * The state a review judged, kept so the NEXT round can diff against it.
  *
- * Two cases produce no diff for a path that genuinely changed, and they are not
- * the same thing: the workspace has no repository at all, or the path is
- * untracked and so has no committed baseline. `git diff HEAD` is silent about
- * the second, which once made this report "no git repository" to a Reviewer
- * standing in one. Tracked paths are diffed against HEAD; untracked ones are
- * diffed against /dev/null, which shows the new file without touching the
- * index. Nothing here creates a repository or stages anything.
+ * Two things defeat a naive comparison. A repair that commits moves HEAD, so
+ * `git diff HEAD` shows nothing and the Reviewer is told "no diff" about a file
+ * it can see changed. And a file that was untracked at review time has no
+ * baseline in git at all, so it either looks new or looks like nothing. This
+ * records the commit the review saw, and takes private copies of exactly the
+ * files git cannot baseline — untracked ones, or every file when the workspace
+ * has no repository. Copies live outside the project, are bounded, and are
+ * deleted as soon as the diff is built.
  */
-export function diffForPaths(dir: string, paths: string[], maxChars: number): { text: string | null; note: string } {
-  if (paths.length === 0) return { text: null, note: '(no file content changed since the reviewed state, so there is nothing to diff)' };
-  if (!fs.existsSync(path.join(dir, '.git'))) {
-    return {
-      text: null,
-      note: '(this workspace has no git repository, so no independent diff can be produced. The paths above are '
-        + "content-hash comparisons and are trustworthy; the hand-off above is the Builder's own claim and is not)",
-    };
+export interface ReviewBaseline {
+  /** HEAD when the review ran; null when the workspace is not a repository */
+  head: string | null;
+  signatures: Map<string, string>;
+  /** private copies of files git cannot baseline, or null when none were taken */
+  copiesDir: string | null;
+  copied: Set<string>;
+  /** the copy budget ran out, so some baselines are genuinely missing */
+  truncated: boolean;
+}
+
+/** files copied for baselining, and the per-file ceiling */
+const COPY_MAX_FILES = 300;
+const COPY_MAX_BYTES = 256 * 1024;
+
+export function captureReviewBaseline(dir: string, tmpRoot: string): ReviewBaseline {
+  const signatures = signatureMap(dir);
+  let head: string | null = null;
+  let tracked = new Set<string>();
+  if (fs.existsSync(path.join(dir, '.git'))) {
+    try {
+      head = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { timeout: 10_000 }).toString().trim() || null;
+    } catch { head = null; }
+    try {
+      const listed = execFileSync('git', ['-C', dir, 'ls-files', '--cached', '-z'], { timeout: 20_000, maxBuffer: 32 * 1024 * 1024 })
+        .toString().split('\0').filter(Boolean);
+      tracked = new Set(listed);
+    } catch { /* treat everything as uncopyable-by-git below */ }
   }
-  const clean = paths.map((p) => p.replace(/^\((?:added|deleted)\) /, '')).slice(0, 50);
+
+  // git can reconstruct any tracked file from `head`; everything else needs a copy
+  const needCopy = [...signatures.keys()].filter((f) => !tracked.has(f));
+  const copied = new Set<string>();
+  let copiesDir: string | null = null;
+  let truncated = false;
+  if (needCopy.length > 0) {
+    try {
+      copiesDir = fs.mkdtempSync(path.join(tmpRoot, 'reviewbase-'));
+      for (const rel of needCopy) {
+        if (copied.size >= COPY_MAX_FILES) { truncated = true; break; }
+        const src = path.join(dir, rel);
+        try {
+          if (fs.statSync(src).size > COPY_MAX_BYTES) { truncated = true; continue; }
+          const dest = path.join(copiesDir, rel);
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          fs.copyFileSync(src, dest);
+          copied.add(rel);
+        } catch { truncated = true; }
+      }
+    } catch { copiesDir = null; truncated = needCopy.length > 0; }
+  }
+  return { head, signatures, copiesDir, copied, truncated };
+}
+
+/** delete the private copies; safe to call more than once */
+export function releaseReviewBaseline(b: ReviewBaseline): void {
+  if (!b.copiesDir) return;
+  try { fs.rmSync(b.copiesDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  b.copiesDir = null;
+}
+
+/**
+ * The diff from the reviewed state to the state now, for specific paths.
+ *
+ * Tracked files are diffed from the COMMIT the review saw, so a repair the
+ * Builder committed is included — comparing against the current HEAD would
+ * show nothing at all. Untracked files are diffed against the copy taken at
+ * review time; only a file that did not exist then is diffed against
+ * /dev/null. Anything without a baseline is named as such: a known content
+ * change is never described as possibly metadata-only.
+ */
+export function repairDiff(
+  dir: string, baseline: ReviewBaseline, changedPaths: string[], maxChars: number,
+): { text: string | null; note: string } {
+  if (changedPaths.length === 0) {
+    return { text: null, note: '(no file content changed since the reviewed state, so there is nothing to diff)' };
+  }
+  const isRepo = fs.existsSync(path.join(dir, '.git'));
   const git = (args: string[]) => {
     try {
       return execFileSync('git', ['-C', dir, ...args], { timeout: 20_000, maxBuffer: 32 * 1024 * 1024 }).toString();
     } catch (err: any) {
-      // `git diff --no-index` exits 1 when the files differ, which is the
-      // normal case here — the diff is still on stdout.
+      // `git diff --no-index` exits 1 when files differ — the diff is on stdout
       return typeof err?.stdout === 'string' ? err.stdout : (err?.stdout?.toString?.() ?? '');
     }
   };
+  const clean = changedPaths.map((p) => p.replace(/^\((?:added|deleted)\) /, '')).slice(0, 60);
   const tracked: string[] = [];
-  const untracked: string[] = [];
+  const viaCopy: string[] = [];
+  const brandNew: string[] = [];
+  const noBaseline: string[] = [];
   for (const rel of clean) {
-    try {
-      execFileSync('git', ['-C', dir, 'ls-files', '--error-unmatch', '--', rel], { timeout: 10_000, stdio: 'ignore' });
-      tracked.push(rel);
-    } catch { untracked.push(rel); }
+    let isTracked = false;
+    if (isRepo && baseline.head) {
+      try {
+        execFileSync('git', ['-C', dir, 'cat-file', '-e', `${baseline.head}:${rel}`], { timeout: 10_000, stdio: 'ignore' });
+        isTracked = true;
+      } catch { isTracked = false; }
+    }
+    if (isTracked) tracked.push(rel);
+    else if (baseline.copied.has(rel)) viaCopy.push(rel);
+    else if (!baseline.signatures.has(rel)) brandNew.push(rel);
+    else noBaseline.push(rel);
   }
+
   const chunks: string[] = [];
-  if (tracked.length > 0) {
-    const t = git(['diff', 'HEAD', '--', ...tracked]);
+  if (tracked.length > 0 && baseline.head) {
+    // the reviewed COMMIT, not HEAD: this is what survives a committed repair
+    const t = git(['diff', baseline.head, '--', ...tracked]);
     if (t.trim()) chunks.push(t);
   }
-  for (const rel of untracked.slice(0, 20)) {
-    const u = git(['diff', '--no-index', '--', '/dev/null', rel]);
-    if (u.trim()) chunks.push(u);
+  // `git diff --no-index` labels its hunks with the absolute paths it was
+  // given, which would show the Reviewer a private temp directory instead of
+  // the file it knows. Put the project-relative name back.
+  // git prints its own `a/` and `b/` prefixes immediately before the path it was
+  // given, so the replacement keeps the leading slash: `a` + `/tmp/x/a.txt`
+  // becomes `a` + `/a.txt`. /dev/null is left exactly as it is — it is what
+  // marks a genuinely new file.
+  const relabel = (text: string, before: string, after: string, rel: string) => {
+    let out = text;
+    if (before !== '/dev/null') out = out.split(before).join(`/${rel}`);
+    if (after !== '/dev/null') out = out.split(after).join(`/${rel}`);
+    return out;
+  };
+  for (const rel of viaCopy.slice(0, 30)) {
+    const before = path.join(baseline.copiesDir ?? '', rel);
+    const after = path.join(dir, rel);
+    if (!fs.existsSync(before)) { noBaseline.push(rel); continue; }
+    const present = fs.existsSync(after);
+    const u = git(['diff', '--no-index', '--', before, present ? after : '/dev/null']);
+    if (u.trim()) chunks.push(relabel(u, before, present ? after : '/dev/null', rel));
   }
-  if (chunks.length === 0) {
-    return { text: null, note: '(git produced no diff for these paths — they may have been deleted, or changed only in mode or metadata)' };
+  for (const rel of brandNew.slice(0, 30)) {
+    const after = path.join(dir, rel);
+    const u = git(['diff', '--no-index', '--', '/dev/null', after]);
+    if (u.trim()) chunks.push(relabel(u, '/dev/null', after, rel));
+  }
+
+  const notes: string[] = [];
+  if (noBaseline.length > 0) {
+    notes.push(`(no baseline was kept for ${noBaseline.slice(0, 20).join(', ')}${noBaseline.length > 20 ? `, +${noBaseline.length - 20} more` : ''}`
+      + ' — these files existed at review time but git held no copy of them. Their content HAS changed (the hashes differ); only the'
+      + ' before/after text is unavailable, so read the current file directly.)');
+  }
+  if (baseline.truncated) {
+    notes.push('(the baseline copy budget was exceeded, so some comparisons above may be missing rather than empty)');
+  }
+  if (chunks.length === 0 && notes.length === 0) {
+    notes.push(isRepo
+      ? '(git produced no diff for these paths even though their content changed — read the files directly rather than assuming the change was cosmetic)'
+      : '(this workspace has no git repository and no baseline copy was available, so no before/after text can be produced)');
   }
   const text = chunks.join('\n');
-  return {
-    text: text.length > maxChars ? `${text.slice(0, maxChars)}\n… diff truncated at ${maxChars} characters …` : text,
-    note: '',
-  };
+  const body = text.length > maxChars ? `${text.slice(0, maxChars)}\n… diff truncated at ${maxChars} characters …` : text;
+  return { text: body.trim() ? body : null, note: notes.join('\n') };
 }

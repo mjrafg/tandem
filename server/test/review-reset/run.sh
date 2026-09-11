@@ -1,6 +1,6 @@
 #!/bin/bash
 # Deterministic reproduction of the review-budget reset and the restart-during-review-wait pause.
-# Overridable: DIST PORT LABEL FAKE_FINDINGS_FOR FAKE_CODEX_CRASH_ON_CALL SETTLE RESUME_AFTER_RESTART. Work dirs live under ./.work (gitignored).
+# Overridable: DIST PORT LABEL FAKE_FINDINGS_FOR FAKE_CODEX_CRASH_ON_CALL NO_GIT SETTLE RESUME_AFTER_RESTART. Work dirs live under ./.work (gitignored).
 #   run.sh SCENARIO   where SCENARIO ∈ NONE | AFTER_R1 | DURING_R2 | DURING_FINAL | DOUBLE_FINAL | QUOTA_R2 | QUOTA_CRASH_FINAL | QUOTA_WAIT_RESTART
 #                                     | OVERLOAD_BUILDER (Builder call 1 refused with a 529) | OVERLOAD_DIRECTOR (Director turn 1 refused with a 529)
 # Each scenario boots an isolated Tandem with fake CLIs, drives ONE Director session through
@@ -14,7 +14,18 @@ DIST="${DIST:-$ROOT/server/dist/index.js}"
 LABEL="${LABEL:-$SCENARIO}"; PORT="${PORT:-7971}"
 DD=$RR/.work/data-$LABEL; STATE=$RR/.work/state-$LABEL; PROJ=$RR/.work/proj-$LABEL
 rm -rf "$DD" "$STATE" "$PROJ"; mkdir -p "$DD" "$STATE" "$PROJ"
-( cd "$PROJ" && git init -q && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init )
+if [ "${NO_GIT:-}" = 1 ]; then
+  # A project with no repository of its own must not sit INSIDE one: git
+  # searches upward, so Tandem would adopt the enclosing checkout — during
+  # development of this flag it did exactly that to the Tandem repo itself,
+  # creating a branch and committing the working tree. Move it out of the tree.
+  PROJ=$(mktemp -d "${TMPDIR:-/tmp}/tandem-rr-nogit-XXXXXX")
+  echo "== NO_GIT: workspace has no repository, and lives outside any ($PROJ)"
+  if git -C "$PROJ" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "refusing to run: $PROJ is still inside a git repository"; exit 1
+  fi
+else
+( cd "$PROJ" && git init -q && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init ); fi
 lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null; sleep 0.3
 
 # recipes: first marker found in the prompt wins (object order)

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AttachmentMeta, Finding, FindingsPayload } from '../../../shared/types';
+import type { AiCallPayload, AttachmentMeta, Finding, FindingsPayload } from '../../../shared/types';
 import { computeUsage, recentConversation, shouldAutoCompact } from '../context';
 import { db, getBuilderSession, getChat, getEvent, getProject, setBuilderSession } from '../db';
 import { addEvent, updateEvent } from '../events';
@@ -12,7 +12,7 @@ import {
   RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, repoBusyBy, setChatRunning, stopRun,
 } from './run';
 import { adoptRepo, finishGitRun, summaryText } from './gitFlow';
-import { captureWorktree, diffWorktrees, revisionHash, type DeltaNoteKind } from './snapshot';
+import { captureWorktree, changedSince, diffForPaths, diffWorktrees, revisionHash, signatureMap, type DeltaNoteKind } from './snapshot';
 import {
   classifyProviderOutage, deletePendingReview, fmtRetryAt, getPendingReview, upsertPendingReview,
 } from './reviewWait';
@@ -221,6 +221,8 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   builderTimeout: number;
   /** true when re-entered by the retry sweeper (a provider-wait already stands) */
   retry: boolean;
+  /** repair context rebuilt from events when a retry re-enters at a later round */
+  replayRepair?: RepairContext;
   /** the continuation/recovery instruction this run was started with, if any */
   steering?: string;
 }): Promise<PhaseOutcome> {
@@ -228,6 +230,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   // Agent template mid-session never changes what this session executes
   const builderCfg = builderExecFor(h.chat.id, h.settings);
   let subject2 = opts.subject;
+  let repairContext: RepairContext | undefined = opts.replayRepair;
 
   if (opts.round === 1) {
     const round1 = await review(h, userText, opts.subject, 1, opts.steering);
@@ -237,6 +240,11 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     if (round1.verdict === 'pass') return 'done';
 
     // ---- repair
+    // The signature of the tree the Reviewer just judged. Compared after the
+    // repair it yields the paths the repair actually touched — which git
+    // porcelain cannot tell apart from the edit before it.
+    const reviewedSig = signatureMap(h.project.rootPath);
+
     // A due compaction belongs HERE, at a boundary where no CLI is live and the
     // session is resumable, rather than only after the whole run: the repair and
     // the last review would otherwise each carry the full pre-compaction
@@ -267,6 +275,16 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
       return 'failed';
     }
 
+    // what the repair actually changed, independent of what it said it changed
+    const changedPaths = changedSince(reviewedSig, signatureMap(h.project.rootPath));
+    repairContext = {
+      previousFindings: round1.items,
+      previousReview: round1.text,
+      handoff: repair.resultText,
+      changedPaths,
+      ...(() => { const d = diffForPaths(h.project.rootPath, changedPaths, 12_000); return { diff: d.text, diffNote: d.note }; })(),
+    };
+
     // the repair may have produced files — re-check the disk before deciding
     // what the last round reviews
     h.refresh();
@@ -282,7 +300,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   }
 
   // ---- round 2 (the last review)
-  const round2 = await review(h, userText, subject2, 2, opts.steering);
+  const round2 = await review(h, userText, subject2, 2, opts.steering, repairContext);
   if (h.stopped || 'stopped' in round2) return 'stopped';
   if ('outage' in round2) return recordReviewWait(h, userText, 2, subject2, round2.outage);
   if ('failure' in round2) return reviewerFailed(h, userText, 2, subject2, round2.failure, opts.retry);
@@ -298,6 +316,32 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     + 'No further repair was started, because no review round remains to verify one — the work is preserved '
     + `exactly as the Reviewer last saw it. Open findings: ${open || '(see the findings above)'}`);
   return 'done';
+}
+
+/**
+ * Rebuild a repair review's context after a restart, from the durable record.
+ *
+ * An outage retry re-enters at the persisted round in a fresh process, so the
+ * in-memory context from the original run is gone. Findings, the Reviewer's own
+ * previous reply and the Builder's hand-off all survive as events; the tree
+ * signature taken before the repair does not, so the changed paths are reported
+ * as unavailable rather than guessed. Absent evidence is labelled absent.
+ */
+function replayRepairContext(chatId: string, round: number): RepairContext | undefined {
+  const prev = lastFindings(chatId, round - 1);
+  if (!prev) return undefined;
+  const rows = db.prepare("SELECT kind, payload, seq FROM events WHERE chat_id = ? AND kind = 'ai_call' ORDER BY seq").all(chatId) as { payload: string; seq: number }[];
+  const calls = rows.map((r) => ({ seq: r.seq, p: JSON.parse(r.payload) as AiCallPayload }));
+  const lastOf = (role: string) => [...calls].reverse().find((c) => c.p.role === role)?.p.response?.text ?? '';
+  return {
+    previousFindings: prev.items,
+    previousReview: lastOf('reviewer'),
+    handoff: lastOf('builder'),
+    changedPaths: [],
+    diff: null,
+    diffNote: '(this review is a retry after an interruption, so the file-level comparison against the reviewed '
+      + 'state could not be reproduced. Re-establish what the repair changed yourself before relying on it)',
+  };
 }
 
 /** The most recent verdict of `round` in a chat. */
@@ -410,6 +454,7 @@ export function startReviewRetry(chatId: string): Promise<void> | null {
       h.status(`Retrying the required review (round ${round}, attempt ${pending.attempts + 1}) against the same result.`);
       const outcome = await runReviewPhase(h, originalRequest, {
         round,
+        replayRepair: round > 1 ? replayRepairContext(chatId, round) : undefined,
         steering: ledger && pending.userText.trim() !== ledger.originalRequest.trim() ? pending.userText : undefined,
         subject: pending.subject,
         before: captureWorktree(h.project.rootPath),
@@ -481,13 +526,28 @@ function currentDelta(h: RunHandle): ReviewDelta {
 
 // ---------------------------------------------------------------- reviewer
 
+/** what a repair review is given beyond the original request (§ repair_section) */
+interface RepairContext {
+  previousFindings: Finding[];
+  /** the previous Reviewer's own account of what it checked — its reply, capped */
+  previousReview: string;
+  /** the Builder's description of its repair; a claim, never evidence */
+  handoff: string;
+  /** paths whose CONTENT changed since the reviewed state */
+  changedPaths: string[];
+  /** the real diff for those paths, or null when one cannot be produced */
+  diff: string | null;
+  /** why there is no diff — shown verbatim, so absent evidence reads as absent */
+  diffNote: string;
+}
+
 type ReviewResult =
-  | { verdict: 'pass' | 'findings'; items: Finding[]; eventId: string }
+  | { verdict: 'pass' | 'findings'; items: Finding[]; eventId: string; text: string }
   | { outage: { reason: string; retryAt: number; detail: string } } // temporary provider condition — retryable
   | { failure: string }                                             // any other Reviewer failure
   | { stopped: true };
 
-async function review(h: RunHandle, originalRequest: string, subject: ReviewSubject, round: number, steering?: string): Promise<ReviewResult> {
+async function review(h: RunHandle, originalRequest: string, subject: ReviewSubject, round: number, steering?: string, repair?: RepairContext): Promise<ReviewResult> {
   h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is checking the repaired result…');
   const cfg = h.settings.roles.reviewer;
   const evidence = subject.kind === 'changes'
@@ -501,6 +561,19 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
     // a continuation is context the Reviewer should know about, never the request
     ...(steering && steering.trim() !== originalRequest.trim() ? [renderPrompt('reviewer.continuation_section', { continuation: steering })] : []),
     evidence,
+    // A repair review that is handed only the original request starts the whole
+    // job again: in one audited session an eight-line repair drew a 317-second
+    // re-verification, longer than the first review. What it lacked was the
+    // record of its own previous round.
+    ...(repair ? [renderPrompt('reviewer.repair_section', {
+      previous_findings: findingsAsText(repair.previousFindings) || '(none recorded)',
+      previous_review: capText(repair.previousReview, 4_000) || '(the previous reply was not recorded)',
+      builder_handoff: capText(repair.handoff, 3_000) || '(the Builder described no repair)',
+      changed_paths: repair.changedPaths.length > 0
+        ? repair.changedPaths.slice(0, 60).map((f) => `- ${f}`).join('\n')
+        : '- (no file content changed since the reviewed state)',
+      repair_diff: repair.diff ?? repair.diffNote,
+    })] : []),
     renderPrompt('reviewer.round_section', { review_round: round, max_review_rounds: MAX_REVIEW_ROUNDS }),
     getPrompt('reviewer.output_format'),
   ].join('\n\n');
@@ -539,7 +612,7 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
     recordReview(h.chat.id, round, verdict, revisionOf(revisionHash(h.project.rootPath, captureWorktree(h.project.rootPath)), subject));
     return e;
   })();
-  return { verdict, items, eventId: ev.id };
+  return { verdict, items, eventId: ev.id, text: result.text };
 }
 
 /** Parse the Reviewer's contracted output format (protocol, not intent). */

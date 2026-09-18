@@ -211,10 +211,18 @@ export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): L
     // does not have to: if it lingers, the ten-minute timeout marks the flow
     // failed and the close handler then declines to store anything, losing a
     // credential that was sitting in the stream the whole time.
-    if (session.kind === 'mint' && session.phase !== 'done' && captureMintedToken(provider, session.raw)) {
-      session.phase = 'done';
-      session.notice = undefined;
-      try { session.child.kill('SIGTERM'); } catch { /* already leaving */ }
+    if (session.kind === 'mint' && session.phase !== 'done') {
+      if (captureMintedToken(provider, session.raw)) {
+        session.phase = 'done';
+        session.notice = undefined;
+        try { session.child.kill('SIGTERM'); } catch { /* already leaving */ }
+      } else if (/token created successfully/i.test(session.output)) {
+        // The CLI says it worked and Tandem cannot read the token. Silence here
+        // is the worst outcome: the flow sits at "running" forever while the
+        // credential scrolls past. Say so, and leave the output on screen.
+        session.notice = 'The CLI reported success but Tandem could not read the token from its output. '
+          + 'Open "What the CLI is showing" below and send those lines on — nothing was saved.';
+      }
     }
 
     // "Press Enter to retry" is not a prompt to resend the same code — pressing
@@ -377,6 +385,15 @@ export interface StoredTokenMeta {
 
 /** what a minted Claude token looks like; used to find it and to sanity-check it */
 const TOKEN_SHAPE = /sk-ant-[A-Za-z0-9._-]{20,}/;
+/** the prose the CLI prints around the token, which must never be mistaken for it */
+const NOT_A_TOKEN = /^(store this|use this|press |your oauth|long-lived|set this|export )/i;
+/** a credential-shaped run: long, unbroken, no spaces. Used when the prefix is not sk-ant- */
+const CREDENTIAL_SHAPE = /^[A-Za-z0-9._-]{24,}$/;
+
+/** would this value be accepted as a token to hand to the CLI? */
+function looksLikeToken(value: string): boolean {
+  return TOKEN_SHAPE.test(value) || CREDENTIAL_SHAPE.test(value);
+}
 
 /** Metadata only — the token itself is never exposed outside this module. */
 export function tokenMeta(provider: AuthProvider): StoredTokenMeta | null {
@@ -391,7 +408,7 @@ export function tokenForEnv(provider: AuthProvider): string | null {
   if (!r) return null;
   try {
     const value = decryptSecret(r.data).token;
-    return value && TOKEN_SHAPE.test(value) ? value : null;
+    return value && looksLikeToken(value) ? value : null;
   } catch {
     return null; // an unreadable blob must never become a broken environment
   }
@@ -433,12 +450,23 @@ function scrubForTokenSearch(text: string): string {
  */
 export function extractMintedToken(raw: string): { token: string; expiresAt: number } | null {
   const plain = scrubForTokenSearch(raw);
-  const lines = plain.split('\n');
-  const at = lines.findIndex((l) => /sk-ant-/.test(l));
-  if (at === -1) return null;
+  const lines = plain.split('\n').map((l) => l.trim());
 
-  const head = lines[at].slice(lines[at].indexOf('sk-ant-'));
-  const headToken = /^sk-ant-[A-Za-z0-9._-]*/.exec(head)?.[0] ?? '';
+  // Preferred: the known prefix. Fallback: the line the CLI prints directly
+  // under its success heading — the prefix is not something to bet the feature
+  // on, and a token that cannot be read is indistinguishable from one that was
+  // never printed.
+  let at = lines.findIndex((l) => /sk-ant-/.test(l));
+  let headToken = '';
+  if (at !== -1) {
+    headToken = /^sk-ant-[A-Za-z0-9._-]*/.exec(lines[at].slice(lines[at].indexOf('sk-ant-')))?.[0] ?? '';
+  } else {
+    const heading = lines.findIndex((l) => /your oauth token|token created successfully/i.test(l));
+    if (heading === -1) return null;
+    at = lines.findIndex((l, i) => i > heading && !NOT_A_TOKEN.test(l) && CREDENTIAL_SHAPE.test(l));
+    if (at === -1) return null;
+    headToken = lines[at];
+  }
   let token = headToken;
   for (let i = at + 1; i < lines.length; i += 1) {
     const next = lines[i].trim();
@@ -446,11 +474,11 @@ export function extractMintedToken(raw: string): { token: string; expiresAt: num
     // is made entirely of token characters — the dot is in the alphabet — so
     // "all token characters" alone appended it and corrupted the credential.
     // A wrap fragment is long; a stray word is not.
-    if (!next || next.length < 20 || !/^[A-Za-z0-9._-]+$/.test(next)) break;
+    if (!next || next.length < 20 || NOT_A_TOKEN.test(next) || !/^[A-Za-z0-9._-]+$/.test(next)) break;
     token += next;
     if (token.length > 200) break; // no minted token is this long
   }
-  if (!TOKEN_SHAPE.test(token)) return null;
+  if (!looksLikeToken(token)) return null;
 
   const years = /valid for\D{0,20}(\d+)\s*year/i.exec(plain);
   const days = /valid for\D{0,20}(\d+)\s*day/i.exec(plain);

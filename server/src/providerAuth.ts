@@ -10,8 +10,8 @@
  * closes.
  *
  * How it works. Both CLIs refuse to start an interactive login without a
- * terminal — `claude setup-token` with stdin from /dev/null prints nothing and
- * exits 0 — so the login runs under a PTY borrowed from `script(1)`, which is
+ * terminal — with stdin from /dev/null the CLI prints nothing and exits 0 — so
+ * the login runs under a PTY borrowed from `script(1)`, which is
  * already on the host and costs no new dependency. The CLI prints an
  * authorization URL; the operator opens it in their own browser, signs in to
  * their own account, and pastes back the short code the provider shows them.
@@ -19,9 +19,8 @@
  * What Tandem does NOT do: it never sees a password, never stores the pasted
  * code (it goes straight to the child's stdin and is not logged, evented or
  * written to disk), and never reads the credential file the CLI writes. The
- * output shown in the browser is scrubbed of anything token-shaped first,
- * because `setup-token` in particular is designed to print a credential at the
- * end and that must not reach a browser or a log.
+ * output shown in the browser is scrubbed of anything token-shaped first, so a
+ * credential a CLI decides to print cannot reach a browser or a log.
  *
  * A login is deliberately in-memory and short-lived. If the server restarts
  * mid-flow the flow is simply gone and the operator starts again; nothing about
@@ -68,8 +67,8 @@ const sessions = new Map<AuthProvider, Session>();
  *
  * The URL is kept — it is what the operator needs and it is not a secret on its
  * own (it is a PKCE authorize link). Long opaque strings that are NOT part of a
- * URL are replaced: `claude setup-token` prints a long-lived token when it
- * succeeds, and that must never reach a browser, a log or an event.
+ * URL are replaced, so a token a CLI decides to print never reaches a browser,
+ * a log or an event.
  */
 /** the escape character, named so no editor or copy-paste can silently eat it */
 const ESC = String.fromCharCode(27);
@@ -128,9 +127,21 @@ function wantsCode(text: string): boolean {
 
 // ------------------------------------------------------------------ the flow
 
+/**
+ * `claude auth login`, NOT `claude setup-token`.
+ *
+ * They look alike — both open the same OAuth page and both ask for a pasted
+ * code — but setup-token MINTS A TOKEN AND PRINTS IT for you to put in
+ * CLAUDE_CODE_OAUTH_TOKEN. It never signs the CLI in: the credentials file is
+ * untouched and `claude auth status` still reports logged out afterwards. It
+ * also asks for one scope (user:inference) where the real sign-in asks for
+ * six. Built on setup-token this page could not have worked, and the scrubber
+ * that protects the browser from a printed credential destroyed the only thing
+ * it produced. `auth login` persists the session the Builder and Director use.
+ */
 function loginCommand(provider: AuthProvider): string {
   return provider === 'claude'
-    ? `${config.claudeBin} setup-token`
+    ? `${config.claudeBin} auth login --claudeai`
     : `${config.codexBin} login --device-auth`;
 }
 

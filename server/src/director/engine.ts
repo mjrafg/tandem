@@ -4,19 +4,20 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Chat, PdSession, ProjectRun, SessionsPayload } from '../../../shared/types';
 import { config } from '../config';
-import { db, getBuilderSession, getChat, getEvent, getProject, rowToChat, setGitStateRow } from '../db';
+import { db, getChat, getEvent, getProject, rowToChat, setGitStateRow } from '../db';
 import { addEvent, broadcastChat, deriveTitle, setChatRunning, setChatTitle, updateEvent } from '../events';
 import { directorSystemText, getPrompt, renderPrompt } from '../prompts';
-import { getSettings, resolveDirectorRole } from '../settings';
+import { getSettings } from '../settings';
 import { findOrCreateProject } from '../projectRoutes';
-import { runClaudeTurn } from '../engine/claude';
-import { runCodexReview } from '../engine/codex';
+import { executeRole, providerLabel, providerShortLabel } from '../providers/executor';
+import { resolveBuilderRole, resolveDirectorRoleConfig, resolveReviewerRole } from '../providers/resolve';
+import { rememberSession, storedSessionRef } from '../providers/sessions';
 import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, repoBusyBy, stopRun } from '../engine/run';
 import { computeUsage, shouldAutoCompact } from '../context';
 import { performNativeCompaction } from '../engine/providerContext';
 import { releaseBrowsers } from '../engine/browserHost';
 import { parseVerdict, startReviewRetry, startRun } from '../engine/workflow';
-import { type ProviderOutage, classifyProviderOutage, fmtRetryAt, getPendingReview } from '../engine/reviewWait';
+import { type ProviderOutage, classifyProviderOutage, fmtRetryAt, getPendingReview, outageFromFailure } from '../engine/reviewWait';
 import { expediteWake, getPendingWake, providerWaitActive, upsertPendingWake } from './pendingWake';
 import { terminateProcGroup } from '../engine/procGroups';
 import { agentCatalogText } from '../agents/catalog';
@@ -198,10 +199,10 @@ async function directorAutoCompact(runId: string): Promise<void> {
     if (!chat || isRunning(chatId)) return;
     if (!shouldAutoCompact(computeUsage(chat), settings.context)) return;
     if ((compactFailedAt.get(chatId) ?? 0) > Date.now() - COMPACT_RETRY_COOLDOWN) return;
-    // the Project Chat's session belongs to the DIRECTOR (always claude-code),
-    // so compaction targets the Director's model — not the Builder provider
-    const director = resolveDirectorRole(settings);
-    const outcome = await performNativeCompaction(chat, 'auto', { provider: 'claude-code', model: director.model }); // emits its own compaction/error events
+    // the Project Chat's session belongs to the DIRECTOR, so compaction
+    // targets the Director's provider and model — not the Builder's
+    const director = resolveDirectorRoleConfig(settings);
+    const outcome = await performNativeCompaction(chat, 'auto', { provider: director.provider, model: director.model }); // emits its own compaction/error events
     if (outcome.ok) compactFailedAt.delete(chatId);
     else compactFailedAt.set(chatId, Date.now());
   } catch (err) {
@@ -235,40 +236,38 @@ async function runDirectorTurn(runId: string, message: string): Promise<(Provide
   registerCtx(ctx);
   setChatRunning(chat.id, true);
   try {
-    // the Director has its OWN model settings — never the Builder's, whose
-    // provider/model may change (even to Codex) without touching the Director
-    const director = resolveDirectorRole(settings);
+    // the Director has its OWN provider/model settings — never the Builder's,
+    // which may change (even to another backend) without touching the Director
+    const director = resolveDirectorRoleConfig(settings);
     const state = renderPrompt('director.state', { project_state: stateSnapshot(runId) });
-    const result = await runClaudeTurn(new RunHandle(ctx, chat, project, []), {
+    const result = await executeRole({
+      handle: new RunHandle(ctx, chat, project, []),
       role: 'director',
+      provider: director.provider,
       model: director.model,
       effort: director.effort,
       // the Agent catalog is rebuilt from the database for EVERY turn and rides
-      // on --append-system-prompt, so admin changes reach the very next
-      // planning decision and never linger in conversation history
-      systemAppendix: `${directorSystemText(settings)}\n\n${agentCatalogText()}`,
-      message: `${state}\n\n${message}`,
+      // on the role prompt, so admin changes reach the very next planning
+      // decision and never linger in conversation history
+      systemPrompt: `${directorSystemText(settings)}\n\n${agentCatalogText()}`,
+      userPrompt: `${state}\n\n${message}`,
       cwd: project.rootPath,
-      resumeSessionId: getBuilderSession(chat.id),
-      withDirectorTools: true,
-      readOnly: true,
+      session: storedSessionRef(chat.id),
       timeoutMs: DIRECTOR_TIMEOUT,
     });
-    if (result.sessionId) {
-      db.prepare('UPDATE chats SET builder_session_id = ?, builder_session_provider = ? WHERE id = ?')
-        .run(result.sessionId, 'claude-code', chat.id);
-    }
-    if (!result.ok && !result.stopped) {
+    rememberSession(chat.id, result.session);
+    if (result.status === 'failed') {
       // a temporary provider limit is not a Director failure: the caller keeps
       // what it was saying and re-says it once the limit lifts
-      const outage = classifyProviderOutage(result.error, Date.now(), 'Claude');
+      const outage = outageFromFailure(result.failure, providerShortLabel(director.provider));
+      const detail = result.failure?.message;
       addEvent(chat.id, 'error', {
         message: outage ? `Director paused — ${outage.reason}` : 'Director call failed',
-        detail: outage ? `${result.error}\nRetrying automatically at ${fmtRetryAt(outage.retryAt)}.` : result.error,
+        detail: outage ? `${detail}\nRetrying automatically at ${fmtRetryAt(outage.retryAt)}.` : detail,
         source: 'director',
         retryable: true,
       });
-      return outage ? { ...outage, detail: result.error ?? '' } : null;
+      return outage ? { ...outage, detail: detail ?? '' } : null;
     }
   } finally {
     releaseCtx(ctx);
@@ -279,7 +278,7 @@ async function runDirectorTurn(runId: string, message: string): Promise<(Provide
 
 // ---------------------------------------------------------------- review plumbing
 
-/** Run one independent review (the SAME Codex reviewer) on an orchestration artifact. */
+/** Run one independent review (the configured Reviewer, whatever backend that is) on an orchestration artifact. */
 async function reviewArtifact(runId: string, prompt: string, round: number): Promise<{ verdict: 'pass' | 'findings'; findingsText: string } | null> {
   const run = getRun(runId);
   if (!run) return null;
@@ -293,18 +292,24 @@ async function reviewArtifact(runId: string, prompt: string, round: number): Pro
   try {
     const h = new RunHandle(ctx, chat, project, []);
     h.status('Reviewer is checking the Director\'s plan/decision…');
-    const result = await runCodexReview(h, {
-      model: settings.roles.reviewer.model,
-      effort: settings.roles.reviewer.effort,
-      prompt: `${prompt}\n\n${getPrompt('reviewer.output_format')}`,
+    const reviewer = resolveReviewerRole(settings);
+    const result = await executeRole({
+      handle: h,
+      role: 'reviewer',
+      provider: reviewer.provider,
+      model: reviewer.model,
+      effort: reviewer.effort,
+      systemPrompt: '',
+      userPrompt: `${prompt}\n\n${getPrompt('reviewer.output_format')}`,
       cwd: project.rootPath,
+      emitActivity: false,
       timeoutMs: REVIEW_TIMEOUT,
     });
-    if (!result.ok) {
-      addEvent(chat.id, 'error', { message: 'Reviewer could not run', detail: result.error, source: 'reviewer', retryable: true });
+    if (result.status !== 'completed') {
+      addEvent(chat.id, 'error', { message: 'Reviewer could not run', detail: result.failure?.message, source: 'reviewer', retryable: true });
       return null;
     }
-    const { verdict, items } = parseVerdict(result.text);
+    const { verdict, items } = parseVerdict(result.answer);
     addEvent(chat.id, 'findings', { verdict, round, items }, { runId: ctx.runId });
     const findingsText = items.map((f, i) => `${i + 1}. [${f.severity}] ${f.title}\n   ${f.detail}${f.recommendation ? `\n   Recommendation: ${f.recommendation}` : ''}`).join('\n');
     return { verdict, findingsText };
@@ -896,7 +901,7 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   // a Director decision — and the Director was blocked by that same limit, so
   // the project stopped dead. Preserve it instead, exactly like a pause.
   const outage = !pausing && outcome.phase !== 'stopped' && !outcome.timedOut && (outcome.failed || outcome.phase === 'failed')
-    ? classifyProviderOutage(outcome.errorText, Date.now(), 'Claude')
+    ? classifyProviderOutage(outcome.errorText, Date.now(), providerShortLabel(resolveBuilderRole(getSettings(), chatId).provider))
     : null;
   let status: PdSession['status'];
   // the standing wait survives interruptions too: a retry stopped by the user

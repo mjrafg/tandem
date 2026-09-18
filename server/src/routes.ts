@@ -32,7 +32,10 @@ import { deleteAgentSnapshot } from './agents/store';
 import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
 import { expediteRunReviews } from './reviewRetrySweeper';
 import { broadcast, sseHandler } from './sse';
-import { getSettings, putSettings, resolveDirectorRole } from './settings';
+import { getSettings, putSettings, validateRoleConfigs } from './settings';
+import { allProviderHealth } from './providers/executor';
+import { providerRegistry } from './providers/registry';
+import { resolveBuilderRole, resolveDirectorRoleConfig, resolveReviewerRole } from './providers/resolve';
 import { allStatus, cancelLogin, forgetToken, getLogin, startLogin, storePastedToken, submitCode, tokenMeta, type AuthProvider } from './providerAuth';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
 import { listTools, resetToolText, setToolText } from './toolText';
@@ -305,7 +308,7 @@ export function registerRoutes(app: FastifyInstance): void {
     if (isRunning(chat.id)) return reply.code(409).send({ error: 'Wait for the current run to finish before compacting.' });
     // a Project Chat's session belongs to the Director (always claude-code)
     const outcome = chat.kind === 'project'
-      ? await performNativeCompaction(chat, 'manual', { provider: 'claude-code', model: resolveDirectorRole(getSettings()).model })
+      ? await performNativeCompaction(chat, 'manual', resolveDirectorRoleConfig(getSettings()))
       : await performNativeCompaction(chat, 'manual');
     if (!outcome.ok) return reply.code(502).send({ error: outcome.error ?? 'Native compaction failed.', outcome });
     return outcome;
@@ -614,7 +617,33 @@ export function registerRoutes(app: FastifyInstance): void {
 
   app.get('/api/settings', async () => getSettings());
 
-  app.put('/api/settings', async (req) => putSettings((req.body ?? {}) as Partial<AppSettings>));
+  app.put('/api/settings', async (req, reply) => {
+    const patch = (req.body ?? {}) as Partial<AppSettings>;
+    // the server is authoritative: a provider/model pair that cannot run is
+    // refused here, whatever the client offered
+    const problem = validateRoleConfigs(patch);
+    if (problem) return reply.code(400).send({ error: problem });
+    return putSettings(patch);
+  });
+
+  // ---------------------------------------------------------------- AI providers
+
+  /** The registry as the UI sees it: providers, their models, capabilities, and
+   *  what each role currently resolves to. The only model list the UI reads. */
+  app.get('/api/providers', async () => {
+    const s = getSettings();
+    return {
+      providers: providerRegistry.list(),
+      resolved: {
+        builder: resolveBuilderRole(s),
+        reviewer: resolveReviewerRole(s),
+        director: resolveDirectorRoleConfig(s),
+      },
+    };
+  });
+
+  /** Installed / signed in, per provider. Spends no model usage. */
+  app.get('/api/providers/health', async () => ({ providers: await allProviderHealth() }));
 
   app.get('/api/settings/effective-prompt', async (req) => {
     const role = ((req.query as any).role ?? 'builder') as RoleName | 'final_repair';

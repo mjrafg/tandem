@@ -12,7 +12,8 @@ import { registerIntegrationRoutes } from './integrationRoutes';
 import { registerAgentRoutes } from './agents/routes';
 import { registerObservabilityRoutes } from './observability/routes';
 import { seedAgents } from './agents/store';
-import { getSettings, migrateContextDefaults, resolveDirectorRole } from './settings';
+import { getSettings, migrateContextDefaults } from './settings';
+import { resolveDirectorRoleConfig } from './providers/resolve';
 import { getChat } from './db';
 import { performNativeCompaction } from './engine/providerContext';
 import { recoverInterruptedRuns } from './engine/run';
@@ -59,7 +60,7 @@ if (process.argv[2] === 'set-password') {
       if (chat.running) { console.error(`${id}: a run is active — refusing`); failed += 1; continue; }
       const before = computeUsage(chat);
       const outcome = chat.kind === 'project'
-        ? await performNativeCompaction(chat, 'manual', { provider: 'claude-code', model: resolveDirectorRole(getSettings()).model })
+        ? await performNativeCompaction(chat, 'manual', resolveDirectorRoleConfig(getSettings()))
         : await performNativeCompaction(chat, 'manual');
       if (!outcome.ok) { console.error(`${id}: FAILED — ${outcome.error}`); failed += 1; continue; }
       console.log(JSON.stringify({

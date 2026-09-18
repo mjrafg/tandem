@@ -1,25 +1,18 @@
 import { Eye } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { AppSettings, Effort, Provider, RoleConfig, RoleName } from '@shared/types';
-import { CLAUDE_MODELS, CODEX_MODELS, EFFORTS } from '@shared/types';
+import type { AppSettings, Effort, Provider, ProviderDescriptor, RoleConfig, RoleName } from '@shared/types';
+import { EFFORTS } from '@shared/types';
 import { api } from '../../../api';
 import { Field, Modal, SelectBox, Spinner, Toggle } from '../../ui';
 import { PageHeader } from '../SettingsLayout';
 import { useSettingsDraft } from '../useSettingsDraft';
+import { descriptorFor, modelForProvider, providerOptions, useProviders } from '../useProviders';
 
-// one registry for every model selector in the app (shared/types.ts), so the
-// role cards and Builder Agents can never drift apart
-const MODEL_SUGGESTIONS: Record<Provider, readonly string[]> = { 'claude-code': CLAUDE_MODELS, codex: CODEX_MODELS };
-
-// TODO(provider-swap): provider selection is intentionally disabled — the
-// execution layer only implements Builder = Claude Code and Reviewer = Codex
-// (dispatch, resume/compaction, and MCP wiring are per-provider and not yet
-// interchangeable). The server locks stored settings to the same pair
-// (settings.ts lockProviders). Show a fixed label until real provider-aware
-// dispatch exists, so the UI never implies cross-provider execution works.
-const FIXED_PROVIDER: Record<RoleName, Provider> = { builder: 'claude-code', reviewer: 'codex' };
-const PROVIDER_LABEL: Record<Provider, string> = { 'claude-code': 'Claude Code CLI', codex: 'Codex CLI' };
+// Provider, model and effort are chosen per role, and each role resolves on
+// its own: the Reviewer does not follow the Builder's backend and the Director
+// does not follow anyone's. The provider list and each provider's models come
+// from the server's registry (/api/providers); nothing here knows a model name.
 
 const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }> = {
   builder: {
@@ -37,22 +30,29 @@ const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }>
 export function RolesPage() {
   const { draft, set } = useSettingsDraft();
   const [promptRole, setPromptRole] = useState<string | null>(null);
+  const { providers, error: providerError } = useProviders();
 
   if (!draft) return <div className="flex justify-center py-16"><Spinner size={18} /></div>;
 
   return (
     <>
       <PageHeader title="Roles">
-        The three AI roles and the defaults they run on. Each role&apos;s CLI is fixed to the one Tandem actually
-        executes; model, reasoning effort and extra instructions are yours.
+        The three AI roles and what each one runs on. Provider, model, reasoning effort and extra instructions are
+        chosen per role, independently — moving one role to another provider changes nothing about the others.
       </PageHeader>
 
       <div className="space-y-3">
+        {providerError && (
+          <div className="rounded-lg border border-err/30 bg-err/[0.07] px-3 py-2 text-[12.5px] text-err">
+            The provider list could not be loaded ({providerError}); the selectors below show stored values only.
+          </div>
+        )}
         {(Object.keys(ROLE_INFO) as RoleName[]).map((role) => (
           <RoleCard
             key={role}
             role={role}
             cfg={draft.roles[role]}
+            providers={providers}
             onChange={(patch) => set((d) => Object.assign(d.roles[role], patch))}
             onPreview={() => setPromptRole(role)}
           />
@@ -61,6 +61,7 @@ export function RolesPage() {
         <DirectorCard
           cfg={draft.roles.director}
           builder={draft.roles.builder}
+          providers={providers}
           onChange={(patch) => set((d) => {
             d.roles.director = { ...(d.roles.director ?? { model: '' }), ...patch };
           })}
@@ -105,9 +106,10 @@ export function RolesPage() {
   );
 }
 
-function RoleCard({ role, cfg, onChange, onPreview }: {
+function RoleCard({ role, cfg, providers, onChange, onPreview }: {
   role: RoleName;
   cfg: RoleConfig;
+  providers: ProviderDescriptor[];
   onChange: (patch: Partial<RoleConfig>) => void;
   onPreview: () => void;
 }) {
@@ -131,37 +133,15 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
         )}
       </div>
       <p className="mb-3 text-[12px] leading-relaxed text-dim">{info.blurb}</p>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Field label="Provider / CLI" hint="fixed">
-          <input
-            className="input mono text-[12.5px] opacity-60"
-            value={PROVIDER_LABEL[FIXED_PROVIDER[role]]}
-            disabled
-            aria-label={`${info.title} provider (fixed)`}
-          />
-        </Field>
-        <Field label="Model">
-          <>
-            <input
-              className="input mono text-[12.5px]"
-              list={`models-${role}`}
-              value={cfg.model}
-              onChange={(e) => onChange({ model: e.target.value })}
-            />
-            <datalist id={`models-${role}`}>
-              {MODEL_SUGGESTIONS[FIXED_PROVIDER[role]].map((m) => <option key={m} value={m} />)}
-            </datalist>
-          </>
-        </Field>
-        <Field label="Reasoning effort">
-          <SelectBox
-            ariaLabel={`${info.title} effort`}
-            value={cfg.effort}
-            onChange={(v) => onChange({ effort: v as Effort })}
-            options={EFFORTS.map((e) => ({ value: e, label: e[0].toUpperCase() + e.slice(1) }))}
-          />
-        </Field>
-      </div>
+      <ProviderModelEffort
+        role={role}
+        label={info.title}
+        providers={providers}
+        provider={cfg.provider}
+        model={cfg.model}
+        effort={cfg.effort}
+        onChange={onChange}
+      />
       <div className="mt-3">
         <Field label="Additional instructions" hint="appended to the built-in role prompt">
           <textarea
@@ -180,16 +160,78 @@ function RoleCard({ role, cfg, onChange, onPreview }: {
 }
 
 /**
- * The Project Director's own model settings. The provider is fixed: the
- * Director runtime depends on the tandem_director MCP tools, Claude session
- * resume/continuity, and the read-only sandbox — all Claude Code.
+ * The three selectors every role shares. Changing the provider re-points the
+ * model at one that provider knows (the same name if it has it, otherwise its
+ * default), so the form can never submit a pair the server would refuse.
  */
-function DirectorCard({ cfg, builder, onChange, onPreview }: {
+function ProviderModelEffort({ role, label, providers, provider, model, effort, modelHint, modelPlaceholder, onChange }: {
+  role: RoleName | 'director';
+  label: string;
+  providers: ProviderDescriptor[];
+  provider: Provider;
+  model: string;
+  effort: Effort;
+  modelHint?: string;
+  modelPlaceholder?: string;
+  onChange: (patch: { provider?: Provider; model?: string; effort?: Effort }) => void;
+}) {
+  const options = providerOptions(providers, role);
+  const desc = descriptorFor(providers, provider);
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <Field label="Provider">
+        <SelectBox
+          ariaLabel={`${label} provider`}
+          value={provider}
+          onChange={(v) => onChange({ provider: v as Provider, model: modelForProvider(providers, v, model) })}
+          options={options.length > 0 ? options : [{ value: provider, label: provider }]}
+        />
+      </Field>
+      <Field label="Model" hint={modelHint}>
+        <>
+          <input
+            className="input mono text-[12.5px]"
+            list={`models-${role}`}
+            value={model}
+            placeholder={modelPlaceholder ?? desc?.defaultModel ?? ''}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            aria-label={`${label} model`}
+            onChange={(e) => onChange({ model: e.target.value })}
+          />
+          <datalist id={`models-${role}`}>
+            {(desc?.models ?? []).map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </datalist>
+        </>
+      </Field>
+      <Field label="Reasoning effort">
+        <SelectBox
+          ariaLabel={`${label} effort`}
+          value={effort}
+          onChange={(v) => onChange({ effort: v as Effort })}
+          options={EFFORTS.map((e) => ({ value: e, label: e[0].toUpperCase() + e.slice(1) }))}
+        />
+      </Field>
+    </div>
+  );
+}
+
+/**
+ * The Project Director's own configuration. It resolves independently of the
+ * Builder: its provider is its own choice, and an empty model follows the
+ * Builder's only when both run on the same provider.
+ */
+function DirectorCard({ cfg, builder, providers, onChange, onPreview }: {
   cfg: AppSettings['roles']['director'];
   builder: AppSettings['roles']['builder'];
-  onChange: (patch: Partial<{ model: string; effort: Effort }>) => void;
+  providers: ProviderDescriptor[];
+  onChange: (patch: Partial<{ provider: Provider; model: string; effort: Effort }>) => void;
   onPreview: () => void;
 }) {
+  const provider: Provider = cfg?.provider ?? 'claude-code';
+  const sameAsBuilder = builder.provider === provider;
+  const fallback = sameAsBuilder ? builder.model : (descriptorFor(providers, provider)?.defaultModel ?? '');
   return (
     <div className="card px-4 py-3.5">
       <div className="mb-1 flex items-center gap-2">
@@ -197,37 +239,20 @@ function DirectorCard({ cfg, builder, onChange, onPreview }: {
         <span className="min-w-0 truncate text-[13.5px] font-semibold">Director</span>
       </div>
       <p className="mb-3 text-[12px] leading-relaxed text-dim">
-        Plans projects into milestones and orchestrates sessions from the Project Chat, read-only, on its own model.
-        The provider is fixed to Claude Code: the Director&apos;s orchestration tools, session continuity, and sandbox
-        depend on it.
+        Plans projects into milestones and orchestrates sessions from the Project Chat, read-only, on its own provider
+        and model — never inherited from the Builder.
       </p>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Field label="Provider / CLI" hint="fixed">
-          <input className="input mono text-[12.5px] opacity-60" value="Claude Code CLI" disabled aria-label="Director provider (fixed)" />
-        </Field>
-        <Field label="Model" hint={`empty follows the Builder model${builder.provider !== 'claude-code' ? ' (Builder is Codex → stock Claude model is used instead)' : ''}`}>
-          <>
-            <input
-              className="input mono text-[12.5px]"
-              list="models-director"
-              placeholder={builder.provider === 'claude-code' ? builder.model : 'claude-opus-5'}
-              value={cfg?.model ?? ''}
-              onChange={(e) => onChange({ model: e.target.value })}
-            />
-            <datalist id="models-director">
-              {MODEL_SUGGESTIONS['claude-code'].map((m) => <option key={m} value={m} />)}
-            </datalist>
-          </>
-        </Field>
-        <Field label="Reasoning effort">
-          <SelectBox
-            ariaLabel="Director effort"
-            value={cfg?.effort ?? builder.effort}
-            onChange={(v) => onChange({ effort: v as Effort })}
-            options={EFFORTS.map((e) => ({ value: e, label: e[0].toUpperCase() + e.slice(1) }))}
-          />
-        </Field>
-      </div>
+      <ProviderModelEffort
+        role="director"
+        label="Director"
+        providers={providers}
+        provider={provider}
+        model={cfg?.model ?? ''}
+        effort={cfg?.effort ?? builder.effort}
+        modelHint={sameAsBuilder ? 'empty follows the Builder model' : `empty uses the provider default (${fallback})`}
+        modelPlaceholder={fallback}
+        onChange={(patch) => onChange({ ...patch, ...(patch.provider && !cfg?.model ? { model: '' } : {}) })}
+      />
       <button className="btn-ghost -ml-2 mt-1.5 text-[12px]" onClick={onPreview}>
         <Eye size={13} /> Preview effective prompt
       </button>

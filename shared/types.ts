@@ -1,25 +1,101 @@
 // Shared contracts between server and web.
 
+/**
+ * A provider is an AI backend Tandem can execute a role on. The identifier is
+ * PERSISTED — in settings, agent profiles, ai_call events and session rows —
+ * so it stays as it was written when Builder was Claude and Reviewer was
+ * Codex. `codex-cli` / `claude-code-cli` are accepted as aliases at the
+ * registry boundary, and canonicalized to these.
+ */
 export type Provider = 'claude-code' | 'codex';
 export type RoleName = 'builder' | 'reviewer';
+/** every role the execution layer can run — roles are what, providers are who */
+export type AiRole = RoleName | 'final_repair' | 'director';
 export type Effort = 'low' | 'medium' | 'high';
+export const EFFORTS: Effort[] = ['low', 'medium', 'high'];
 
 /**
- * The single model/effort registry shared by Settings, the Director card and
- * Builder Agent profiles — one source of truth, so the options an admin sees
- * are exactly the ones the server accepts and the Claude Code runtime serves.
+ * How an adapter reaches its backend. Both shipped providers are `cli`; the
+ * field exists so a future HTTP/API provider does not have to pretend to be a
+ * process, and so nothing outside a provider module tests for one.
  */
-export const CLAUDE_MODELS = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'] as const;
-export const CODEX_MODELS = ['gpt-5.6-sol'] as const;
-export const EFFORTS: Effort[] = ['low', 'medium', 'high'];
+export type ProviderTransport = 'cli' | 'api';
+
+/**
+ * What a provider can actually do, declared rather than assumed. Absence is
+ * reported honestly — Tandem never simulates a capability a backend lacks, and
+ * never infers one from a model name.
+ */
+export interface ProviderCapabilities {
+  /** a previous turn's session can be continued natively */
+  resumableSessions: boolean;
+  /** the backend streams assistant text as it is produced */
+  streaming: boolean;
+  /** the session's real context usage can be read on demand */
+  nativeContextInspection: boolean;
+  /** the backend can compact its own session on request */
+  nativeCompaction: boolean;
+  /** Tandem's MCP tool servers can be served to it */
+  mcp: boolean;
+  /** shell commands it runs are reported as events */
+  commandExecutionEvents: boolean;
+  /** file edits it makes are reported as events */
+  fileOperationEvents: boolean;
+  /** it can drive Tandem's browser tools */
+  browserTools: boolean;
+}
+
+export interface ModelDescriptor {
+  id: string;
+  label: string;
+  /** shown in the picker; never a promise about price or speed */
+  note?: string;
+}
+
+/** What the registry knows about a provider — the only model list the UI reads. */
+export interface ProviderDescriptor {
+  id: Provider;
+  label: string;
+  /** the one-word name used in running prose ("Claude overload", "Codex usage limit") */
+  shortLabel: string;
+  transport: ProviderTransport;
+  models: ModelDescriptor[];
+  defaultModel: string;
+  capabilities: ProviderCapabilities;
+  /** the roles this provider is implemented for */
+  roles: AiRole[];
+}
+
+/**
+ * A provider-native conversation session, always carrying its owner.
+ *
+ * The id alone is meaningless to another backend: a Claude session id handed
+ * to Codex resumes nothing and loses the conversation. Storing the provider
+ * beside it is what makes "never resume across providers" checkable rather
+ * than remembered.
+ */
+export interface ProviderSessionRef {
+  provider: Provider;
+  id: string;
+}
+
+export interface ProviderHealth {
+  provider: Provider;
+  /** the backend is installed and reachable */
+  configured: boolean;
+  version?: string;
+  /** whether it holds a usable login, when that is knowable without spending */
+  authenticated?: boolean;
+  detail?: string;
+}
 /** an Agent prompt travels as one argv element — see agents/store.ts */
 export const MAX_AGENT_PROMPT_CHARS = 32_000;
 
 /**
  * A Builder Agent profile: persisted configuration that specializes Builder
  * behavior (prompt overlay + model + reasoning). It is NOT an engine concept —
- * new agents are new rows, never new code. `provider` is persisted for future
- * provider-neutral execution but is fixed to 'claude-code' in V1.
+ * new agents are new rows, never new code. `provider` selects the backend the
+ * specialist executes on and is validated against the provider registry.
  */
 export interface AgentProfile {
   id: string;              // stable immutable identity (never the slug)
@@ -27,7 +103,7 @@ export interface AgentProfile {
   name: string;
   description: string;
   systemPrompt: string;    // specialist OVERLAY, appended to Tandem's Builder instructions
-  provider: Provider;      // always 'claude-code' in V1 (server-enforced)
+  provider: Provider;      // the backend this specialist runs on
   model: string;
   effort: Effort;
   enabled: boolean;
@@ -55,6 +131,7 @@ export interface AgentSnapshot {
 }
 
 export interface RoleConfig {
+  /** which backend runs this role — independent of every other role */
   provider: Provider;
   model: string;
   effort: Effort;
@@ -81,10 +158,15 @@ export interface ContextConfig {
   preserveRecentTokens: number;
 }
 
-/** The Project Director's own model settings. Provider is fixed to Claude
- * Code (tandem_director MCP, session resume, and the read-only sandbox all
- * depend on it), so only model + effort are configurable. */
+/**
+ * The Project Director's own configuration. It resolves independently: the
+ * Director never inherits the Builder's provider, because the two roles are
+ * separate decisions and a Builder moved to Codex must not silently move the
+ * orchestrator with it.
+ */
 export interface DirectorRoleConfig {
+  /** absent = the previous behavior, Claude Code */
+  provider?: Provider;
   model: string;
   /** absent = follow the Builder's effort (resolveDirectorRole) */
   effort?: Effort;

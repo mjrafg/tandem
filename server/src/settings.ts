@@ -1,5 +1,7 @@
-import type { AppSettings, Effort } from '../../shared/types';
+import type { AppSettings, Provider } from '../../shared/types';
 import { kvGet, kvSet } from './db';
+import { providerOfModel } from './providers/catalog';
+import { canonicalProvider } from './providers/ids';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   roles: {
@@ -36,22 +38,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
 };
 
-/**
- * The Project Director's effective model settings. Installs without
- * roles.director follow the Builder's model + effort — but the Director runs
- * on the Claude Code adapter ALWAYS, so a Codex-configured Builder never
- * leaks its model name into the Director: the fallback then uses the stock
- * Claude model instead. Once a Director model is saved, it stands on its own.
- */
-export function resolveDirectorRole(s: AppSettings): { model: string; effort: Effort } {
-  const d = s.roles.director;
-  const b = s.roles.builder;
-  const model = d?.model?.trim()
-    ? d.model.trim()
-    : b.provider === 'claude-code' && b.model.trim() ? b.model : DEFAULT_SETTINGS.roles.builder.model;
-  return { model, effort: d?.effort ?? b.effort };
-}
-
 // All built-in instruction text lives in prompts.ts (Admin → AI Prompts).
 
 /**
@@ -87,33 +73,56 @@ export function getSettings(): AppSettings {
   const merged = structuredClone(DEFAULT_SETTINGS);
   deepMerge(merged as any, stored as any);
   stripObsolete(merged);
-  lockProviders(merged);
+  normalizeProviders(merged);
   return merged;
 }
 
+/** the backend each role ran on before roles could choose one */
+const LEGACY: Record<'builder' | 'reviewer' | 'director', Provider> = { builder: 'claude-code', reviewer: 'codex', director: 'claude-code' };
+const PROVIDER_DEFAULT_MODEL: Record<Provider, string> = { 'claude-code': 'claude-opus-5', codex: 'gpt-5.6-sol' };
+
 /**
- * TODO(provider-swap): Builder/Reviewer providers are intentionally LOCKED to
- * the only combination the execution layer implements (Builder = Claude Code,
- * Reviewer = Codex). The workflow dispatches to runClaudeTurn/runCodexReview
- * unconditionally, while compaction and the context meter follow this
- * configured provider — so a stored swap produced a split-brain (wrong CLI
- * given the other provider's model, meter/compaction describing a session that
- * doesn't exist). Locking here keeps every reader coherent. Re-enable the
- * selector only once the engine has provider-aware dispatch, session
- * resume/compaction for both providers, per-provider MCP wiring for both
- * roles, and a reviewer-failure policy that doesn't silently skip review.
- * A role whose stored provider was swapped also gets its model reset to the
- * locked provider's default — the old model name belongs to the other CLI.
+ * Stored role configuration, read back coherently.
+ *
+ * Every role carries its own provider. An unknown or missing provider becomes
+ * the role's historical one — settings written before providers were
+ * selectable resolve to exactly what they did before — and a model that
+ * plainly belongs to a different backend is replaced by this one's default,
+ * so no reader ever sees "Codex, running claude-opus-5". Rejecting such a pair
+ * on the way IN is validateRoleConfigs; this is the safety net on the way out.
  */
-function lockProviders(s: AppSettings): void {
-  if (s.roles.builder.provider !== 'claude-code') {
-    s.roles.builder.provider = 'claude-code';
-    s.roles.builder.model = DEFAULT_SETTINGS.roles.builder.model;
+function normalizeProviders(s: AppSettings): void {
+  for (const role of ['builder', 'reviewer'] as const) {
+    const r = s.roles[role];
+    r.provider = canonicalProvider(r.provider) ?? LEGACY[role];
+    const owner = providerOfModel(r.model ?? '');
+    if (!r.model?.trim() || (owner && owner !== r.provider)) r.model = PROVIDER_DEFAULT_MODEL[r.provider];
   }
-  if (s.roles.reviewer.provider !== 'codex') {
-    s.roles.reviewer.provider = 'codex';
-    s.roles.reviewer.model = DEFAULT_SETTINGS.roles.reviewer.model;
+  if (s.roles.director) {
+    const d = s.roles.director;
+    d.provider = canonicalProvider(d.provider) ?? LEGACY.director;
+    const owner = providerOfModel(d.model ?? '');
+    if (owner && owner !== d.provider) d.model = '';
   }
+}
+
+/**
+ * Refuse a role configuration that cannot run: an unregistered provider, or a
+ * model that belongs to another backend. Returns the first problem, or null.
+ */
+export function validateRoleConfigs(patch: Partial<AppSettings>): string | null {
+  const roles = patch.roles ?? {};
+  for (const role of ['builder', 'reviewer', 'director'] as const) {
+    const r = (roles as any)[role] as { provider?: unknown; model?: unknown } | undefined;
+    if (!r) continue;
+    const p = r.provider === undefined ? null : canonicalProvider(r.provider);
+    if (r.provider !== undefined && !p) return `Unknown AI provider "${String(r.provider)}" for the ${role} role.`;
+    const provider = p ?? canonicalProvider(getSettings().roles[role]?.provider) ?? LEGACY[role];
+    const model = typeof r.model === 'string' ? r.model.trim() : '';
+    const owner = model ? providerOfModel(model) : null;
+    if (owner && owner !== provider) return `"${model}" is not a model the ${role}'s provider (${provider}) can run.`;
+  }
+  return null;
 }
 
 /** Configuration for the removed Compactor role no longer affects runtime — drop it. */
@@ -128,7 +137,7 @@ export function putSettings(patch: Partial<AppSettings>): AppSettings {
   const merged = getSettings();
   deepMerge(merged as any, patch as any);
   stripObsolete(merged);
-  lockProviders(merged);
+  normalizeProviders(merged);
   const c = merged.context;
   c.warnPct = clamp(c.warnPct, 10, 99);
   c.compactPct = clamp(c.compactPct, 10, 99);

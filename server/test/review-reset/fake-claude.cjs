@@ -167,5 +167,23 @@ async function runBuilder() {
   process.exit(0);
 }
 
-if (isDirector) void runDirector();
+// ------------------------------------------------- Reviewer (provider-switch tests)
+// The engine names the role in TANDEM_ROLE for every provider. As a Reviewer
+// this fake answers exactly like fake-codex does — same counter file, same
+// verdict schedule — so a scenario reads the same whichever backend reviews.
+function runReviewer() {
+  const isSession = stdin.includes("# The user's original request");
+  let n = 0;
+  if (isSession) { const f = path.join(process.env.FAKE_STATE_DIR || '/tmp', 'session-review-count'); try { n = Number(fs.readFileSync(f, 'utf8')) || 0; } catch {} n += 1; fs.writeFileSync(f, String(n)); }
+  try { fs.appendFileSync(path.join(process.env.FAKE_STATE_DIR || '/tmp', 'claude-review-prompts.log'), `=====PROMPT kind=${isSession ? 'session' : 'other'} n=${n}=====\n${stdin}\n`); } catch {}
+  const findings = isSession && n <= Number(process.env.FAKE_FINDINGS_FOR || 2);
+  const text = findings ? `1. [major] Round ${n} finding — a.txt\n   The file needs another change.\n   Recommendation: change it again` : 'PASS';
+  emit({ type: 'system', subtype: 'init', session_id: 'fake-review-' + n, model: 'fake-model' });
+  emit({ type: 'result', subtype: 'success', is_error: false, result: text, num_turns: 1, session_id: 'fake-review-' + n,
+    usage: { input_tokens: 800, output_tokens: 30, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, iterations: [] } });
+  process.exit(0);
+}
+
+if (process.env.TANDEM_ROLE === 'reviewer') runReviewer();
+else if (isDirector) void runDirector();
 else void runBuilder();

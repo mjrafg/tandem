@@ -12,10 +12,12 @@
  * predates this feature) keeps the historical behavior exactly: the Builder
  * role settings from Admin → AI Roles. Nothing is migrated or retrofitted.
  */
-import type { AppSettings, Effort } from '../../../shared/types';
+import type { AppSettings, Effort, Provider } from '../../../shared/types';
 import { getAgentSnapshot } from './store';
 
 export interface BuilderExec {
+  /** the backend the snapshot pinned; absent = follow the Builder role setting */
+  provider?: Provider;
   model: string;
   effort: Effort;
   /** specialist overlay for builderSystemText; undefined = no agent profile */
@@ -30,5 +32,8 @@ export function builderExecFor(chatId: string, settings: AppSettings): BuilderEx
     const b = settings.roles.builder;
     return { model: b.model, effort: b.effort };
   }
-  return { model: snap.model, effort: snap.effort, agentPrompt: snap.systemPrompt, agentName: snap.profileName };
+  return {
+    provider: snap.provider, model: snap.model, effort: snap.effort,
+    agentPrompt: snap.systemPrompt, agentName: snap.profileName,
+  };
 }

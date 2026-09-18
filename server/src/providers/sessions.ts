@@ -1,0 +1,46 @@
+/**
+ * Provider-native sessions, and the rule that they never cross a provider.
+ *
+ * A session id is transport state: it means something to the backend that
+ * minted it and nothing at all to any other. Handing a Claude session id to
+ * Codex does not continue the conversation — at best it starts a new one, at
+ * worst it resumes an unrelated thread. So every stored id carries its owner,
+ * and a resume happens only when the owner matches the provider now resolved.
+ *
+ * When they do not match, nothing is deleted. The provider session is a
+ * continuity aid, not the conversation: Tandem's own history is the record, and
+ * a fresh session is seeded from it (see engine/workflow builderMessage). That
+ * is what "switching provider does not lose the chat" means here.
+ */
+import type { Provider, ProviderSessionRef } from '../../../shared/types';
+import { getBuilderSession, getBuilderSessionProvider, setBuilderSession } from '../db';
+import { providerRegistry } from './registry';
+
+/** The chat's stored session with its owner, or null when it has none. */
+export function storedSessionRef(chatId: string): ProviderSessionRef | null {
+  const id = getBuilderSession(chatId);
+  if (!id) return null;
+  return { provider: getBuilderSessionProvider(chatId), id };
+}
+
+export function rememberSession(chatId: string, ref: ProviderSessionRef | undefined | null): void {
+  if (!ref?.id) return;
+  setBuilderSession(chatId, ref.id, ref.provider);
+}
+
+/**
+ * The session to hand this provider, or null to start a fresh one.
+ *
+ * Two independent reasons to refuse: the stored session belongs to another
+ * backend, or this backend cannot resume sessions at all. Both are ordinary
+ * outcomes, not errors.
+ */
+export function resumableSession(
+  stored: ProviderSessionRef | null | undefined,
+  provider: Provider,
+): { session?: ProviderSessionRef; switchedFrom?: Provider } {
+  if (!stored?.id) return {};
+  if (stored.provider !== provider) return { switchedFrom: stored.provider };
+  if (!providerRegistry.get(provider).descriptor.capabilities.resumableSessions) return {};
+  return { session: stored };
+}

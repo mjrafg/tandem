@@ -1,34 +1,23 @@
-import { execFile } from 'node:child_process';
-import { classifyProviderOutage } from './reviewWait';
-import type { Chat, CompactionPayload, CompactOutcome, Provider } from '../../../shared/types';
-import { config } from '../config';
-import { tokenForEnv } from '../providerAuth';
+import type { Chat, CompactionPayload, CompactOutcome, Provider, ProviderSessionRef } from '../../../shared/types';
 import { computeUsage } from '../context';
-import { getBuilderSession, getBuilderSessionProvider, getProject } from '../db';
-import { builderExecFor } from '../agents/exec';
+import { getProject } from '../db';
 import { addEvent } from '../events';
 import { getSettings } from '../settings';
+import { providerLabel, providerShortLabel } from '../providers/executor';
+import { providerRegistry } from '../providers/registry';
+import { resolveBuilderRole } from '../providers/resolve';
+import { storedSessionRef } from '../providers/sessions';
+import type { NativeContextReading } from '../providers/types';
 import { beginCompaction, endCompaction } from './run';
 
 /**
  * Provider-native context management. Tandem never summarizes conversations
  * itself and never sends them to another model — it asks the provider that
- * OWNS the active session to inspect or compact its own context. Everything
- * here dispatches on the configured PROVIDER, never on a role name.
+ * OWNS the active session to inspect or compact its own context, through the
+ * adapter's declared capabilities. Nothing here knows which backend that is.
  */
 
-export interface NativeContextReading {
-  ok: boolean;
-  usedTokens?: number;
-  windowTokens?: number;
-  error?: string;
-}
-
-interface SessionRef {
-  sessionId: string;
-  cwd: string;
-  model: string;
-}
+export type { NativeContextReading } from '../providers/types';
 
 /**
  * The provider/model that owns a chat's conversation session.
@@ -39,62 +28,31 @@ interface SessionRef {
  * snapshot (ordinary chats) follow the Builder role settings as before.
  */
 export function sessionProvider(chatId?: string): { provider: Provider; model: string } {
-  const settings = getSettings();
-  const exec = chatId ? builderExecFor(chatId, settings) : null;
-  return { provider: settings.roles.builder.provider, model: exec?.model ?? settings.roles.builder.model };
+  const r = resolveBuilderRole(getSettings(), chatId);
+  return { provider: r.provider, model: r.model };
 }
 
-// ------------------------------------------------------------- native reads
+// ------------------------------------------------------------- native operations
 
-/**
- * Ask the provider for the session's real context state.
- * Claude Code answers `/context` locally (no model call, session untouched).
- * Codex has no equivalent on-demand report in the installed CLI.
- */
-export async function readNativeContext(provider: Provider, ref: SessionRef): Promise<NativeContextReading> {
-  if (provider === 'claude-code') {
-    const res = await claudeSlash(ref, '/context', 90_000);
-    if (!res.ok) return { ok: false, error: res.error };
-    const parsed = parseClaudeContext(res.resultText);
-    if (!parsed) return { ok: false, error: 'Could not parse the /context report from Claude Code.' };
-    // note: /context's denominator can differ slightly from the canonical
-    // modelUsage.contextWindow (autocompact buffer) — real calls record windows
-    return { ok: true, ...parsed };
+/** Ask the provider for the session's real context state, if it can report one. */
+export async function readNativeContext(provider: Provider, ref: ProviderSessionRef, model: string, cwd: string): Promise<NativeContextReading> {
+  const adapter = providerRegistry.get(provider);
+  if (!adapter.descriptor.capabilities.nativeContextInspection || !adapter.readContext) {
+    return { ok: false, error: `${adapter.descriptor.label} has no on-demand context report for a session; context is tracked from per-turn usage instead.` };
   }
-  return {
-    ok: false,
-    error: 'The installed Codex CLI (0.147) has no on-demand context report for a session; context is tracked from per-turn usage instead.',
-  };
+  return adapter.readContext(ref, model, cwd);
 }
 
-/**
- * Ask the provider to compact its own session. Claude Code performs `/compact`
- * on the resumed session (its own internal summarization — same session id
- * remains valid). Codex 0.147 exposes no explicit compact operation through
- * `codex exec`; it compacts automatically inside long invocations, which is
- * its native behavior and needs no request from Tandem.
- */
-async function runNativeCompact(provider: Provider, ref: SessionRef): Promise<{ ok: boolean; error?: string; resultText?: string }> {
-  if (provider === 'claude-code') {
-    const res = await claudeSlash(ref, '/compact', 10 * 60_000);
-    if (!res.ok) return { ok: false, error: res.error };
-    // The CLI's envelope says "success" even when the summarization call inside
-    // it was refused — during the 2026-09-03 overload two sessions "compacted"
-    // for minutes and came back the same size. The refusal, when it is
-    // reported at all, is in the result text.
-    const refused = classifyProviderOutage(res.resultText, Date.now(), 'Claude');
-    if (refused || /\bAPI Error\b|error (?:while )?compacting|compaction failed/i.test(res.resultText)) {
-      return { ok: false, error: `Claude Code accepted /compact but reported: ${res.resultText.slice(0, 400)}` };
-    }
-    return { ok: true, resultText: res.resultText };
+/** Ask the provider to compact its own session, if it can. */
+async function runNativeCompact(provider: Provider, ref: ProviderSessionRef, model: string, cwd: string): Promise<{ ok: boolean; error?: string; resultText?: string }> {
+  const adapter = providerRegistry.get(provider);
+  if (!adapter.descriptor.capabilities.nativeCompaction || !adapter.compactSession) {
+    return {
+      ok: false,
+      error: `${adapter.descriptor.label} exposes no explicit compact operation Tandem can invoke; it manages its own context inside long invocations, and that native behavior needs nothing from Tandem.`,
+    };
   }
-  return {
-    ok: false,
-    error: 'The installed Codex CLI (0.147) has no explicit compact operation invokable through `codex exec` — '
-      + 'slash commands like /compact are TUI-only, and sent through exec they reach the model as plain text '
-      + '(verified: the model just replies "Context compacted." while the session history stays fully intact). '
-      + 'Codex compacts its own context automatically during long invocations; that native behavior needs nothing from Tandem.',
-  };
+  return adapter.compactSession(ref, model, cwd);
 }
 
 // ------------------------------------------------------------- the operation
@@ -134,12 +92,11 @@ async function compactInner(
   override?: { provider: Provider; model: string },
 ): Promise<CompactOutcome> {
   const { provider, model } = override ?? sessionProvider(chat.id);
-  const providerLabel = provider === 'claude-code' ? 'Claude' : 'Codex';
   const startedAt = Date.now();
 
   const fail = (error: string): CompactOutcome => {
     addEvent(chat.id, 'error', {
-      message: `Native context compaction failed · ${providerLabel}`,
+      message: `Native context compaction failed · ${providerShortLabel(provider)}`,
       detail: error,
       source: 'context',
       retryable: true,
@@ -147,38 +104,39 @@ async function compactInner(
     return { ok: false, provider, model, durationMs: Date.now() - startedAt, error };
   };
 
-  const sessionId = getBuilderSession(chat.id);
-  if (!sessionId) {
+  const stored = storedSessionRef(chat.id);
+  if (!stored) {
     // nothing to compact — no error event for this; the caller shows it inline
     return {
       ok: false, provider, model, durationMs: 0,
       error: 'This chat has no active provider session yet — send a message first.',
     };
   }
-  const sessionProviderOwner = getBuilderSessionProvider(chat.id);
-  if (sessionProviderOwner !== provider) {
-    const owner = sessionProviderOwner === 'claude-code' ? 'Claude Code' : 'Codex';
-    const now = provider === 'claude-code' ? 'Claude Code' : 'Codex';
+  if (stored.provider !== provider) {
+    // a session is never driven by a provider that did not create it
+    const owner = providerLabel(stored.provider);
+    const now = providerLabel(provider);
     return {
       ok: false, provider, model, durationMs: 0,
-      error: `The active session was created by ${owner}, but the Builder provider is now ${now}. `
+      error: `The active session was created by ${owner}, but this role's provider is now ${now}. `
         + `A new ${now} session starts with the next message, and context management will follow it.`,
     };
   }
   const project = getProject(chat.projectId);
   if (!project) return fail('The chat\'s project no longer exists.');
-  const ref: SessionRef = { sessionId, cwd: project.rootPath, model };
+  const cwd = project.rootPath;
+  const sessionId = stored.id;
 
   // before: prefer the provider's own reading; fall back to the meter estimate
-  const before = await readNativeContext(provider, ref);
+  const before = await readNativeContext(provider, stored, model, cwd);
   const est = computeUsage(chat);
   const beforeTokens = before.ok ? before.usedTokens : est.usedTokens != null ? est.usedTokens + est.pendingTokens : undefined;
   const windowBefore = before.ok ? before.windowTokens : est.windowTokens ?? undefined;
 
-  const compacted = await runNativeCompact(provider, ref);
+  const compacted = await runNativeCompact(provider, stored, model, cwd);
   if (!compacted.ok) return fail(compacted.error ?? 'Unknown error.');
 
-  const after = await readNativeContext(provider, ref);
+  const after = await readNativeContext(provider, stored, model, cwd);
   // A compaction that changed nothing is a failure whatever the CLI said: its
   // summarization is a model call, and under a provider outage it can return
   // success with the session untouched. Recording that as a compaction would
@@ -208,73 +166,4 @@ async function compactInner(
     windowTokens: payload.windowTokens, source: payload.source,
     durationMs: payload.durationMs!,
   };
-}
-
-// ------------------------------------------------------------- claude plumbing
-
-interface SlashResult { ok: boolean; resultText: string; error?: string }
-
-/**
- * Run one Claude Code slash command against a resumed session in print mode.
- * Verified on the installed CLI (2.1.233): the session id stays the same,
- * `/context` is answered locally, `/compact` runs the provider's own
- * summarization inside the session.
- */
-function claudeSlash(ref: SessionRef, command: '/context' | '/compact', timeoutMs: number): Promise<SlashResult> {
-  const args = [
-    '-p',
-    '--output-format', 'json',
-    '--model', ref.model,
-    '--resume', ref.sessionId,
-    command,
-  ];
-  return new Promise((resolve) => {
-    execFile(config.claudeBin, args, {
-      cwd: ref.cwd,
-      timeout: timeoutMs,
-      maxBuffer: 8 * 1024 * 1024,
-      // the same stored token authenticates /context and /compact, which are
-      // ordinary CLI invocations against the same session
-      env: {
-        ...process.env,
-        ANTHROPIC_API_KEY: '',
-        ANTHROPIC_AUTH_TOKEN: '',
-        ...(tokenForEnv('claude') ? { CLAUDE_CODE_OAUTH_TOKEN: tokenForEnv('claude') as string } : {}),
-      },
-    }, (err, stdout, stderr) => {
-      if (err && !stdout) {
-        const detail = (err as any).killed ? `timed out after ${Math.round(timeoutMs / 1000)}s` : String(stderr || err.message).slice(0, 500);
-        resolve({ ok: false, resultText: '', error: `Claude Code CLI ${command} failed: ${detail}` });
-        return;
-      }
-      try {
-        const d = JSON.parse(stdout);
-        if (d.is_error || (d.subtype && d.subtype !== 'success')) {
-          resolve({ ok: false, resultText: '', error: `Claude Code reported ${d.subtype ?? 'an error'} for ${command}${typeof d.result === 'string' && d.result ? `: ${d.result.slice(0, 300)}` : ''}` });
-          return;
-        }
-        resolve({ ok: true, resultText: typeof d.result === 'string' ? d.result : '' });
-      } catch {
-        resolve({ ok: false, resultText: '', error: `Claude Code CLI returned unparseable output for ${command}.` });
-      }
-    });
-  });
-}
-
-/** Parse "**Tokens:** 23.2k / 1m (2%)" from the /context report. */
-export function parseClaudeContext(text: string): { usedTokens: number; windowTokens: number } | null {
-  const m = text.match(/\*\*Tokens:\*\*\s*([\d.]+\s*[km]?)\s*\/\s*([\d.]+\s*[km]?)/i);
-  if (!m) return null;
-  const used = parseTokenValue(m[1]);
-  const window = parseTokenValue(m[2]);
-  if (used == null || window == null) return null;
-  return { usedTokens: used, windowTokens: window };
-}
-
-function parseTokenValue(s: string): number | null {
-  const m = s.trim().toLowerCase().match(/^([\d.]+)\s*([km]?)$/);
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n)) return null;
-  return Math.round(n * (m[2] === 'm' ? 1_000_000 : m[2] === 'k' ? 1_000 : 1));
 }

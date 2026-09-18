@@ -30,7 +30,6 @@ import { spawn, type ChildProcess, execFile } from 'node:child_process';
 import { config } from './config';
 import { db } from './db';
 import { decryptSecret, encryptSecret } from './integrations/store';
-import { getSettings, resolveDirectorRole } from './settings';
 
 export type AuthProvider = 'claude' | 'codex';
 

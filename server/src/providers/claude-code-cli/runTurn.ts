@@ -1,19 +1,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AiUsage, ChangedFile, ChatEvent, Effort } from '../../../shared/types';
-import { config, internalBase, shotsDir } from '../config';
-import { tokenForEnv } from '../providerAuth';
+import type { AiRole, AiUsage, ChangedFile, ChatEvent, Effort } from '../../../../shared/types';
+import type { RoleExecutionPolicy } from '../types';
+import { config, internalBase, shotsDir } from '../../config';
+import { tokenForEnv } from '../../providerAuth';
 import {
   addEvent, appendAssistantText, beginAssistantMessage, finishAssistantMessage, updateEvent,
   maxSeq,
-} from '../events';
-import { spawnStreaming } from './procs';
-import { recordModelWindow } from '../context';
-import { catalogForRole, hasIntegrationTools } from '../integrations/exec';
-import { bwrapAvailable, readOnlyJailArgs } from './sandbox';
-import { servedToolRecord, toolTextEnv } from '../toolText';
-import type { RunHandle } from './run';
+} from '../../events';
+import { spawnStreaming } from '../../engine/procs';
+import { recordModelWindow } from '../../context';
+import { catalogForRole, hasIntegrationTools } from '../../integrations/exec';
+import { bwrapAvailable, readOnlyJailArgs } from '../../engine/sandbox';
+import { servedToolRecord, toolTextEnv } from '../../toolText';
+import type { RunHandle } from '../../engine/run';
 
 export interface ClaudeTurnResult {
   ok: boolean;
@@ -77,32 +78,34 @@ const readOnlyNoteShown = new Set<string>();
  * process-level boundaries (timeout, stop, environment).
  */
 export async function runClaudeTurn(h: RunHandle, opts: {
-  role: 'builder' | 'final_repair' | 'director';
+  role: AiRole;
   model: string;
   effort: Effort;
   systemAppendix: string;
   message: string;
   cwd: string;
   resumeSessionId?: string | null;
-  withTandemTools?: boolean;
-  /** the Project Director's orchestration tool server (instead of the builder tool set) */
-  withDirectorTools?: boolean;
   /**
-   * ENFORCED read-only boundary (not a prompt instruction): mutation tools are
-   * denied at the CLI level, and where bubblewrap is available the whole
-   * process tree additionally runs in the shared read-only jail so even shell
-   * commands cannot write the project, Tandem's code, or its data.
+   * What this ROLE may do, decided centrally (providers/policies.ts). A
+   * read-only policy is an ENFORCED boundary, not a prompt instruction:
+   * mutation tools are denied at the CLI level, and where bubblewrap is
+   * available the whole process tree additionally runs in the shared read-only
+   * jail so even shell commands cannot write the project, Tandem's code, or
+   * its data.
    */
-  readOnly?: boolean;
+  policy: RoleExecutionPolicy;
   emitActivity?: boolean;
+  nameSession?: boolean;
   timeoutMs: number;
 }): Promise<ClaudeTurnResult> {
   const emitActivity = opts.emitActivity !== false;
-  const jailed = !!opts.readOnly && bwrapAvailable();
+  const readOnly = opts.policy.filesystem === 'read-only';
+  const jailed = readOnly && bwrapAvailable();
   // a Director session's FIRST Builder turn also names the session: the model
   // supplies only the short descriptive part through a tandem tool (invisible
   // in the timeline); Tandem composes the canonical "M2 - S2.1 - Name" title
-  const nameSession = h.chat.kind === 'pd-session' && opts.role === 'builder' && !opts.resumeSessionId && !!opts.withTandemTools;
+  const nameSession = opts.nameSession
+    ?? (h.chat.kind === 'pd-session' && opts.role === 'builder' && !opts.resumeSessionId && opts.policy.workdirTools);
   const systemAppendix = nameSession
     ? `${opts.systemAppendix}\n\nBefore anything else, call the tandem_name_session tool once with a short descriptive name (2–5 words, Title Case) for this session's work. Never mention the name or this step in your replies.`
     : opts.systemAppendix;
@@ -122,7 +125,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     // prompt, which is what Tandem uses (it only appends).
     '--exclude-dynamic-system-prompt-sections',
   ];
-  if (opts.readOnly) {
+  if (readOnly) {
     // deny-list beats bypassPermissions (verified on CLI 2.1.233); without the
     // jail, shell access goes too — inspection then uses Read/Grep/Glob only
     const denied = ['Write', 'Edit', 'NotebookEdit'];
@@ -153,57 +156,49 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     args.push('--settings', JSON.stringify({ hooks: { PreToolUse: preToolUse } }));
   }
 
+  // Which Tandem tool servers this invocation gets, one decision per server,
+  // taken from the ROLE's policy rather than from who is running it. The same
+  // provider therefore serves a Builder its workdir tools and a Reviewer none.
   let mcpConfigFile: string | null = null;
-  if (opts.withTandemTools) {
-    const distDir = path.dirname(process.argv[1] ?? '.');
-    const workdirScript = path.resolve(distDir, 'mcp-workdir.cjs');
-    const browserScript = path.resolve(distDir, 'mcp-browser.cjs');
-    const extScript = path.resolve(distDir, 'mcp-integrations.cjs');
-    const mcpServers: Record<string, unknown> = {};
-    // Tandem env (chat id, internal token, shots dir) is inherited from this
-    // process's environment by the stdio servers.
-    if (fs.existsSync(workdirScript)) {
-      mcpServers.tandem = { type: 'stdio', command: process.execPath, args: [workdirScript] };
-    }
-    if (fs.existsSync(browserScript)) {
-      mcpServers.tandem_browser = { type: 'stdio', command: process.execPath, args: [browserScript] };
-    }
-    // Admin-configured integration tools, served through the gateway (the
-    // gateway loads the role-filtered catalog fresh on every invocation, so
-    // new integrations become available without any Tandem restart)
-    if (fs.existsSync(extScript) && hasIntegrationTools(opts.role)) {
-      mcpServers.tandem_ext = { type: 'stdio', command: process.execPath, args: [extScript] };
-    }
-    if (Object.keys(mcpServers).length > 0) {
-      mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
-      fs.writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers }));
-      args.push('--mcp-config', mcpConfigFile, '--strict-mcp-config');
-    }
-  } else if (opts.withDirectorTools) {
-    const directorScript = path.resolve(path.dirname(process.argv[1] ?? '.'), 'mcp-director.cjs');
-    if (fs.existsSync(directorScript)) {
-      mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
-      fs.writeFileSync(mcpConfigFile, JSON.stringify({
-        mcpServers: { tandem_director: { type: 'stdio', command: process.execPath, args: [directorScript] } },
-      }));
-      args.push('--mcp-config', mcpConfigFile, '--strict-mcp-config');
-    }
+  const distDir = path.dirname(process.argv[1] ?? '.');
+  const workdirScript = path.resolve(distDir, 'mcp-workdir.cjs');
+  const browserScript = path.resolve(distDir, 'mcp-browser.cjs');
+  const extScript = path.resolve(distDir, 'mcp-integrations.cjs');
+  const directorScript = path.resolve(distDir, 'mcp-director.cjs');
+  const mcpServers: Record<string, unknown> = {};
+  // Tandem env (chat id, internal token, shots dir) is inherited from this
+  // process's environment by the stdio servers.
+  const withWorkdir = opts.policy.workdirTools && fs.existsSync(workdirScript);
+  const withBrowser = opts.policy.browserTools && fs.existsSync(browserScript);
+  // Admin-configured integration tools, served through the gateway (the
+  // gateway loads the role-filtered catalog fresh on every invocation, so
+  // new integrations become available without any Tandem restart)
+  const withExt = opts.policy.integrationTools && fs.existsSync(extScript) && hasIntegrationTools(opts.role);
+  const withDirector = opts.policy.directorTools && fs.existsSync(directorScript);
+  if (withWorkdir) mcpServers.tandem = { type: 'stdio', command: process.execPath, args: [workdirScript] };
+  if (withBrowser) mcpServers.tandem_browser = { type: 'stdio', command: process.execPath, args: [browserScript] };
+  if (withExt) mcpServers.tandem_ext = { type: 'stdio', command: process.execPath, args: [extScript] };
+  if (withDirector) mcpServers.tandem_director = { type: 'stdio', command: process.execPath, args: [directorScript] };
+  if (Object.keys(mcpServers).length > 0) {
+    mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
+    fs.writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers }));
+    args.push('--mcp-config', mcpConfigFile, '--strict-mcp-config');
   }
 
   const cliShown = `${jailed ? 'bwrap … ' : ''}${config.claudeBin} ${args.map((a) => (a.length > 60 ? `${a.slice(0, 57)}…` : a)).join(' ')}`;
-  if (opts.readOnly && !jailed && !readOnlyNoteShown.has(h.chat.id)) {
+  if (readOnly && !jailed && !readOnlyNoteShown.has(h.chat.id)) {
     // honest: mutation tools and the shell are denied, but without bubblewrap
     // the boundary around remaining tools is CLI-enforced, not OS-enforced
     readOnlyNoteShown.add(h.chat.id);
     h.status('bubblewrap is unavailable on this host — this role runs without shell access (read-only file tools only) instead of the OS-enforced read-only boundary.');
   }
   const startedAt = Date.now();
-  const servedTools = opts.withTandemTools
-    ? [
-      ...await servedToolRecord(['tandem', 'tandem_browser']),
-      ...catalogForRole(opts.role).map((t) => ({ name: t.name, description: t.description })),
-    ]
-    : [];
+  const servedTools = [
+    ...(withWorkdir || withBrowser
+      ? await servedToolRecord([...(withWorkdir ? ['tandem'] : []), ...(withBrowser ? ['tandem_browser'] : [])])
+      : []),
+    ...(withExt ? catalogForRole(opts.role).map((t) => ({ name: t.name, description: t.description })) : []),
+  ];
   const aiCall = addEvent(h.chat.id, 'ai_call', {
     role: opts.role,
     provider: 'claude-code',
@@ -386,7 +381,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       // turn time to report it.
       ...bashTimeoutEnv(opts.timeoutMs),
       // read-only turns: git must not take optional locks in the ro-bound repo
-      ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: '0' } : {}),
+      ...(readOnly ? { GIT_OPTIONAL_LOCKS: '0' } : {}),
       // inherited by the tandem MCP stdio servers (workdir + browser)
       ...(nameSession ? { TANDEM_NAME_SESSION: '1' } : {}),
       TANDEM_INTERNAL_URL: internalBase(),

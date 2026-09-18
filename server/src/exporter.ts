@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { providerLabel, providerShortLabel } from './providers/executor';
 import path from 'node:path';
 import type {
   AiCallPayload, AiUsage, BrowserActionPayload, Chat, ChatEvent, CommandPayload, CompactionPayload, ContextUsage,
@@ -43,7 +44,7 @@ function usageLine(u: AiUsage): string {
 }
 
 function contextLine(u: ContextUsage): string {
-  const providerName = u.provider === 'claude-code' ? 'Claude Code' : 'Codex';
+  const providerName = providerLabel(u.provider);
   if (u.usedTokens == null) return `no provider report yet · provider ${providerName}`;
   const used = fmtTok(u.usedTokens) + (u.pendingTokens > 0 ? ` + ~${fmtTok(u.pendingTokens)} pending (estimate)` : '');
   const win = u.windowTokens ? `${fmtTok(u.windowTokens)} window` : 'window unknown';
@@ -54,7 +55,7 @@ function contextLine(u: ContextUsage): string {
 
 /** compaction label parts shared by md + html */
 function compactionBits(p: CompactionPayload): { title: string; delta: string } {
-  const who = p.provider === 'claude-code' ? 'Claude' : 'Codex';
+  const who = providerShortLabel(p.provider);
   const auto = p.reason === 'provider-auto' ? ' automatically' : '';
   const delta = p.beforeTokens != null && p.afterTokens != null
     ? ` · ${fmtTok(p.beforeTokens)} → ${fmtTok(p.afterTokens)}`
@@ -131,7 +132,7 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
     }
     case 'ai_call': {
       const p = e.payload as AiCallPayload;
-      const title = `${p.provider === 'claude-code' ? 'Claude' : 'Codex'} · ${roleLabel(p.role)}`;
+      const title = `${providerShortLabel(p.provider)} · ${roleLabel(p.role)}`;
       const lines = [`<details><summary><b>AI call — ${title}</b> · ${p.model} · ${p.effort} effort · ${fmtDur(p.durationMs)}${p.simulated ? ' · simulated' : ''} · ${p.status}</summary>`, ''];
       if (p.cli) lines.push(`- CLI: \`${p.cli.command}\` (cwd \`${p.cli.cwd}\`, exit ${p.cli.exitCode ?? '—'})`);
       if (p.response?.usage) lines.push(`- Usage: ${usageLine(p.response.usage)}`);
@@ -345,7 +346,7 @@ function eventToHtml(e: ChatEvent, chatId: string): string {
     }
     case 'ai_call': {
       const p = e.payload as AiCallPayload;
-      const who = p.provider === 'claude-code' ? 'Claude' : 'Codex';
+      const who = providerShortLabel(p.provider);
       return `<div class="ev"><details><summary>Asked ${who} · ${roleLabel(p.role)} · ${escapeHtml(p.model)} · ${fmtDur(p.durationMs)}${p.simulated ? ' · simulated' : ''}</summary><div class="body">
 <div class="kv">provider ${p.provider} · effort ${p.effort} · status ${p.status} · started ${fmtTime(p.startedAt)}${p.response?.usage ? ` · ${usageLine(p.response.usage)}` : ''}</div>
 ${p.cli ? `<div class="kv">cli <code>${escapeHtml(p.cli.command)}</code> · cwd <code>${escapeHtml(p.cli.cwd)}</code> · exit ${p.cli.exitCode ?? '—'}</div>` : ''}

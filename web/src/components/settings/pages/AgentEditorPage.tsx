@@ -1,22 +1,23 @@
 import { ArrowLeft, Check } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { AgentProfile, Effort } from '@shared/types';
-import { CLAUDE_MODELS, EFFORTS, MAX_AGENT_PROMPT_CHARS } from '@shared/types';
+import type { AgentProfile, Effort, Provider } from '@shared/types';
+import { EFFORTS, MAX_AGENT_PROMPT_CHARS } from '@shared/types';
+import { descriptorFor, modelForProvider, providerOptions, useProviders } from '../useProviders';
 import { api } from '../../../api';
 import { useStore } from '../../../store';
 import { Field, SelectBox, Spinner, Toggle } from '../../ui';
 
 const BLANK = {
   name: '', slug: '', description: '', systemPrompt: '',
-  model: CLAUDE_MODELS[1] as string, effort: 'high' as Effort, enabled: true,
+  provider: 'claude-code' as Provider, model: 'claude-sonnet-5', effort: 'high' as Effort, enabled: true,
 };
 
 /**
  * One agent, on its own route — grouped into identity, runtime and the
- * specialist prompt rather than one undifferentiated form. Provider is shown
- * but never editable: Builder execution is Claude Code only in this version,
- * and the server rejects anything else regardless of what the UI sends.
+ * specialist prompt rather than one undifferentiated form. Provider, model
+ * and effort come from the provider registry; the server validates the pair
+ * again regardless of what the UI sends.
  */
 export function AgentEditorPage() {
   const { agentId } = useParams();
@@ -35,6 +36,7 @@ export function AgentEditorPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [slugTouched, setSlugTouched] = useState(!isNew);
+  const { providers } = useProviders();
 
   useEffect(() => {
     if (isNew) { setLoading(false); return; }
@@ -50,7 +52,7 @@ export function AgentEditorPage() {
         if (!useStore.getState().agentDrafts[agentId!]) {
           setDraftLocal({
             name: found.name, slug: found.slug, description: found.description,
-            systemPrompt: found.systemPrompt, model: found.model, effort: found.effort, enabled: found.enabled,
+            systemPrompt: found.systemPrompt, provider: found.provider, model: found.model, effort: found.effort, enabled: found.enabled,
           });
         }
       })
@@ -78,7 +80,7 @@ export function AgentEditorPage() {
 
   const dirty = agent
     ? agent.name !== draft.name || agent.slug !== slug || agent.description !== draft.description
-      || agent.systemPrompt !== draft.systemPrompt || agent.model !== draft.model
+      || agent.systemPrompt !== draft.systemPrompt || agent.provider !== draft.provider || agent.model !== draft.model
       || agent.effort !== draft.effort || agent.enabled !== draft.enabled
     : !!(draft.name || draft.description || draft.systemPrompt);
 
@@ -159,10 +161,15 @@ export function AgentEditorPage() {
         <section className="card px-4 py-3.5">
           <h2 className="mb-3 text-[13px] font-semibold">Runtime</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Field label="Provider / CLI" hint="fixed">
-              <input className="input mono text-[12.5px] opacity-60" value="Claude Code CLI" disabled aria-label="Agent provider (fixed)" />
+            <Field label="Provider">
+              <SelectBox
+                ariaLabel="Agent provider"
+                value={draft.provider}
+                onChange={(v) => set({ provider: v as Provider, model: modelForProvider(providers, v, draft.model) })}
+                options={providerOptions(providers, 'builder').length > 0 ? providerOptions(providers, 'builder') : [{ value: draft.provider, label: draft.provider }]}
+              />
             </Field>
-            <Field label="Model" hint="type any model the CLI accepts">
+            <Field label="Model" hint="type any model the provider accepts">
               <>
                 {/* free text, not a picker: new models ship faster than Tandem
                     releases, and the known ones are only suggestions */}
@@ -174,11 +181,11 @@ export function AgentEditorPage() {
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
-                  placeholder="claude-sonnet-5"
+                  placeholder={descriptorFor(providers, draft.provider)?.defaultModel ?? ''}
                   onChange={(e) => set({ model: e.target.value })}
                 />
                 <datalist id="agent-models">
-                  {CLAUDE_MODELS.map((m) => <option key={m} value={m} />)}
+                  {(descriptorFor(providers, draft.provider)?.models ?? []).map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
                 </datalist>
               </>
             </Field>

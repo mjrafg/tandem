@@ -3,6 +3,7 @@ import type {
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
   DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
   AuthProvider, LoginState, ProviderStatus, StoredTokenMeta,
+  Effort, Provider, ProviderDescriptor, ProviderHealth,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -176,6 +177,13 @@ export const api = {
   submitProviderCode: (p: AuthProvider, code: string) =>
     j<LoginState>(`/api/provider-auth/${p}/code`, { method: 'POST', body: JSON.stringify({ code }) }),
   cancelProviderLogin: (p: AuthProvider) => j<{ ok: boolean }>(`/api/provider-auth/${p}/cancel`, { method: 'POST', body: JSON.stringify({}) }),
+
+  // AI providers — the registry, the only model list the UI reads
+  providers: () => j<{
+    providers: ProviderDescriptor[];
+    resolved: Record<'builder' | 'reviewer' | 'director', { provider: Provider; model: string; effort: Effort }>;
+  }>('/api/providers'),
+  providerHealth: () => j<{ providers: ProviderHealth[] }>('/api/providers/health'),
 
   // settings
   settings: () => j<AppSettings>('/api/settings'),

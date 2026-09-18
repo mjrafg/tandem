@@ -24,6 +24,8 @@ import { SEED_AGENTS } from './seeds';
 
 /** V1: Builder execution is Claude Code only — the server, not the UI, enforces it. */
 export const BUILDER_PROVIDER: Provider = 'claude-code';
+import { providerOfModel } from '../providers/catalog';
+import { PROVIDER_IDS, canonicalProvider } from '../providers/ids';
 
 /**
  * The specialist prompt is delivered as ONE argv element
@@ -111,13 +113,17 @@ export function validateEffort(effort: unknown): Effort {
 }
 
 function validateProvider(provider: unknown): Provider {
-  // accepted for forward compatibility, rejected when it is not the one
-  // provider Builder execution actually implements
+  // absent = the historical default; anything present must be a registered id
   if (provider === undefined || provider === null || provider === '') return BUILDER_PROVIDER;
-  if (provider !== BUILDER_PROVIDER) {
-    throw new AgentError(`Builder Agents run on the Claude Code CLI; provider "${String(provider)}" is not supported. The provider field is persisted for future provider-neutral execution and cannot be changed in this version.`);
-  }
-  return BUILDER_PROVIDER;
+  const p = canonicalProvider(provider);
+  if (!p) throw new AgentError(`Unknown AI provider "${String(provider)}". Registered providers: ${PROVIDER_IDS.join(', ')}.`);
+  return p;
+}
+
+/** a model that plainly belongs to another backend cannot run on this one */
+function validatePair(provider: Provider, model: string): void {
+  const owner = providerOfModel(model);
+  if (owner && owner !== provider) throw new AgentError(`"${model}" is not a model the ${provider} provider can run.`);
 }
 
 function validateSlug(slug: unknown, exceptId?: string): string {
@@ -188,6 +194,7 @@ export function createAgent(input: AgentInput): AgentProfile {
     effort: validateEffort(input.effort ?? ''),
     enabled: input.enabled !== false,
   };
+  validatePair(row.provider, row.model);
   const makeDefault = !!input.isDefault;
   if (makeDefault && !row.enabled) throw new AgentError('The default agent must be enabled.');
   db.transaction(() => {
@@ -208,20 +215,20 @@ export function updateAgent(id: string, input: AgentInput): AgentProfile {
     name: input.name !== undefined ? requireText(input.name, 'Name', 80) : current.name,
     description: input.description !== undefined ? String(input.description).trim().slice(0, 600) : current.description,
     systemPrompt: input.systemPrompt !== undefined ? requireText(input.systemPrompt, 'System prompt', MAX_PROMPT_CHARS) : current.systemPrompt,
+    provider: input.provider !== undefined ? validateProvider(input.provider) : current.provider,
     model: input.model !== undefined ? validateModel(input.model) : current.model,
     effort: input.effort !== undefined ? validateEffort(input.effort) : current.effort,
     enabled: input.enabled !== undefined ? !!input.enabled : current.enabled,
   };
-  // provider is validated whenever supplied, so a raw API call cannot mutate it
-  if (input.provider !== undefined) validateProvider(input.provider);
+  validatePair(next.provider, next.model);
   const wantsDefault = input.isDefault === true;
   if (current.isDefault && !next.enabled && !wantsDefault) {
     throw new AgentError('This agent is the default — make another enabled agent the default before disabling it.');
   }
   if (wantsDefault && !next.enabled) throw new AgentError('The default agent must be enabled.');
   db.transaction(() => {
-    db.prepare(`UPDATE agent_profiles SET slug = ?, name = ?, description = ?, system_prompt = ?, model = ?, effort = ?, enabled = ?, updated_at = ? WHERE id = ?`)
-      .run(next.slug, next.name, next.description, next.systemPrompt, next.model, next.effort, next.enabled ? 1 : 0, Date.now(), id);
+    db.prepare(`UPDATE agent_profiles SET slug = ?, name = ?, description = ?, system_prompt = ?, provider = ?, model = ?, effort = ?, enabled = ?, updated_at = ? WHERE id = ?`)
+      .run(next.slug, next.name, next.description, next.systemPrompt, next.provider, next.model, next.effort, next.enabled ? 1 : 0, Date.now(), id);
     if (wantsDefault) promoteDefault(id);
   })();
   return getAgent(id)!;
@@ -286,7 +293,8 @@ export function resolveAgentForLaunch(profileId: string | null | undefined): Age
     if (!p.enabled) throw new AgentError(`Builder Agent "${p.name}" is disabled and can no longer be selected.`);
     validateModel(p.model);
     validateEffort(p.effort);
-    if (p.provider !== BUILDER_PROVIDER) throw new AgentError(`Builder Agent "${p.name}" is configured for an unsupported provider.`);
+    if (!canonicalProvider(p.provider)) throw new AgentError(`Builder Agent "${p.name}" is configured for an unknown provider "${p.provider}".`);
+    validatePair(p.provider, p.model);
     return p;
   }
   const d = defaultAgent();

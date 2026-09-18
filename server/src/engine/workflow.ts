@@ -3,12 +3,13 @@ import path from 'node:path';
 import { config } from '../config';
 import type { AiCallPayload, AttachmentMeta, Finding, FindingsPayload } from '../../../shared/types';
 import { computeUsage, recentConversation, shouldAutoCompact } from '../context';
-import { db, getBuilderSession, getChat, getEvent, getProject, setBuilderSession } from '../db';
+import { db, getChat, getEvent, getProject } from '../db';
 import { addEvent, updateEvent } from '../events';
 import { getSettings } from '../settings';
 import { builderSystemText, getPrompt, renderPrompt, reviewerSystemText } from '../prompts';
-import { runClaudeTurn } from './claude';
-import { runCodexReview } from './codex';
+import { executeRole, providerLabel, providerShortLabel } from '../providers/executor';
+import { resolveBuilderRole, resolveReviewerRole } from '../providers/resolve';
+import { rememberSession, resumableSession, storedSessionRef } from '../providers/sessions';
 import { performNativeCompaction } from './providerContext';
 import {
   RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, repoBusyBy, setChatRunning, stopRun,
@@ -16,9 +17,8 @@ import {
 import { adoptRepo, finishGitRun, summaryText } from './gitFlow';
 import { captureReviewBaseline, captureWorktree, changedSince, diffWorktrees, releaseReviewBaseline, repairDiff, revisionHash, signatureMap, type DeltaNoteKind } from './snapshot';
 import {
-  classifyProviderOutage, deletePendingReview, fmtRetryAt, getPendingReview, upsertPendingReview,
+  deletePendingReview, fmtRetryAt, getPendingReview, outageFromFailure, upsertPendingReview,
 } from './reviewWait';
-import { builderExecFor } from '../agents/exec';
 
 export { isRunning, stopRun, applyWorkdirChange } from './run';
 export { setGitWorkflow } from './gitFlow';
@@ -134,27 +134,31 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   const builderTimeout = Math.min(runOpts.timeoutMs ?? BUILDER_TIMEOUT, 90 * 60_000);
   // the chat's immutable Agent snapshot decides model/effort/specialist prompt;
   // chats without one keep the Builder role settings exactly as before
-  const builderCfg = builderExecFor(h.chat.id, h.settings);
+  const builderCfg = resolveBuilderRole(h.settings, h.chat.id);
   const startDir = h.project.rootPath;
   const before = captureWorktree(startDir);
-  const resume = getBuilderSession(h.chat.id);
+  // the stored session is continued only by the provider that created it; a
+  // Builder moved to another backend starts fresh and is seeded from the record
+  const stored = storedSessionRef(h.chat.id);
+  const resume = resumableSession(stored, builderCfg.provider).session?.id ?? null;
 
   // ---- Builder does the work (its own decisions, its own tools)
-  const first = await runClaudeTurn(h, {
+  const first = await executeRole({
+    handle: h,
     role: 'builder',
+    provider: builderCfg.provider,
     model: builderCfg.model,
     effort: builderCfg.effort,
-    systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
-    message: builderMessage(h, userText, resume),
+    systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
+    userPrompt: builderMessage(h, userText, resume),
     cwd: startDir,
-    resumeSessionId: resume,
-    withTandemTools: true,
+    session: stored,
     timeoutMs: builderTimeout,
   });
-  if (first.sessionId) setBuilderSession(h.chat.id, first.sessionId, 'claude-code');
+  rememberSession(h.chat.id, first.session);
   if (h.stopped) return false;
-  if (!first.ok) {
-    h.error({ message: 'Builder call failed', detail: first.error, source: 'builder', retryable: true });
+  if (first.status !== 'completed') {
+    h.error({ message: 'Builder call failed', detail: first.failure?.message, source: 'builder', retryable: true });
     return false;
   }
 
@@ -173,7 +177,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   }
   if (h.settings.roles.reviewer.enabled === false) return true;
 
-  const subject = subjectFor(delta, first.resultText);
+  const subject = subjectFor(delta, first.answer);
   if (!subject) return true; // the run produced neither changes nor a response
 
   // The budget belongs to the task, not to this invocation. A continuation of a
@@ -230,7 +234,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
 }): Promise<PhaseOutcome> {
   // repairs run on the SAME snapshot the first turn used — an admin editing the
   // Agent template mid-session never changes what this session executes
-  const builderCfg = builderExecFor(h.chat.id, h.settings);
+  const builderCfg = resolveBuilderRole(h.settings, h.chat.id);
   let subject2 = opts.subject;
   let repairContext: RepairContext | undefined = opts.replayRepair;
 
@@ -257,25 +261,26 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     await maybeAutoCompact(h.chat.id, { atRunBoundary: true });
     h.refresh();
 
-    const repair = await runClaudeTurn(h, {
+    const repair = await executeRole({
+      handle: h,
       role: 'builder',
+      provider: builderCfg.provider,
       model: builderCfg.model,
       effort: builderCfg.effort,
-      systemAppendix: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
-      message: renderPrompt(
+      systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
+      userPrompt: renderPrompt(
         opts.subject.kind === 'answer' ? 'repair.answer_findings_message' : 'repair.findings_message',
         { findings: findingsAsText(round1.items) },
       ),
       cwd: h.project.rootPath,
-      resumeSessionId: getBuilderSession(h.chat.id),
-      withTandemTools: true,
+      session: storedSessionRef(h.chat.id),
       timeoutMs: opts.builderTimeout,
     });
-    if (repair.sessionId) setBuilderSession(h.chat.id, repair.sessionId, 'claude-code');
+    rememberSession(h.chat.id, repair.session);
     recordRepair(h.chat.id, false);
     if (h.stopped) return 'stopped';
-    if (!repair.ok) {
-      h.error({ message: 'Builder repair call failed', detail: repair.error, source: 'builder', retryable: true });
+    if (repair.status !== 'completed') {
+      h.error({ message: 'Builder repair call failed', detail: repair.failure?.message, source: 'builder', retryable: true });
       return 'failed';
     }
 
@@ -286,7 +291,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     repairContext = {
       previousFindings: round1.items,
       previousReview: round1.text,
-      handoff: repair.resultText,
+      handoff: repair.answer,
       changedPaths,
       diff: rd.text,
       diffNote: rd.note,
@@ -303,7 +308,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
       ? ({ kind: 'changes', ...currentDelta(h) } as ReviewSubject)
       : opts.retry && opts.subject.kind === 'changes'
         ? opts.subject
-        : subjectFor(null, repair.resultText) ?? opts.subject;
+        : subjectFor(null, repair.answer) ?? opts.subject;
   }
 
   // ---- round 2 (the last review)
@@ -556,7 +561,7 @@ type ReviewResult =
 
 async function review(h: RunHandle, originalRequest: string, subject: ReviewSubject, round: number, steering?: string, repair?: RepairContext): Promise<ReviewResult> {
   h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is checking the repaired result…');
-  const cfg = h.settings.roles.reviewer;
+  const cfg = resolveReviewerRole(h.settings);
   const evidence = subject.kind === 'changes'
     ? renderPrompt('reviewer.changed_section', {
       changed_files_note: subject.note,
@@ -590,26 +595,34 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
   h.ctx.phase = 'reviewer';
   let result;
   try {
-    result = await runCodexReview(h, {
+    // every review is a FRESH provider context: no session is offered, so the
+    // Reviewer cannot inherit the Builder's conversation whatever backend
+    // either of them runs on
+    result = await executeRole({
+      handle: h,
+      role: 'reviewer',
+      provider: cfg.provider,
       model: cfg.model,
       effort: cfg.effort,
-      prompt: `${reviewerSystemText(h.settings)}\n\n${prompt}`,
+      systemPrompt: reviewerSystemText(h.settings),
+      userPrompt: prompt,
       cwd: h.project.rootPath,
+      emitActivity: false,
       timeoutMs: REVIEW_TIMEOUT,
     });
   } finally {
     h.ctx.phase = 'builder';
   }
   if (h.stopped) return { stopped: true };
-  if (!result.ok) {
-    // provider-outage classification (usage limit / quota / rate limit) is the
+  if (result.status !== 'completed') {
+    // a temporary provider condition (quota / rate limit / overload) is the
     // caller's signal to WAIT instead of degrading the review policy
-    const outage = classifyProviderOutage(result.error);
-    if (outage) return { outage: { ...outage, detail: result.error ?? '' } };
-    return { failure: result.error ?? 'The Reviewer failed.' };
+    const outage = outageFromFailure(result.failure, providerShortLabel(cfg.provider));
+    if (outage) return { outage: { ...outage, detail: result.failure?.message ?? '' } };
+    return { failure: result.failure?.message ?? 'The Reviewer failed.' };
   }
 
-  const { verdict, items } = parseVerdict(result.text);
+  const { verdict, items } = parseVerdict(result.answer);
   const payload: FindingsPayload = { verdict, round, items };
   // the verdict and the round it consumed are one fact: either both are
   // durable or neither is, so no crash can leave a review spent but unrecorded
@@ -619,7 +632,7 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
     recordReview(h.chat.id, round, verdict, revisionOf(revisionHash(h.project.rootPath, captureWorktree(h.project.rootPath)), subject));
     return e;
   })();
-  return { verdict, items, eventId: ev.id, text: result.text };
+  return { verdict, items, eventId: ev.id, text: result.answer };
 }
 
 /** Parse the Reviewer's contracted output format (protocol, not intent). */

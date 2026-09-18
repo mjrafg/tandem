@@ -13,6 +13,7 @@
  * bounded; it is already shown in the chat's error events today.
  */
 import { db } from '../db';
+import type { ProviderFailure } from '../providers/types';
 
 export interface PendingReview {
   chatId: string;
@@ -132,6 +133,27 @@ function classifyTransient(text: string): 'overload' | 'server error' | 'connect
  * errors, auth errors, crashes, timeouts) returns null and keeps its existing
  * handling.
  */
+/**
+ * The typed failure an adapter classified, as the wait decision the workflow
+ * makes. This is the seam between the provider layer (which knows what its
+ * backend said) and review policy (which decides to wait rather than degrade).
+ */
+export function outageFromFailure(failure: ProviderFailure | undefined, provider: string, now = Date.now()): ProviderOutage | null {
+  if (!failure) return null;
+  switch (failure.kind) {
+    case 'quota':
+      return { reason: `${provider} usage limit`, retryAt: failure.retryAfter ? failure.retryAfter + RESET_GRACE_MS : now + DEFAULT_RETRY_MS };
+    case 'rate_limit':
+      return { reason: `${provider} rate limit`, retryAt: failure.retryAfter ? failure.retryAfter + RESET_GRACE_MS : now + DEFAULT_RETRY_MS };
+    case 'overloaded':
+      return { reason: `${provider} overload`, retryAt: now + TRANSIENT_RETRY_MS, transient: true };
+    case 'transient':
+      return { reason: `${provider} server error`, retryAt: now + TRANSIENT_RETRY_MS, transient: true };
+    default:
+      return null;
+  }
+}
+
 export function classifyProviderOutage(errorText: string | undefined, now = Date.now(), provider = 'Codex'): ProviderOutage | null {
   const text = (errorText ?? '').slice(0, 4_000);
   if (!text) return null;

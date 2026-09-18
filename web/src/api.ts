@@ -167,8 +167,10 @@ export const api = {
 
   // provider sign-in (the Builder/Reviewer/Director CLIs' own logins)
   providerAuth: () => j<{ providers: ProviderStatus[]; logins: LoginState[]; tokens: StoredTokenMeta[] }>('/api/provider-auth'),
-  startProviderLogin: (p: AuthProvider, kind: 'login' | 'mint' = 'login') =>
-    j<LoginState>(`/api/provider-auth/${p}/start`, { method: 'POST', body: JSON.stringify({ kind }) }),
+  startProviderLogin: (p: AuthProvider) =>
+    j<LoginState>(`/api/provider-auth/${p}/start`, { method: 'POST', body: JSON.stringify({}) }),
+  saveProviderToken: (p: AuthProvider, token: string) =>
+    j<{ ok: boolean; token: StoredTokenMeta }>(`/api/provider-auth/${p}/token`, { method: 'POST', body: JSON.stringify({ token }) }),
   forgetProviderToken: (p: AuthProvider) => j<{ ok: boolean }>(`/api/provider-auth/${p}/token`, { method: 'DELETE' }),
   pollProviderLogin: (p: AuthProvider) => j<LoginState>(`/api/provider-auth/${p}/poll`),
   submitProviderCode: (p: AuthProvider, code: string) =>

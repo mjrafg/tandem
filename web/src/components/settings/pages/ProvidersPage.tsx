@@ -28,6 +28,10 @@ export function ProvidersPage() {
   const [codes, setCodes] = useState<Partial<Record<AuthProvider, string>>>({});
   const [submitted, setSubmitted] = useState<Partial<Record<AuthProvider, string>>>({});
   const [loaded, setLoaded] = useState(false);
+  const [pasted, setPasted] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [tokenOk, setTokenOk] = useState(false);
   const polling = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -53,10 +57,10 @@ export function ProvidersPage() {
     return () => { if (polling.current) window.clearInterval(polling.current); polling.current = null; };
   }, [active, refresh]);
 
-  const start = async (p: AuthProvider, kind: 'login' | 'mint' = 'login') => {
+  const start = async (p: AuthProvider) => {
     setBusy(p);
     try {
-      const st = await api.startProviderLogin(p, kind);
+      const st = await api.startProviderLogin(p);
       setLogins((prev) => ({ ...prev, [p]: st }));
     } catch (err) {
       toast(err instanceof ApiError ? err.message : 'Could not start the sign-in.');
@@ -75,6 +79,25 @@ export function ProvidersPage() {
     } catch (err) {
       toast(err instanceof ApiError ? err.message : 'The CLI would not take that code.');
     } finally { setBusy(null); }
+  };
+
+  /**
+   * Hand the pasted token to the server, which checks it before storing it.
+   * The value is cleared from this component either way — it is not kept in
+   * the page, echoed back, or written anywhere the browser can recover it.
+   */
+  const saveToken = async () => {
+    const token = pasted.trim();
+    if (!token) return;
+    setSaving(true); setTokenError(null); setTokenOk(false);
+    try {
+      await api.saveProviderToken('claude', token);
+      setPasted('');
+      setTokenOk(true);
+      void refresh();
+    } catch (err) {
+      setTokenError(err instanceof ApiError ? err.message : 'The token could not be saved.');
+    } finally { setSaving(false); }
   };
 
   const cancel = async (p: AuthProvider) => {
@@ -137,27 +160,71 @@ export function ProvidersPage() {
               const tok = tokens.find((t) => t.provider === 'claude');
               const days = tok?.expiresAt ? Math.round((tok.expiresAt - Date.now()) / 86_400_000) : null;
               return (
-                <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-[#111] px-3 py-2.5">
-                  <KeyRound size={15} className="shrink-0 text-dim" aria-hidden />
-                  <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-dim">
-                    {tok
-                      ? <>A one-year token is stored and authenticates every call. It lapses in about {days} day{days === 1 ? '' : 's'}. Tandem keeps it encrypted and never shows it.</>
-                      : <>The sign-in above lasts about four weeks. A one-year token avoids that, at the cost of Tandem holding the credential — encrypted, never displayed.</>}
+                <div className="mt-3 space-y-2.5 rounded-lg border border-line bg-[#111] px-3 py-2.5">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <KeyRound size={15} className="shrink-0 text-dim" aria-hidden />
+                    <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-dim">
+                      {tok
+                        ? <>A long-lived token is stored and authenticates every call. It should last about {days} more day{days === 1 ? '' : 's'} — Tandem&rsquo;s own estimate, not the CLI&rsquo;s word. It is kept encrypted and never shown.</>
+                        : <>The sign-in above lasts about four weeks. A token from <code className="font-mono text-[11.5px]">claude setup-token</code> lasts a year, at the cost of Tandem holding the credential — encrypted, never displayed.</>}
+                    </div>
+                    {tok && (
+                      <button
+                        onClick={async () => { await api.forgetProviderToken('claude'); toast('Token removed.'); void refresh(); }}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[12.5px] text-dim hover:bg-[#222]"
+                      >
+                        <Trash2 size={13} /> Remove
+                      </button>
+                    )}
                   </div>
-                  <button
-                    onClick={() => void start('claude', 'mint')}
-                    disabled={busy === p}
-                    className="rounded-lg border border-line px-2.5 py-1.5 text-[12.5px] hover:bg-[#222] disabled:opacity-50"
-                  >
-                    {tok ? 'Replace token' : 'Create one-year token'}
-                  </button>
-                  {tok && (
+
+                  {/* Tandem does not run `setup-token` itself: reading a credential back out of
+                      a repainting terminal loses characters, and a token one character short
+                      fails every call while looking perfectly valid. The shell is the reliable
+                      place to copy it from. */}
+                  <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-dim">
+                    <span>Run this on the server, then paste what it prints:</span>
+                    <code className="rounded bg-[#0e0e0e] px-2 py-1 font-mono text-[11.5px]">claude setup-token</code>
                     <button
-                      onClick={async () => { await api.forgetProviderToken('claude'); toast('Token removed.'); void refresh(); }}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[12.5px] text-dim hover:bg-[#222]"
+                      onClick={() => { void navigator.clipboard?.writeText('claude setup-token'); toast('Command copied.'); }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2 py-1 text-[12px] hover:bg-[#222]"
                     >
-                      <Trash2 size={13} /> Remove
+                      <Copy size={12} /> Copy
                     </button>
+                  </div>
+
+                  <form
+                    onSubmit={(e) => { e.preventDefault(); void saveToken(); }}
+                    className="flex flex-wrap items-center gap-2"
+                  >
+                    <input
+                      type="password"
+                      value={pasted}
+                      onChange={(e) => setPasted(e.target.value)}
+                      placeholder={tok ? 'Paste a new token to replace the stored one' : 'Paste the token here'}
+                      autoComplete="off" spellCheck={false} dir="ltr"
+                      className="min-w-[18rem] flex-1 rounded-lg border border-line bg-[#0e0e0e] px-3 py-1.5 font-mono text-[12.5px] outline-none focus:border-acc/60"
+                    />
+                    <button
+                      type="submit"
+                      disabled={saving || !pasted.trim()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-acc/15 px-3 py-1.5 text-[13px] text-acc hover:bg-acc/25 disabled:opacity-40"
+                    >
+                      {saving && <Loader2 size={14} className="animate-spin" />}
+                      {saving ? 'Checking…' : tok ? 'Replace token' : 'Save token'}
+                    </button>
+                  </form>
+
+                  {saving && (
+                    <div className="text-[12.5px] text-dim">
+                      Making one small API call with this token — it is only stored if that call succeeds.
+                    </div>
+                  )}
+                  {tokenError && !saving && (
+                    <div className="rounded-lg border border-err/30 bg-err/[0.07] px-3 py-2 text-[12.5px] text-err">{tokenError}</div>
+                  )}
+                  {tokenOk && !saving && (
+                    <div className="text-[12.5px] text-ok">Token checked against the API and saved. Every Claude call now uses it.</div>
                   )}
                 </div>
               );
@@ -174,9 +241,7 @@ export function ProvidersPage() {
                 {login.url && (
                   <div className="space-y-1.5">
                     <div className="text-[12.5px] text-dim">
-                      {login.kind === 'mint'
-                        ? 'Open this link and approve, then paste the code back. The token it produces is stored encrypted and never shown.'
-                        : 'Open this link, sign in to your own account, then paste the code it gives you.'}
+                      Open this link, sign in to your own account, then paste the code it gives you.
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <a
@@ -237,9 +302,7 @@ export function ProvidersPage() {
                 )}
                 {login.phase === 'done' && (
                   <div className="text-[13px] text-ok">
-                    {login.kind === 'mint'
-                      ? 'One-year token saved. Every Claude call now uses it.'
-                      : 'Signed in. New runs will use this session.'}
+                    Signed in. New runs will use this session.
                   </div>
                 )}
                 {login.phase === 'failed' && (

@@ -33,7 +33,7 @@ import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from
 import { expediteRunReviews } from './reviewRetrySweeper';
 import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings, resolveDirectorRole } from './settings';
-import { allStatus, cancelLogin, forgetToken, getLogin, startLogin, submitCode, tokenMeta, type AuthProvider } from './providerAuth';
+import { allStatus, cancelLogin, forgetToken, getLogin, startLogin, storePastedToken, submitCode, tokenMeta, type AuthProvider } from './providerAuth';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
 import { listTools, resetToolText, setToolText } from './toolText';
 
@@ -565,11 +565,22 @@ export function registerRoutes(app: FastifyInstance): void {
   app.post('/api/provider-auth/:provider/start', async (req, reply) => {
     const provider = authProvider(req, reply);
     if (!provider) return;
-    const kind = (req.body as any)?.kind === 'mint' ? 'mint' : 'login';
-    if (kind === 'mint' && provider !== 'claude') {
-      return reply.code(400).send({ error: 'Only Claude Code can mint a long-lived token.' });
-    }
-    return startLogin(provider, kind);
+    return startLogin(provider);
+  });
+
+  /**
+   * Save a long-lived token the operator minted themselves with
+   * `claude setup-token` and pasted in. The value is checked against the API
+   * before it is stored, and neither the body nor the reply is ever logged.
+   */
+  app.post('/api/provider-auth/:provider/token', async (req, reply) => {
+    const provider = authProvider(req, reply);
+    if (!provider) return;
+    const token = String((req.body as any)?.token ?? '');
+    const model = getSettings().roles.builder.model;
+    const res = await storePastedToken(provider, token, model);
+    if (!res.ok) return reply.code(400).send({ error: res.error });
+    return { ok: true, token: res.meta };
   });
 
   app.delete('/api/provider-auth/:provider/token', async (req, reply) => {

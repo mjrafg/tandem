@@ -767,14 +767,12 @@ export interface ProviderStatus {
 export interface StoredTokenMeta {
   provider: AuthProvider;
   createdAt: number;
-  /** when the minted token lapses; null when the CLI did not state one */
+  /** roughly when the token lapses; Tandem's own estimate, not the CLI's word */
   expiresAt: number | null;
 }
 
 export interface LoginState {
   provider: AuthProvider;
-  /** `login` signs the CLI in; `mint` produces the long-lived token */
-  kind: 'login' | 'mint';
   phase: 'running' | 'awaiting_code' | 'done' | 'failed' | 'idle';
   url: string | null;
   output: string;

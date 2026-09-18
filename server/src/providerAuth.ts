@@ -34,12 +34,9 @@ import { getSettings, resolveDirectorRole } from './settings';
 
 export type AuthProvider = 'claude' | 'codex';
 
-/** `login` signs the CLI in for ~4 weeks; `mint` produces the one-year token */
-export type LoginKind = 'login' | 'mint';
 
 export interface LoginState {
   provider: AuthProvider;
-  kind: LoginKind;
   /** running = working; awaiting_code = the operator must paste a code; done/failed = terminal */
   phase: 'running' | 'awaiting_code' | 'done' | 'failed';
   /** the URL to open, once the CLI has printed one */
@@ -58,8 +55,6 @@ interface Session extends LoginState {
   timer: NodeJS.Timeout;
   /** we have already pressed Enter for the rejection currently on screen */
   dismissed: boolean;
-  /** a minted token is being checked against the API right now */
-  checking: boolean;
 }
 
 /** a login that has not finished in this long is abandoned */
@@ -148,9 +143,10 @@ function wantsCode(text: string): boolean {
  * that protects the browser from a printed credential destroyed the only thing
  * it produced. `auth login` persists the session the Builder and Director use.
  */
-function loginCommand(provider: AuthProvider, kind: LoginKind): string {
-  if (provider !== 'claude') return `${config.codexBin} login --device-auth`;
-  return kind === 'mint' ? `${config.claudeBin} setup-token` : `${config.claudeBin} auth login --claudeai`;
+function loginCommand(provider: AuthProvider): string {
+  return provider === 'claude'
+    ? `${config.claudeBin} auth login --claudeai`
+    : `${config.codexBin} login --device-auth`;
 }
 
 /**
@@ -159,8 +155,8 @@ function loginCommand(provider: AuthProvider, kind: LoginKind): string {
  * getting the macOS form right is what makes this testable on a developer
  * machine instead of only after a deploy.
  */
-function ptyArgs(provider: AuthProvider, kind: LoginKind): string[] {
-  const cmd = loginCommand(provider, kind);
+function ptyArgs(provider: AuthProvider): string[] {
+  const cmd = loginCommand(provider);
   return process.platform === 'linux'
     ? ['-qec', cmd, '/dev/null']
     : ['-q', '/dev/null', 'sh', '-c', cmd];
@@ -169,26 +165,22 @@ function ptyArgs(provider: AuthProvider, kind: LoginKind): string[] {
 export function getLogin(provider: AuthProvider): LoginState | null {
   const s = sessions.get(provider);
   if (!s) return null;
-  const { provider: p, kind, phase, url, output, notice, startedAt, error } = s;
-  return { provider: p, kind, phase, url, output, notice, startedAt, error };
+  const { provider: p, phase, url, output, notice, startedAt, error } = s;
+  return { provider: p, phase, url, output, notice, startedAt, error };
 }
 
-export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): LoginState {
+export function startLogin(provider: AuthProvider): LoginState {
   cancelLogin(provider);
-  const child = spawn('script', ptyArgs(provider, kind), {
+  const child = spawn('script', ptyArgs(provider), {
     cwd: config.dataDir,
     env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
   const session: Session = {
-    provider, kind, phase: 'running', url: null, output: '', startedAt: Date.now(),
-    child, raw: '', dismissed: false, checking: false,
-    timer: setTimeout(() => {
-      // a mint that printed its token has already stored it; do not call that a failure
-      if (kind === 'mint' && tokenMeta(provider)) { finish(provider, 'done'); return; }
-      finish(provider, 'failed', 'The sign-in did not finish within 10 minutes.');
-    }, LOGIN_TIMEOUT_MS),
+    provider, phase: 'running', url: null, output: '', startedAt: Date.now(),
+    child, raw: '', dismissed: false,
+    timer: setTimeout(() => finish(provider, 'failed', 'The sign-in did not finish within 10 minutes.'), LOGIN_TIMEOUT_MS),
   };
   sessions.set(provider, session);
 
@@ -209,44 +201,6 @@ export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): L
       session.notice = said[1].replace(/\s+/g, ' ').trim();
       session.phase = 'awaiting_code';
     }
-    // Store the minted token THE MOMENT it appears, not when the process exits.
-    // Waiting for exit assumes the CLI leaves promptly after printing, and it
-    // does not have to: if it lingers, the ten-minute timeout marks the flow
-    // failed and the close handler then declines to store anything, losing a
-    // credential that was sitting in the stream the whole time.
-    if (session.kind === 'mint' && session.phase !== 'done' && !session.checking
-        && extractMintedToken(session.raw)) {
-      // Checking takes a call, so do it once and say what is happening: a
-      // silent pause here is what made every earlier failure unreadable.
-      session.checking = true;
-      session.notice = 'Token received — checking that it authenticates before saving it…';
-      void captureMintedToken(provider, session.raw, resolveDirectorRole(getSettings()).model).then((outcome) => {
-        const cur = sessions.get(provider);
-        if (!cur) return;
-        if (outcome === 'stored') {
-          cur.phase = 'done';
-          cur.notice = undefined;
-          console.log(`[tandem] provider-auth: ${provider} mint captured and verified a token`);
-          try { cur.child.kill('SIGTERM'); } catch { /* already leaving */ }
-        } else {
-          cur.phase = 'failed';
-          cur.notice = 'The CLI produced a token but it did not authenticate, so nothing was saved. '
-            + 'Your existing sign-in is untouched and still in use.';
-          try { cur.child.kill('SIGTERM'); } catch { /* already leaving */ }
-        }
-      });
-    } else if (session.kind === 'mint' && session.phase !== 'done' && !session.checking) {
-      if (/created successfully|your oauth token/i.test(session.output)) {
-        console.log(`[tandem] provider-auth: ${provider} mint reported success but no token could be read. `
-          + `Redacted tail follows:\n${session.output.slice(-1500)}`);
-        // The CLI says it worked and Tandem cannot read the token. Silence here
-        // is the worst outcome: the flow sits at "running" forever while the
-        // credential scrolls past. Say so, and leave the output on screen.
-        session.notice = 'The CLI reported success but Tandem could not read the token from its output. '
-          + 'Open "What the CLI is showing" below and send those lines on — nothing was saved.';
-      }
-    }
-
     // "Press Enter to retry" is not a prompt to resend the same code — pressing
     // Enter restarts the whole authorization and prints a NEW url. Press it once
     // so the fresh link appears, then let the operator sign in again.
@@ -259,16 +213,6 @@ export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): L
   child.stderr?.on('data', absorb);
   child.on('error', (err) => finish(provider, 'failed', `The sign-in helper could not start: ${String(err)}`));
   child.on('close', (code) => {
-    // A mint does not sign the CLI in, so auth status says nothing about it:
-    // the token appearing in the stream IS the success condition. Capture it
-    // from the raw text, because the copy the browser sees is redacted.
-    if (kind === 'mint') {
-      const s = sessions.get(provider);
-      if (s?.checking) return;                       // the check decides the outcome
-      finish(provider, tokenMeta(provider) ? 'done' : 'failed',
-        tokenMeta(provider) ? undefined : 'The CLI finished without a token that authenticates, so nothing was saved.');
-      return;
-    }
     // the CLI is the authority on whether the login took: ask it separately
     // rather than guessing from an exit code produced under a PTY wrapper
     void checkStatus(provider).then((st) => {
@@ -331,7 +275,7 @@ export function submitCode(provider: AuthProvider, code: string): { ok: boolean;
     s.notice = undefined;
     s.phase = 'running';
     const before = s.raw.length;
-    console.log(`[tandem] provider-auth: ${provider} ${s.kind} — code of ${trimmed.length} chars written to the CLI`);
+    console.log(`[tandem] provider-auth: ${provider} sign-in — code of ${trimmed.length} chars written to the CLI`);
     // The CLI answers a code within seconds. If nothing at all comes back, the
     // write did not land where it needed to, and that is worth knowing rather
     // than leaving the operator watching a silent page.
@@ -343,16 +287,6 @@ export function submitCode(provider: AuthProvider, code: string): { ok: boolean;
       cur.notice = 'The CLI did not react to that code within 20 seconds. Open "What the CLI is showing" below '
         + 'and send those lines on.';
     }, 20_000).unref?.();
-    // And record the screen either way. Diagnosing this from the outside has
-    // cost several attempts; the redacted layout is what settles it, and it
-    // carries no credential.
-    setTimeout(() => {
-      const cur = sessions.get(provider);
-      if (!cur) return;
-      console.log(`[tandem] provider-auth: ${provider} ${cur.kind} screen 25s after the code `
-        + `(phase=${cur.phase}, tokenStored=${tokenMeta(provider) !== null}). Redacted tail follows:\n`
-        + cur.output.slice(-1800));
-    }, 25_000).unref?.();
     return { ok: true };
   } catch (err) {
     return { ok: false, error: `Could not hand the code to the CLI: ${String(err)}` };
@@ -414,11 +348,13 @@ export async function allStatus(): Promise<ProviderStatus[]> {
  * expired and could not be refreshed". `claude auth login` fixes that in a
  * minute from the browser, but it has to be done again every month.
  *
- * `claude setup-token` mints a token valid for a year instead. It does NOT sign
- * the CLI in — it prints a credential for the caller to supply as
- * CLAUDE_CODE_OAUTH_TOKEN — so using it means Tandem stores that credential and
- * hands it to each invocation. That is a deliberate trade: a year-long key in
- * Tandem's custody against a monthly interruption.
+ * `claude setup-token` mints a token valid for a year instead. Tandem does not
+ * run that command: reading a credential back out of a repainting terminal is
+ * guesswork, and a token reconstructed one character short is indistinguishable
+ * from a good one until every call starts failing with 401 — which is exactly
+ * what happened. The operator runs `claude setup-token` in a shell, where the
+ * value can simply be copied, and pastes it into Admin. Tandem's job is to
+ * check it, encrypt it and hand it to each invocation.
  *
  * It is encrypted at rest with the same AES-256-GCM key the integration
  * credentials use, is never returned by any route, never rendered, never logged
@@ -438,16 +374,12 @@ export interface StoredTokenMeta {
   expiresAt: number | null;
 }
 
-/** what a minted Claude token looks like; used to find it and to sanity-check it */
-const TOKEN_SHAPE = /sk-ant-[A-Za-z0-9._-]{20,}/;
-/** the prose the CLI prints around the token, which must never be mistaken for it */
-const NOT_A_TOKEN = /^(store this|use this|press |your oauth|long-lived|set this|export )/i;
-/** a credential-shaped run: long, unbroken, no spaces. Used when the prefix is not sk-ant- */
+/** a stored token must still look like a credential before it is handed to a CLI */
 const CREDENTIAL_SHAPE = /^[A-Za-z0-9._-]{24,}$/;
 
 /** would this value be accepted as a token to hand to the CLI? */
 function looksLikeToken(value: string): boolean {
-  return TOKEN_SHAPE.test(value) || CREDENTIAL_SHAPE.test(value);
+  return CREDENTIAL_SHAPE.test(value);
 }
 
 /** Metadata only — the token itself is never exposed outside this module. */
@@ -476,102 +408,63 @@ export function forgetToken(provider: AuthProvider): void {
 /** storage without the API check — for tests that exercise the store itself */
 export function saveForTest(token: string, expiresAt: number): void { saveToken('claude', token, expiresAt); }
 
+/**
+ * The CLI does not state an expiry with the token, and the operator pastes a
+ * bare string, so the year is Tandem's own assumption about `setup-token`'s
+ * documented lifetime. The UI says "about", because that is all this is.
+ */
+const ASSUMED_TOKEN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Take a token the operator pasted, prove it works, and store it encrypted.
+ *
+ * The value is checked before it is stored, never after: a token that does not
+ * authenticate must not become the credential every Builder, Reviewer and
+ * Director call depends on. Nothing here echoes, logs or returns the token —
+ * the caller learns only whether it was accepted.
+ */
+export async function storePastedToken(
+  provider: AuthProvider,
+  raw: string,
+  model: string,
+): Promise<{ ok: boolean; error?: string; meta?: StoredTokenMeta }> {
+  const token = String(raw ?? '').trim();
+  if (!token) return { ok: false, error: 'Paste the token first.' };
+  if (/\s/.test(token)) {
+    return { ok: false, error: 'That value contains a space or line break. Copy the token on its own, with nothing around it.' };
+  }
+  if (!looksLikeToken(token)) {
+    return { ok: false, error: 'That does not look like a token. Expected a single run of letters, digits, dots, dashes or underscores.' };
+  }
+  if (provider !== 'claude') {
+    return { ok: false, error: 'Only Claude Code takes a pasted token; sign Codex in above.' };
+  }
+
+  const check = await verifyToken(token, model);
+  if (!check.ok) {
+    return { ok: false, error: check.error || 'The API refused that token. Check you copied all of it.' };
+  }
+
+  saveToken(provider, token, Date.now() + ASSUMED_TOKEN_LIFETIME_MS);
+  console.log(`[tandem] provider-auth: ${provider} long-lived token saved after a successful API check`);
+  return { ok: true, meta: tokenMeta(provider) ?? undefined };
+}
+
 function saveToken(provider: AuthProvider, token: string, expiresAt: number | null): void {
   db.prepare(`INSERT INTO provider_tokens (provider, data, expires_at, created_at) VALUES (?, ?, ?, ?)
     ON CONFLICT(provider) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at, created_at = excluded.created_at`)
     .run(provider, encryptSecret({ token }), expiresAt, Date.now());
 }
 
-/** terminal noise removed, but nothing redacted — for finding the token only */
-function scrubForTokenSearch(text: string): string {
-  return text
-    .replace(new RegExp(`${ESC}\\][^\\u0007${ESC}]*(?:\\u0007|${ESC}\\\\)`, 'g'), '')
-    // Cursor-column moves become a SPACE for display, because that is how this
-    // CLI separates words. Here they must vanish instead: the renderer also
-    // repositions WITHIN a long value, and a space injected into the middle of
-    // a token truncates the prefix match and breaks the no-spaces shape check —
-    // the token is then neither found nor recognised, which is exactly how a
-    // successful mint came back empty.
-    .replace(new RegExp(`${ESC}\\[[0-9]+G`, 'g'), '')
-    .replace(new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, 'g'), '')
-    .replace(new RegExp(`${ESC}[()][A-Z0-9]`, 'g'), '')
-    .replace(new RegExp(`${ESC}[=>78]`, 'g'), '')
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-    // And the carriage returns. This CLI repaints its success view onto a
-    // SINGLE line using CR, so the token is interrupted by one partway through.
-    // Leaving CR in place ended the match there and stored 79 characters of a
-    // longer token — a credential that looks perfectly well formed, passes
-    // every shape check, and is rejected by the API with a 401.
-    .replace(/\r/g, '');
-}
-
 /**
- * Pull the minted token out of the RAW stream.
+ * Prove a token actually authenticates, before it is allowed to become the
+ * credential every call depends on.
  *
- * It must come from the raw text: the scrubbed copy the browser sees has
- * already had it redacted, which is the point.
- *
- * The token is long enough that a terminal wraps it across lines, so the pieces
- * have to be rejoined — but only the pieces. Flattening every newline first
- * looks simpler and is wrong twice over: it glues the token to the word before
- * it, and it lets a greedy match run on into the sentence after it, yielding a
- * corrupt credential that would authenticate nothing. So continuation lines are
- * taken only while a line is ENTIRELY token characters, which prose never is.
- */
-export function extractMintedToken(raw: string): { token: string; expiresAt: number } | null {
-  // The success view is repainted onto one line, so once the carriage returns
-  // are gone the token runs straight into the sentence that follows it —
-  // "...dprvrQAAStore this token securely". Prose is made of the same
-  // characters as the token, so no pattern can separate them; the CLI's own
-  // wording is the only boundary there is. Cut there first.
-  const plain = scrubForTokenSearch(raw)
-    .replace(/(Store this token|Use this token|You won'?t be able|Press \w+ to)/gi, '\n$1');
-  const lines = plain.split('\n').map((l) => l.trim());
-
-  // Preferred: the known prefix. Fallback: the line the CLI prints directly
-  // under its success heading — the prefix is not something to bet the feature
-  // on, and a token that cannot be read is indistinguishable from one that was
-  // never printed.
-  let at = lines.findIndex((l) => /sk-ant-/.test(l));
-  let headToken = '';
-  if (at !== -1) {
-    headToken = /^sk-ant-[A-Za-z0-9._-]*/.exec(lines[at].slice(lines[at].indexOf('sk-ant-')))?.[0] ?? '';
-  } else {
-    const heading = lines.findIndex((l) => /your oauth token|token created successfully/i.test(l));
-    if (heading === -1) return null;
-    at = lines.findIndex((l, i) => i > heading && !NOT_A_TOKEN.test(l) && CREDENTIAL_SHAPE.test(l));
-    if (at === -1) return null;
-    headToken = lines[at];
-  }
-  let token = headToken;
-  for (let i = at + 1; i < lines.length; i += 1) {
-    const next = lines[i].trim();
-    // A continuation must look like a wrapped fragment, not like prose. "Done."
-    // is made entirely of token characters — the dot is in the alphabet — so
-    // "all token characters" alone appended it and corrupted the credential.
-    // A wrap fragment is long; a stray word is not.
-    if (!next || next.length < 20 || NOT_A_TOKEN.test(next) || !/^[A-Za-z0-9._-]+$/.test(next)) break;
-    token += next;
-    if (token.length > 200) break; // no minted token is this long
-  }
-  if (!looksLikeToken(token)) return null;
-
-  const years = /valid for\D{0,20}(\d+)\s*year/i.exec(plain);
-  const days = /valid for\D{0,20}(\d+)\s*day/i.exec(plain);
-  const ms = years ? Number(years[1]) * 365 * 864e5 : days ? Number(days[1]) * 864e5 : 365 * 864e5;
-  return { token, expiresAt: Date.now() + ms };
-}
-
-/**
- * Prove a minted token actually authenticates, before it is allowed to become
- * the credential every call depends on.
- *
- * Reconstructing a value from a repainting terminal is guesswork, and a
- * truncated token is indistinguishable from a good one by inspection: it has
- * the right prefix, the right alphabet, no stray characters. The only
- * authority is the API. One minimal call settles it, and it costs a fraction of
- * one session — against silently breaking every Builder and Director call,
- * which is exactly what an unchecked token did.
+ * A truncated or stale token is indistinguishable from a good one by
+ * inspection: it has the right prefix, the right alphabet, no stray
+ * characters. The only authority is the API. One minimal call settles it, and
+ * it costs a fraction of one session — against silently breaking every Builder
+ * and Director call, which is exactly what an unchecked token did.
  */
 export function verifyToken(token: string, model: string): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
@@ -606,19 +499,3 @@ export function verifyToken(token: string, model: string): Promise<{ ok: boolean
   });
 }
 
-/**
- * Capture a minted token and keep it ONLY if it works. Nothing is stored on a
- * failed check, so a misread token cannot take the product down with it.
- */
-export async function captureMintedToken(provider: AuthProvider, raw: string, model: string): Promise<'stored' | 'rejected' | 'none'> {
-  if (provider !== 'claude') return 'none';
-  const found = extractMintedToken(raw);
-  if (!found) return 'none';
-  const check = await verifyToken(found.token, model);
-  if (!check.ok) {
-    console.log(`[tandem] provider-auth: minted token FAILED its check (${found.token.length} chars) — not stored. ${check.error ?? ''}`);
-    return 'rejected';
-  }
-  saveToken(provider, found.token, found.expiresAt);
-  return 'stored';
-}

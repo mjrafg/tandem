@@ -181,7 +181,11 @@ export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): L
   const session: Session = {
     provider, kind, phase: 'running', url: null, output: '', startedAt: Date.now(),
     child, raw: '', dismissed: false,
-    timer: setTimeout(() => finish(provider, 'failed', 'The sign-in did not finish within 10 minutes.'), LOGIN_TIMEOUT_MS),
+    timer: setTimeout(() => {
+      // a mint that printed its token has already stored it; do not call that a failure
+      if (kind === 'mint' && tokenMeta(provider)) { finish(provider, 'done'); return; }
+      finish(provider, 'failed', 'The sign-in did not finish within 10 minutes.');
+    }, LOGIN_TIMEOUT_MS),
   };
   sessions.set(provider, session);
 
@@ -202,6 +206,17 @@ export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): L
       session.notice = said[1].replace(/\s+/g, ' ').trim();
       session.phase = 'awaiting_code';
     }
+    // Store the minted token THE MOMENT it appears, not when the process exits.
+    // Waiting for exit assumes the CLI leaves promptly after printing, and it
+    // does not have to: if it lingers, the ten-minute timeout marks the flow
+    // failed and the close handler then declines to store anything, losing a
+    // credential that was sitting in the stream the whole time.
+    if (session.kind === 'mint' && session.phase !== 'done' && captureMintedToken(provider, session.raw)) {
+      session.phase = 'done';
+      session.notice = undefined;
+      try { session.child.kill('SIGTERM'); } catch { /* already leaving */ }
+    }
+
     // "Press Enter to retry" is not a prompt to resend the same code — pressing
     // Enter restarts the whole authorization and prints a NEW url. Press it once
     // so the fresh link appears, then let the operator sign in again.
@@ -218,7 +233,10 @@ export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): L
     // the token appearing in the stream IS the success condition. Capture it
     // from the raw text, because the copy the browser sees is redacted.
     if (kind === 'mint') {
-      const stored = captureMintedToken(provider, sessions.get(provider)?.raw ?? '');
+      // usually already stored from the stream above; this is the backstop for
+      // a CLI that prints and exits in the same breath
+      const stored = tokenMeta(provider) !== null
+        || captureMintedToken(provider, sessions.get(provider)?.raw ?? '');
       finish(provider, stored ? 'done' : 'failed', stored ? undefined
         : 'The CLI finished without printing a token, so nothing was saved.');
       return;

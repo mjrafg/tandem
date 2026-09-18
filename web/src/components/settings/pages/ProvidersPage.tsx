@@ -26,6 +26,7 @@ export function ProvidersPage() {
   const [tokens, setTokens] = useState<StoredTokenMeta[]>([]);
   const [busy, setBusy] = useState<AuthProvider | null>(null);
   const [codes, setCodes] = useState<Partial<Record<AuthProvider, string>>>({});
+  const [submitted, setSubmitted] = useState<Partial<Record<AuthProvider, string>>>({});
   const [loaded, setLoaded] = useState(false);
   const polling = useRef<number | null>(null);
 
@@ -70,6 +71,7 @@ export function ProvidersPage() {
       const st = await api.submitProviderCode(p, code);
       setLogins((prev) => ({ ...prev, [p]: st }));
       setCodes((prev) => ({ ...prev, [p]: '' }));
+      setSubmitted((prev) => ({ ...prev, [p]: new Date().toLocaleTimeString() }));
     } catch (err) {
       toast(err instanceof ApiError ? err.message : 'The CLI would not take that code.');
     } finally { setBusy(null); }
@@ -219,6 +221,9 @@ export function ProvidersPage() {
                   <div className="rounded-lg border border-warn/30 bg-warn/[0.07] px-3 py-2 text-[13px] text-warn">
                     {login.notice}
                   </div>
+                )}
+                {submitted[p] && !login.notice && login.phase !== 'done' && (
+                  <div className="text-[12.5px] text-dim">Code sent to the CLI at {submitted[p]}.</div>
                 )}
                 {login.phase === 'running' && login.url && !login.notice && (
                   <div className="flex items-center gap-2 text-[13px] text-dim">

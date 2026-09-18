@@ -216,7 +216,10 @@ export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): L
         session.phase = 'done';
         session.notice = undefined;
         try { session.child.kill('SIGTERM'); } catch { /* already leaving */ }
+        console.log(`[tandem] provider-auth: ${provider} mint captured a token`);
       } else if (/token created successfully/i.test(session.output)) {
+        console.log(`[tandem] provider-auth: ${provider} mint reported success but no token could be read. `
+          + `Redacted tail follows:\n${session.output.slice(-1500)}`);
         // The CLI says it worked and Tandem cannot read the token. Silence here
         // is the worst outcome: the flow sits at "running" forever while the
         // credential scrolls past. Say so, and leave the output on screen.
@@ -298,6 +301,19 @@ export function submitCode(provider: AuthProvider, code: string): { ok: boolean;
     s.child.stdin.write(`${trimmed}\r`);
     s.notice = undefined;
     s.phase = 'running';
+    const before = s.raw.length;
+    console.log(`[tandem] provider-auth: ${provider} ${s.kind} — code of ${trimmed.length} chars written to the CLI`);
+    // The CLI answers a code within seconds. If nothing at all comes back, the
+    // write did not land where it needed to, and that is worth knowing rather
+    // than leaving the operator watching a silent page.
+    setTimeout(() => {
+      const cur = sessions.get(provider);
+      if (!cur || cur.raw.length !== before) return;
+      console.log(`[tandem] provider-auth: ${provider} produced NO output in 20s after the code. `
+        + `Redacted tail follows:\n${cur.output.slice(-1500)}`);
+      cur.notice = 'The CLI did not react to that code within 20 seconds. Open "What the CLI is showing" below '
+        + 'and send those lines on.';
+    }, 20_000).unref?.();
     return { ok: true };
   } catch (err) {
     return { ok: false, error: `Could not hand the code to the CLI: ${String(err)}` };

@@ -181,6 +181,16 @@ export function ProvidersPage() {
                   </form>
                 )}
 
+                {login.notice && (
+                  <div className="rounded-lg border border-warn/30 bg-warn/[0.07] px-3 py-2 text-[13px] text-warn">
+                    {login.notice}
+                  </div>
+                )}
+                {login.phase === 'running' && login.url && !login.notice && (
+                  <div className="flex items-center gap-2 text-[13px] text-dim">
+                    <Loader2 size={14} className="animate-spin" /> Waiting for the provider to confirm the code…
+                  </div>
+                )}
                 {login.phase === 'running' && !login.url && (
                   <div className="flex items-center gap-2 text-[13px] text-dim">
                     <Loader2 size={14} className="animate-spin" /> Starting the sign-in…

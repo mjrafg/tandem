@@ -769,6 +769,8 @@ export interface LoginState {
   phase: 'running' | 'awaiting_code' | 'done' | 'failed' | 'idle';
   url: string | null;
   output: string;
+  /** the CLI's own most recent message to the operator, e.g. a rejected code */
+  notice?: string;
   startedAt: number;
   error?: string;
 }

@@ -40,6 +40,8 @@ export interface LoginState {
   url: string | null;
   /** scrubbed tail of the CLI's output, for the operator to see what it is doing */
   output: string;
+  /** the CLI's own most recent message to the operator, e.g. a rejected code */
+  notice?: string;
   startedAt: number;
   error?: string;
 }
@@ -48,6 +50,8 @@ interface Session extends LoginState {
   child: ChildProcess;
   raw: string;
   timer: NodeJS.Timeout;
+  /** we have already pressed Enter for the rejection currently on screen */
+  dismissed: boolean;
 }
 
 /** a login that has not finished in this long is abandoned */
@@ -146,8 +150,8 @@ function ptyArgs(provider: AuthProvider): string[] {
 export function getLogin(provider: AuthProvider): LoginState | null {
   const s = sessions.get(provider);
   if (!s) return null;
-  const { provider: p, phase, url, output, startedAt, error } = s;
-  return { provider: p, phase, url, output, startedAt, error };
+  const { provider: p, phase, url, output, notice, startedAt, error } = s;
+  return { provider: p, phase, url, output, notice, startedAt, error };
 }
 
 export function startLogin(provider: AuthProvider): LoginState {
@@ -160,7 +164,7 @@ export function startLogin(provider: AuthProvider): LoginState {
 
   const session: Session = {
     provider, phase: 'running', url: null, output: '', startedAt: Date.now(),
-    child, raw: '',
+    child, raw: '', dismissed: false,
     timer: setTimeout(() => finish(provider, 'failed', 'The sign-in did not finish within 10 minutes.'), LOGIN_TIMEOUT_MS),
   };
   sessions.set(provider, session);
@@ -168,8 +172,27 @@ export function startLogin(provider: AuthProvider): LoginState {
   const absorb = (chunk: Buffer | string) => {
     session.raw = (session.raw + String(chunk)).slice(-40_000);
     session.output = scrubCliOutput(session.raw).slice(-OUTPUT_TAIL);
-    if (!session.url) session.url = findUrl(session.raw);
+    // Track the CURRENT url, not just the first one: a rejected code makes the
+    // CLI start a fresh authorization with a new challenge, and the operator
+    // must be handed that new link rather than the dead one.
+    const seen = findUrl(session.raw);
+    if (seen && seen !== session.url) { session.url = seen; session.dismissed = false; }
     if (session.phase === 'running' && session.url && wantsCode(session.output)) session.phase = 'awaiting_code';
+
+    // Surface the CLI's own verdict. Without this a rejected code looks like
+    // nothing happening at all, which is exactly how it felt.
+    const said = /(OAuth error:[^\n]*|Invalid code[^\n]*|Expired[^\n]*code[^\n]*)/i.exec(session.output);
+    if (said) {
+      session.notice = said[1].replace(/\s+/g, ' ').trim();
+      session.phase = 'awaiting_code';
+    }
+    // "Press Enter to retry" is not a prompt to resend the same code — pressing
+    // Enter restarts the whole authorization and prints a NEW url. Press it once
+    // so the fresh link appears, then let the operator sign in again.
+    if (!session.dismissed && /press enter to retry/i.test(session.output.slice(-400))) {
+      session.dismissed = true;
+      try { session.child.stdin?.write('\r'); } catch { /* the child is going away */ }
+    }
   };
   child.stdout?.on('data', absorb);
   child.stderr?.on('data', absorb);
@@ -216,7 +239,13 @@ export function submitCode(provider: AuthProvider, code: string): { ok: boolean;
   if (!trimmed) return { ok: false, error: 'No code was provided.' };
   if (!s.child.stdin?.writable) return { ok: false, error: 'The sign-in process is no longer accepting input.' };
   try {
-    s.child.stdin.write(`${trimmed}\n`);
+    // The prompt is a raw-mode terminal field, so Enter is CARRIAGE RETURN.
+    // A newline is accepted into the field and never submits it: the pasted
+    // code sat there masked as asterisks while nothing happened, which is
+    // exactly the symptom this cost. Verified against the real CLI — with \r it
+    // answers immediately, including "Invalid code" for a bad one.
+    s.child.stdin.write(`${trimmed}\r`);
+    s.notice = undefined;
     s.phase = 'running';
     return { ok: true };
   } catch (err) {

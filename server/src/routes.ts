@@ -33,6 +33,7 @@ import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from
 import { expediteRunReviews } from './reviewRetrySweeper';
 import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings, resolveDirectorRole } from './settings';
+import { allStatus, cancelLogin, getLogin, startLogin, submitCode, type AuthProvider } from './providerAuth';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
 import { listTools, resetToolText, setToolText } from './toolText';
 
@@ -547,6 +548,45 @@ export function registerRoutes(app: FastifyInstance): void {
 
   // ---------------------------------------------------------------- settings
 
+  // ---------------------------------------------------------------- provider sign-in
+  // The Builder/Reviewer/Director ARE the provider CLIs, so when their own
+  // login expires Tandem stops entirely. These routes drive the CLIs' normal
+  // interactive login from the browser. The pasted code goes straight to the
+  // CLI's stdin: it is never stored, logged or evented, and the output shown
+  // back is scrubbed of anything token-shaped first.
+  app.get('/api/provider-auth', async () => ({
+    providers: await allStatus(),
+    logins: [getLogin('claude'), getLogin('codex')].filter(Boolean),
+  }));
+
+  app.post('/api/provider-auth/:provider/start', async (req, reply) => {
+    const provider = authProvider(req, reply);
+    if (!provider) return;
+    return startLogin(provider);
+  });
+
+  app.get('/api/provider-auth/:provider/poll', async (req, reply) => {
+    const provider = authProvider(req, reply);
+    if (!provider) return;
+    return getLogin(provider) ?? { provider, phase: 'idle' };
+  });
+
+  app.post('/api/provider-auth/:provider/code', async (req, reply) => {
+    const provider = authProvider(req, reply);
+    if (!provider) return;
+    const code = String((req.body as any)?.code ?? '');
+    const out = submitCode(provider, code);
+    if (!out.ok) return reply.code(400).send({ error: out.error });
+    return getLogin(provider);
+  });
+
+  app.post('/api/provider-auth/:provider/cancel', async (req, reply) => {
+    const provider = authProvider(req, reply);
+    if (!provider) return;
+    cancelLogin(provider);
+    return { ok: true };
+  });
+
   app.get('/api/settings', async () => getSettings());
 
   app.put('/api/settings', async (req) => putSettings((req.body ?? {}) as Partial<AppSettings>));
@@ -649,4 +689,14 @@ export function registerRoutes(app: FastifyInstance): void {
     reply.header('Content-Disposition', `attachment; filename="tandem-${slug}.md"`);
     return reply.type('text/markdown; charset=utf-8').send(toMarkdown(bundle));
   });
+}
+
+/** the :provider path parameter, or a 400 — only two CLIs can be signed in */
+function authProvider(req: any, reply: any): AuthProvider | null {
+  const p = String(req.params?.provider ?? '');
+  if (p !== 'claude' && p !== 'codex') {
+    reply.code(400).send({ error: `Unknown provider: ${p}` });
+    return null;
+  }
+  return p;
 }

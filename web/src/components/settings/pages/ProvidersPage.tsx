@@ -1,0 +1,209 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CheckCircle2, XCircle, ExternalLink, Copy, Loader2, LogIn, X } from 'lucide-react';
+import type { AuthProvider, LoginState, ProviderStatus } from '@shared/types';
+import { api, ApiError } from '../../../api';
+import { useStore } from '../../../store';
+
+/**
+ * Signing the provider CLIs in, without an SSH session.
+ *
+ * The Builder, Reviewer and Director ARE the `claude` and `codex` CLIs, and
+ * they use their own logins. When one expires the product stops — so this page
+ * drives each CLI's ordinary interactive login from here: it shows the URL the
+ * CLI printed, the operator signs in on the provider's own site, and pastes the
+ * short code back. Tandem never sees a password and never keeps the code.
+ */
+
+const LABEL: Record<AuthProvider, { name: string; role: string }> = {
+  claude: { name: 'Claude Code', role: 'Builder and Project Director' },
+  codex: { name: 'Codex', role: 'Reviewer' },
+};
+
+export function ProvidersPage() {
+  const toast = useStore((s) => s.toast);
+  const [status, setStatus] = useState<ProviderStatus[]>([]);
+  const [logins, setLogins] = useState<Partial<Record<AuthProvider, LoginState>>>({});
+  const [busy, setBusy] = useState<AuthProvider | null>(null);
+  const [codes, setCodes] = useState<Partial<Record<AuthProvider, string>>>({});
+  const [loaded, setLoaded] = useState(false);
+  const polling = useRef<number | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await api.providerAuth();
+      setStatus(r.providers);
+      setLogins(Object.fromEntries(r.logins.map((l) => [l.provider, l])));
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : 'Could not read the sign-in status.');
+    } finally {
+      setLoaded(true);
+    }
+  }, [toast]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  // poll only while a sign-in is actually in flight
+  const active = Object.values(logins).some((l) => l && (l.phase === 'running' || l.phase === 'awaiting_code'));
+  useEffect(() => {
+    if (!active) { if (polling.current) { window.clearInterval(polling.current); polling.current = null; } return; }
+    polling.current = window.setInterval(() => { void refresh(); }, 2000);
+    return () => { if (polling.current) window.clearInterval(polling.current); polling.current = null; };
+  }, [active, refresh]);
+
+  const start = async (p: AuthProvider) => {
+    setBusy(p);
+    try {
+      const st = await api.startProviderLogin(p);
+      setLogins((prev) => ({ ...prev, [p]: st }));
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : 'Could not start the sign-in.');
+    } finally { setBusy(null); }
+  };
+
+  const sendCode = async (p: AuthProvider) => {
+    const code = (codes[p] ?? '').trim();
+    if (!code) return;
+    setBusy(p);
+    try {
+      const st = await api.submitProviderCode(p, code);
+      setLogins((prev) => ({ ...prev, [p]: st }));
+      setCodes((prev) => ({ ...prev, [p]: '' }));
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : 'The CLI would not take that code.');
+    } finally { setBusy(null); }
+  };
+
+  const cancel = async (p: AuthProvider) => {
+    try { await api.cancelProviderLogin(p); } catch { /* it is going away either way */ }
+    setLogins((prev) => { const next = { ...prev }; delete next[p]; return next; });
+    void refresh();
+  };
+
+  return (
+    <div className="space-y-5">
+      <header className="space-y-1.5">
+        <h1 className="text-[19px] font-medium">Provider sign-in</h1>
+        <p className="max-w-[70ch] text-[13.5px] leading-relaxed text-dim">
+          Tandem does not hold these credentials — the Claude and Codex command-line tools keep their own,
+          and every Builder, Reviewer and Director call uses them. When one expires, work stops until it is
+          renewed. Sign in here instead of opening a terminal on the server. You authenticate on the
+          provider&rsquo;s own site; Tandem only passes the code along and never stores it.
+        </p>
+      </header>
+
+      {!loaded && <div className="text-[13px] text-dim">Checking…</div>}
+
+      {loaded && (['claude', 'codex'] as AuthProvider[]).map((p) => {
+        const st = status.find((s) => s.provider === p);
+        const login = logins[p];
+        const inFlight = login && (login.phase === 'running' || login.phase === 'awaiting_code');
+        return (
+          <section key={p} className="rounded-xl border border-line bg-[#141414] p-4">
+            <div className="flex flex-wrap items-center gap-3">
+              {st?.loggedIn
+                ? <CheckCircle2 size={17} className="shrink-0 text-ok" aria-hidden />
+                : <XCircle size={17} className="shrink-0 text-err" aria-hidden />}
+              <div className="min-w-0 flex-1">
+                <div className="text-[14.5px] font-medium">{LABEL[p].name}</div>
+                <div className="text-[12.5px] text-dim">
+                  {LABEL[p].role} · {st ? st.detail : 'status unknown'}
+                </div>
+              </div>
+              {!inFlight && (
+                <button
+                  onClick={() => void start(p)}
+                  disabled={busy === p}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-[#1b1b1b] px-3 py-1.5 text-[13px] hover:bg-[#222] disabled:opacity-50"
+                >
+                  {busy === p ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />}
+                  {st?.loggedIn ? 'Sign in again' : 'Sign in'}
+                </button>
+              )}
+              {inFlight && (
+                <button
+                  onClick={() => void cancel(p)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-[13px] text-dim hover:bg-[#222]"
+                >
+                  <X size={14} /> Cancel
+                </button>
+              )}
+            </div>
+
+            {st?.loggedIn && !inFlight && p === 'codex' && (
+              <p className="mt-2.5 text-[12.5px] text-dim">
+                Signing in again replaces the session this CLI is using right now.
+              </p>
+            )}
+
+            {login && (
+              <div className="mt-4 space-y-3 border-t border-line pt-3.5">
+                {login.url && (
+                  <div className="space-y-1.5">
+                    <div className="text-[12.5px] text-dim">
+                      Open this link, sign in to your own account, then paste the code it gives you.
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <a
+                        href={login.url} target="_blank" rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-acc/15 px-3 py-1.5 text-[13px] text-acc hover:bg-acc/25"
+                      >
+                        <ExternalLink size={14} /> Open the sign-in page
+                      </a>
+                      <button
+                        onClick={() => { void navigator.clipboard?.writeText(login.url ?? ''); toast('Link copied.'); }}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[12.5px] text-dim hover:bg-[#222]"
+                      >
+                        <Copy size={13} /> Copy link
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {(login.phase === 'awaiting_code' || (login.phase === 'running' && login.url)) && (
+                  <form
+                    onSubmit={(e) => { e.preventDefault(); void sendCode(p); }}
+                    className="flex flex-wrap items-center gap-2"
+                  >
+                    <input
+                      value={codes[p] ?? ''}
+                      onChange={(e) => setCodes((prev) => ({ ...prev, [p]: e.target.value }))}
+                      placeholder="Paste the code from the sign-in page"
+                      autoComplete="off" spellCheck={false} dir="ltr"
+                      className="min-w-[16rem] flex-1 rounded-lg border border-line bg-[#111] px-3 py-1.5 font-mono text-[12.5px] outline-none focus:border-acc/60"
+                    />
+                    <button
+                      type="submit"
+                      disabled={busy === p || !(codes[p] ?? '').trim()}
+                      className="rounded-lg bg-acc/15 px-3 py-1.5 text-[13px] text-acc hover:bg-acc/25 disabled:opacity-40"
+                    >
+                      Submit code
+                    </button>
+                  </form>
+                )}
+
+                {login.phase === 'running' && !login.url && (
+                  <div className="flex items-center gap-2 text-[13px] text-dim">
+                    <Loader2 size={14} className="animate-spin" /> Starting the sign-in…
+                  </div>
+                )}
+                {login.phase === 'done' && <div className="text-[13px] text-ok">Signed in. New runs will use this session.</div>}
+                {login.phase === 'failed' && (
+                  <div className="text-[13px] text-err">{login.error ?? 'The sign-in did not complete.'}</div>
+                )}
+
+                {login.output && (
+                  <details className="text-[12.5px]">
+                    <summary className="cursor-pointer text-dim">What the CLI is showing</summary>
+                    <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#0e0e0e] p-2.5 font-mono text-[11.5px] leading-relaxed text-dim">
+                      {login.output}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}

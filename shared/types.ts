@@ -751,6 +751,28 @@ export interface SessionsPayload {
  * Shared knowledge belonging to a PROJECT (the existing projects row), not to a
  * chat: every chat of that project reads and writes the same set.
  */
+/** The two provider CLIs Tandem signs in on the operator's behalf. */
+export type AuthProvider = 'claude' | 'codex';
+
+export interface ProviderStatus {
+  provider: AuthProvider;
+  loggedIn: boolean;
+  detail: string;
+}
+
+/**
+ * A sign-in in progress. `output` is the CLI's own text, already scrubbed of
+ * anything token-shaped; the code the operator pastes never appears here.
+ */
+export interface LoginState {
+  provider: AuthProvider;
+  phase: 'running' | 'awaiting_code' | 'done' | 'failed' | 'idle';
+  url: string | null;
+  output: string;
+  startedAt: number;
+  error?: string;
+}
+
 export interface ProjectMemory {
   id: string;
   projectId: string;

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AiUsage, ChangedFile, ChatEvent, Effort } from '../../../shared/types';
 import { config, internalBase, shotsDir } from '../config';
+import { tokenForEnv } from '../providerAuth';
 import {
   addEvent, appendAssistantText, beginAssistantMessage, finishAssistantMessage, updateEvent,
   maxSeq,
@@ -359,6 +360,11 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     env: {
       ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: '',
+      // The operator may have minted a one-year token in Admin so the CLI's own
+      // four-week subscription session cannot strand the product. When one is
+      // stored it authenticates this call; with none, the CLI falls back to its
+      // own sign-in exactly as before.
+      ...(tokenForEnv('claude') ? { CLAUDE_CODE_OAUTH_TOKEN: tokenForEnv('claude') as string } : {}),
       ...(EFFORT_THINKING[opts.effort] ? { MAX_THINKING_TOKENS: EFFORT_THINKING[opts.effort] } : {}),
       // Tandem's own compaction runs BETWEEN runs (the CLI owns the session
       // during one). Inside a run only the CLI can compact, and by default it

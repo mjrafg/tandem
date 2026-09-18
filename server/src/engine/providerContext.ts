@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { classifyProviderOutage } from './reviewWait';
 import type { Chat, CompactionPayload, CompactOutcome, Provider } from '../../../shared/types';
 import { config } from '../config';
+import { tokenForEnv } from '../providerAuth';
 import { computeUsage } from '../context';
 import { getBuilderSession, getBuilderSessionProvider, getProject } from '../db';
 import { builderExecFor } from '../agents/exec';
@@ -232,7 +233,14 @@ function claudeSlash(ref: SessionRef, command: '/context' | '/compact', timeoutM
       cwd: ref.cwd,
       timeout: timeoutMs,
       maxBuffer: 8 * 1024 * 1024,
-      env: { ...process.env, ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '' },
+      // the same stored token authenticates /context and /compact, which are
+      // ordinary CLI invocations against the same session
+      env: {
+        ...process.env,
+        ANTHROPIC_API_KEY: '',
+        ANTHROPIC_AUTH_TOKEN: '',
+        ...(tokenForEnv('claude') ? { CLAUDE_CODE_OAUTH_TOKEN: tokenForEnv('claude') as string } : {}),
+      },
     }, (err, stdout, stderr) => {
       if (err && !stdout) {
         const detail = (err as any).killed ? `timed out after ${Math.round(timeoutMs / 1000)}s` : String(stderr || err.message).slice(0, 500);

@@ -28,11 +28,17 @@
  */
 import { spawn, type ChildProcess, execFile } from 'node:child_process';
 import { config } from './config';
+import { db } from './db';
+import { decryptSecret, encryptSecret } from './integrations/store';
 
 export type AuthProvider = 'claude' | 'codex';
 
+/** `login` signs the CLI in for ~4 weeks; `mint` produces the one-year token */
+export type LoginKind = 'login' | 'mint';
+
 export interface LoginState {
   provider: AuthProvider;
+  kind: LoginKind;
   /** running = working; awaiting_code = the operator must paste a code; done/failed = terminal */
   phase: 'running' | 'awaiting_code' | 'done' | 'failed';
   /** the URL to open, once the CLI has printed one */
@@ -139,10 +145,9 @@ function wantsCode(text: string): boolean {
  * that protects the browser from a printed credential destroyed the only thing
  * it produced. `auth login` persists the session the Builder and Director use.
  */
-function loginCommand(provider: AuthProvider): string {
-  return provider === 'claude'
-    ? `${config.claudeBin} auth login --claudeai`
-    : `${config.codexBin} login --device-auth`;
+function loginCommand(provider: AuthProvider, kind: LoginKind): string {
+  if (provider !== 'claude') return `${config.codexBin} login --device-auth`;
+  return kind === 'mint' ? `${config.claudeBin} setup-token` : `${config.claudeBin} auth login --claudeai`;
 }
 
 /**
@@ -151,8 +156,8 @@ function loginCommand(provider: AuthProvider): string {
  * getting the macOS form right is what makes this testable on a developer
  * machine instead of only after a deploy.
  */
-function ptyArgs(provider: AuthProvider): string[] {
-  const cmd = loginCommand(provider);
+function ptyArgs(provider: AuthProvider, kind: LoginKind): string[] {
+  const cmd = loginCommand(provider, kind);
   return process.platform === 'linux'
     ? ['-qec', cmd, '/dev/null']
     : ['-q', '/dev/null', 'sh', '-c', cmd];
@@ -161,20 +166,20 @@ function ptyArgs(provider: AuthProvider): string[] {
 export function getLogin(provider: AuthProvider): LoginState | null {
   const s = sessions.get(provider);
   if (!s) return null;
-  const { provider: p, phase, url, output, notice, startedAt, error } = s;
-  return { provider: p, phase, url, output, notice, startedAt, error };
+  const { provider: p, kind, phase, url, output, notice, startedAt, error } = s;
+  return { provider: p, kind, phase, url, output, notice, startedAt, error };
 }
 
-export function startLogin(provider: AuthProvider): LoginState {
+export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): LoginState {
   cancelLogin(provider);
-  const child = spawn('script', ptyArgs(provider), {
+  const child = spawn('script', ptyArgs(provider, kind), {
     cwd: config.dataDir,
     env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
   const session: Session = {
-    provider, phase: 'running', url: null, output: '', startedAt: Date.now(),
+    provider, kind, phase: 'running', url: null, output: '', startedAt: Date.now(),
     child, raw: '', dismissed: false,
     timer: setTimeout(() => finish(provider, 'failed', 'The sign-in did not finish within 10 minutes.'), LOGIN_TIMEOUT_MS),
   };
@@ -209,6 +214,15 @@ export function startLogin(provider: AuthProvider): LoginState {
   child.stderr?.on('data', absorb);
   child.on('error', (err) => finish(provider, 'failed', `The sign-in helper could not start: ${String(err)}`));
   child.on('close', (code) => {
+    // A mint does not sign the CLI in, so auth status says nothing about it:
+    // the token appearing in the stream IS the success condition. Capture it
+    // from the raw text, because the copy the browser sees is redacted.
+    if (kind === 'mint') {
+      const stored = captureMintedToken(provider, sessions.get(provider)?.raw ?? '');
+      finish(provider, stored ? 'done' : 'failed', stored ? undefined
+        : 'The CLI finished without printing a token, so nothing was saved.');
+      return;
+    }
     // the CLI is the authority on whether the login took: ask it separately
     // rather than guessing from an exit code produced under a PTY wrapper
     void checkStatus(provider).then((st) => {
@@ -307,4 +321,130 @@ export function checkStatus(provider: AuthProvider): Promise<ProviderStatus> {
 
 export async function allStatus(): Promise<ProviderStatus[]> {
   return Promise.all([checkStatus('claude'), checkStatus('codex')]);
+}
+
+// ------------------------------------------------------- long-lived token
+
+/**
+ * The one-year token, and why this is the only credential Tandem ever holds.
+ *
+ * A subscription sign-in refreshes itself for about four weeks and then stops
+ * dead — which is how every Director turn came to fail with "OAuth session
+ * expired and could not be refreshed". `claude auth login` fixes that in a
+ * minute from the browser, but it has to be done again every month.
+ *
+ * `claude setup-token` mints a token valid for a year instead. It does NOT sign
+ * the CLI in — it prints a credential for the caller to supply as
+ * CLAUDE_CODE_OAUTH_TOKEN — so using it means Tandem stores that credential and
+ * hands it to each invocation. That is a deliberate trade: a year-long key in
+ * Tandem's custody against a monthly interruption.
+ *
+ * It is encrypted at rest with the same AES-256-GCM key the integration
+ * credentials use, is never returned by any route, never rendered, never logged
+ * and never evented. The UI only ever learns that one exists and when it
+ * expires.
+ */
+db.exec(`CREATE TABLE IF NOT EXISTS provider_tokens (
+  provider TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL
+)`);
+
+export interface StoredTokenMeta {
+  provider: AuthProvider;
+  createdAt: number;
+  expiresAt: number | null;
+}
+
+/** what a minted Claude token looks like; used to find it and to sanity-check it */
+const TOKEN_SHAPE = /sk-ant-[A-Za-z0-9._-]{20,}/;
+
+/** Metadata only — the token itself is never exposed outside this module. */
+export function tokenMeta(provider: AuthProvider): StoredTokenMeta | null {
+  const r = db.prepare('SELECT provider, expires_at, created_at FROM provider_tokens WHERE provider = ?').get(provider) as
+    { provider: AuthProvider; expires_at: number | null; created_at: number } | undefined;
+  return r ? { provider: r.provider, createdAt: r.created_at, expiresAt: r.expires_at } : null;
+}
+
+/** The token for a CLI invocation's environment. The one place it is read. */
+export function tokenForEnv(provider: AuthProvider): string | null {
+  const r = db.prepare('SELECT data FROM provider_tokens WHERE provider = ?').get(provider) as { data: string } | undefined;
+  if (!r) return null;
+  try {
+    const value = decryptSecret(r.data).token;
+    return value && TOKEN_SHAPE.test(value) ? value : null;
+  } catch {
+    return null; // an unreadable blob must never become a broken environment
+  }
+}
+
+export function forgetToken(provider: AuthProvider): void {
+  db.prepare('DELETE FROM provider_tokens WHERE provider = ?').run(provider);
+}
+
+function saveToken(provider: AuthProvider, token: string, expiresAt: number | null): void {
+  db.prepare(`INSERT INTO provider_tokens (provider, data, expires_at, created_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(provider) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at, created_at = excluded.created_at`)
+    .run(provider, encryptSecret({ token }), expiresAt, Date.now());
+}
+
+/** terminal noise removed, but nothing redacted — for finding the token only */
+function scrubForTokenSearch(text: string): string {
+  return text
+    .replace(new RegExp(`${ESC}\\][^\\u0007${ESC}]*(?:\\u0007|${ESC}\\\\)`, 'g'), '')
+    .replace(new RegExp(`${ESC}\\[[0-9]+G`, 'g'), ' ')
+    .replace(new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, 'g'), '')
+    .replace(new RegExp(`${ESC}[()][A-Z0-9]`, 'g'), '')
+    .replace(new RegExp(`${ESC}[=>78]`, 'g'), '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+}
+
+/**
+ * Pull the minted token out of the RAW stream.
+ *
+ * It must come from the raw text: the scrubbed copy the browser sees has
+ * already had it redacted, which is the point.
+ *
+ * The token is long enough that a terminal wraps it across lines, so the pieces
+ * have to be rejoined — but only the pieces. Flattening every newline first
+ * looks simpler and is wrong twice over: it glues the token to the word before
+ * it, and it lets a greedy match run on into the sentence after it, yielding a
+ * corrupt credential that would authenticate nothing. So continuation lines are
+ * taken only while a line is ENTIRELY token characters, which prose never is.
+ */
+export function extractMintedToken(raw: string): { token: string; expiresAt: number } | null {
+  const plain = scrubForTokenSearch(raw);
+  const lines = plain.split('\n');
+  const at = lines.findIndex((l) => /sk-ant-/.test(l));
+  if (at === -1) return null;
+
+  const head = lines[at].slice(lines[at].indexOf('sk-ant-'));
+  const headToken = /^sk-ant-[A-Za-z0-9._-]*/.exec(head)?.[0] ?? '';
+  let token = headToken;
+  for (let i = at + 1; i < lines.length; i += 1) {
+    const next = lines[i].trim();
+    // A continuation must look like a wrapped fragment, not like prose. "Done."
+    // is made entirely of token characters — the dot is in the alphabet — so
+    // "all token characters" alone appended it and corrupted the credential.
+    // A wrap fragment is long; a stray word is not.
+    if (!next || next.length < 20 || !/^[A-Za-z0-9._-]+$/.test(next)) break;
+    token += next;
+    if (token.length > 200) break; // no minted token is this long
+  }
+  if (!TOKEN_SHAPE.test(token)) return null;
+
+  const years = /valid for\D{0,20}(\d+)\s*year/i.exec(plain);
+  const days = /valid for\D{0,20}(\d+)\s*day/i.exec(plain);
+  const ms = years ? Number(years[1]) * 365 * 864e5 : days ? Number(days[1]) * 864e5 : 365 * 864e5;
+  return { token, expiresAt: Date.now() + ms };
+}
+
+/** Called when a mint flow ends: capture, shape-check, store. */
+export function captureMintedToken(provider: AuthProvider, raw: string): boolean {
+  if (provider !== 'claude') return false;
+  const found = extractMintedToken(raw);
+  if (!found) return false;
+  saveToken(provider, found.token, found.expiresAt);
+  return true;
 }

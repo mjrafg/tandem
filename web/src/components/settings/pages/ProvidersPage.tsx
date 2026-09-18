@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle2, XCircle, ExternalLink, Copy, Loader2, LogIn, X } from 'lucide-react';
-import type { AuthProvider, LoginState, ProviderStatus } from '@shared/types';
+import { CheckCircle2, XCircle, ExternalLink, Copy, Loader2, LogIn, X, KeyRound, Trash2 } from 'lucide-react';
+import type { AuthProvider, LoginState, ProviderStatus, StoredTokenMeta } from '@shared/types';
 import { api, ApiError } from '../../../api';
 import { useStore } from '../../../store';
 
@@ -23,6 +23,7 @@ export function ProvidersPage() {
   const toast = useStore((s) => s.toast);
   const [status, setStatus] = useState<ProviderStatus[]>([]);
   const [logins, setLogins] = useState<Partial<Record<AuthProvider, LoginState>>>({});
+  const [tokens, setTokens] = useState<StoredTokenMeta[]>([]);
   const [busy, setBusy] = useState<AuthProvider | null>(null);
   const [codes, setCodes] = useState<Partial<Record<AuthProvider, string>>>({});
   const [loaded, setLoaded] = useState(false);
@@ -33,6 +34,7 @@ export function ProvidersPage() {
       const r = await api.providerAuth();
       setStatus(r.providers);
       setLogins(Object.fromEntries(r.logins.map((l) => [l.provider, l])));
+      setTokens(r.tokens ?? []);
     } catch (err) {
       toast(err instanceof ApiError ? err.message : 'Could not read the sign-in status.');
     } finally {
@@ -50,10 +52,10 @@ export function ProvidersPage() {
     return () => { if (polling.current) window.clearInterval(polling.current); polling.current = null; };
   }, [active, refresh]);
 
-  const start = async (p: AuthProvider) => {
+  const start = async (p: AuthProvider, kind: 'login' | 'mint' = 'login') => {
     setBusy(p);
     try {
-      const st = await api.startProviderLogin(p);
+      const st = await api.startProviderLogin(p, kind);
       setLogins((prev) => ({ ...prev, [p]: st }));
     } catch (err) {
       toast(err instanceof ApiError ? err.message : 'Could not start the sign-in.');
@@ -129,6 +131,36 @@ export function ProvidersPage() {
               )}
             </div>
 
+            {p === 'claude' && !inFlight && (() => {
+              const tok = tokens.find((t) => t.provider === 'claude');
+              const days = tok?.expiresAt ? Math.round((tok.expiresAt - Date.now()) / 86_400_000) : null;
+              return (
+                <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-[#111] px-3 py-2.5">
+                  <KeyRound size={15} className="shrink-0 text-dim" aria-hidden />
+                  <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-dim">
+                    {tok
+                      ? <>A one-year token is stored and authenticates every call. It lapses in about {days} day{days === 1 ? '' : 's'}. Tandem keeps it encrypted and never shows it.</>
+                      : <>The sign-in above lasts about four weeks. A one-year token avoids that, at the cost of Tandem holding the credential — encrypted, never displayed.</>}
+                  </div>
+                  <button
+                    onClick={() => void start('claude', 'mint')}
+                    disabled={busy === p}
+                    className="rounded-lg border border-line px-2.5 py-1.5 text-[12.5px] hover:bg-[#222] disabled:opacity-50"
+                  >
+                    {tok ? 'Replace token' : 'Create one-year token'}
+                  </button>
+                  {tok && (
+                    <button
+                      onClick={async () => { await api.forgetProviderToken('claude'); toast('Token removed.'); void refresh(); }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[12.5px] text-dim hover:bg-[#222]"
+                    >
+                      <Trash2 size={13} /> Remove
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
+
             {st?.loggedIn && !inFlight && p === 'codex' && (
               <p className="mt-2.5 text-[12.5px] text-dim">
                 Signing in again replaces the session this CLI is using right now.
@@ -140,7 +172,9 @@ export function ProvidersPage() {
                 {login.url && (
                   <div className="space-y-1.5">
                     <div className="text-[12.5px] text-dim">
-                      Open this link, sign in to your own account, then paste the code it gives you.
+                      {login.kind === 'mint'
+                        ? 'Open this link and approve, then paste the code back. The token it produces is stored encrypted and never shown.'
+                        : 'Open this link, sign in to your own account, then paste the code it gives you.'}
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <a
@@ -196,7 +230,13 @@ export function ProvidersPage() {
                     <Loader2 size={14} className="animate-spin" /> Starting the sign-in…
                   </div>
                 )}
-                {login.phase === 'done' && <div className="text-[13px] text-ok">Signed in. New runs will use this session.</div>}
+                {login.phase === 'done' && (
+                  <div className="text-[13px] text-ok">
+                    {login.kind === 'mint'
+                      ? 'One-year token saved. Every Claude call now uses it.'
+                      : 'Signed in. New runs will use this session.'}
+                  </div>
+                )}
                 {login.phase === 'failed' && (
                   <div className="text-[13px] text-err">{login.error ?? 'The sign-in did not complete.'}</div>
                 )}

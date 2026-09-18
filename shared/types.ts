@@ -764,8 +764,17 @@ export interface ProviderStatus {
  * A sign-in in progress. `output` is the CLI's own text, already scrubbed of
  * anything token-shaped; the code the operator pastes never appears here.
  */
+export interface StoredTokenMeta {
+  provider: AuthProvider;
+  createdAt: number;
+  /** when the minted token lapses; null when the CLI did not state one */
+  expiresAt: number | null;
+}
+
 export interface LoginState {
   provider: AuthProvider;
+  /** `login` signs the CLI in; `mint` produces the long-lived token */
+  kind: 'login' | 'mint';
   phase: 'running' | 'awaiting_code' | 'done' | 'failed' | 'idle';
   url: string | null;
   output: string;

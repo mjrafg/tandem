@@ -33,7 +33,7 @@ import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from
 import { expediteRunReviews } from './reviewRetrySweeper';
 import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings, resolveDirectorRole } from './settings';
-import { allStatus, cancelLogin, getLogin, startLogin, submitCode, type AuthProvider } from './providerAuth';
+import { allStatus, cancelLogin, forgetToken, getLogin, startLogin, submitCode, tokenMeta, type AuthProvider } from './providerAuth';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
 import { listTools, resetToolText, setToolText } from './toolText';
 
@@ -557,12 +557,26 @@ export function registerRoutes(app: FastifyInstance): void {
   app.get('/api/provider-auth', async () => ({
     providers: await allStatus(),
     logins: [getLogin('claude'), getLogin('codex')].filter(Boolean),
+    // metadata only: whether a long-lived token exists and when it lapses.
+    // The token itself is never returned by any route.
+    tokens: [tokenMeta('claude'), tokenMeta('codex')].filter(Boolean),
   }));
 
   app.post('/api/provider-auth/:provider/start', async (req, reply) => {
     const provider = authProvider(req, reply);
     if (!provider) return;
-    return startLogin(provider);
+    const kind = (req.body as any)?.kind === 'mint' ? 'mint' : 'login';
+    if (kind === 'mint' && provider !== 'claude') {
+      return reply.code(400).send({ error: 'Only Claude Code can mint a long-lived token.' });
+    }
+    return startLogin(provider, kind);
+  });
+
+  app.delete('/api/provider-auth/:provider/token', async (req, reply) => {
+    const provider = authProvider(req, reply);
+    if (!provider) return;
+    forgetToken(provider);
+    return { ok: true };
   });
 
   app.get('/api/provider-auth/:provider/poll', async (req, reply) => {

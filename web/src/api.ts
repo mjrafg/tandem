@@ -2,7 +2,7 @@ import type {
   AgentProfile, ObservabilityKey,
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
   DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
-  AuthProvider, LoginState, ProviderStatus,
+  AuthProvider, LoginState, ProviderStatus, StoredTokenMeta,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -166,8 +166,10 @@ export const api = {
     j<{ key: ObservabilityKey }>(`/api/observability/keys/${id}/revoke`, { method: 'POST', body: JSON.stringify({}) }),
 
   // provider sign-in (the Builder/Reviewer/Director CLIs' own logins)
-  providerAuth: () => j<{ providers: ProviderStatus[]; logins: LoginState[] }>('/api/provider-auth'),
-  startProviderLogin: (p: AuthProvider) => j<LoginState>(`/api/provider-auth/${p}/start`, { method: 'POST', body: JSON.stringify({}) }),
+  providerAuth: () => j<{ providers: ProviderStatus[]; logins: LoginState[]; tokens: StoredTokenMeta[] }>('/api/provider-auth'),
+  startProviderLogin: (p: AuthProvider, kind: 'login' | 'mint' = 'login') =>
+    j<LoginState>(`/api/provider-auth/${p}/start`, { method: 'POST', body: JSON.stringify({ kind }) }),
+  forgetProviderToken: (p: AuthProvider) => j<{ ok: boolean }>(`/api/provider-auth/${p}/token`, { method: 'DELETE' }),
   pollProviderLogin: (p: AuthProvider) => j<LoginState>(`/api/provider-auth/${p}/poll`),
   submitProviderCode: (p: AuthProvider, code: string) =>
     j<LoginState>(`/api/provider-auth/${p}/code`, { method: 'POST', body: JSON.stringify({ code }) }),

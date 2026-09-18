@@ -217,7 +217,7 @@ export function startLogin(provider: AuthProvider, kind: LoginKind = 'login'): L
         session.notice = undefined;
         try { session.child.kill('SIGTERM'); } catch { /* already leaving */ }
         console.log(`[tandem] provider-auth: ${provider} mint captured a token`);
-      } else if (/token created successfully/i.test(session.output)) {
+      } else if (/created successfully|your oauth token/i.test(session.output)) {
         console.log(`[tandem] provider-auth: ${provider} mint reported success but no token could be read. `
           + `Redacted tail follows:\n${session.output.slice(-1500)}`);
         // The CLI says it worked and Tandem cannot read the token. Silence here
@@ -314,6 +314,16 @@ export function submitCode(provider: AuthProvider, code: string): { ok: boolean;
       cur.notice = 'The CLI did not react to that code within 20 seconds. Open "What the CLI is showing" below '
         + 'and send those lines on.';
     }, 20_000).unref?.();
+    // And record the screen either way. Diagnosing this from the outside has
+    // cost several attempts; the redacted layout is what settles it, and it
+    // carries no credential.
+    setTimeout(() => {
+      const cur = sessions.get(provider);
+      if (!cur) return;
+      console.log(`[tandem] provider-auth: ${provider} ${cur.kind} screen 25s after the code `
+        + `(phase=${cur.phase}, tokenStored=${tokenMeta(provider) !== null}). Redacted tail follows:\n`
+        + cur.output.slice(-1800));
+    }, 25_000).unref?.();
     return { ok: true };
   } catch (err) {
     return { ok: false, error: `Could not hand the code to the CLI: ${String(err)}` };
@@ -444,7 +454,13 @@ function saveToken(provider: AuthProvider, token: string, expiresAt: number | nu
 function scrubForTokenSearch(text: string): string {
   return text
     .replace(new RegExp(`${ESC}\\][^\\u0007${ESC}]*(?:\\u0007|${ESC}\\\\)`, 'g'), '')
-    .replace(new RegExp(`${ESC}\\[[0-9]+G`, 'g'), ' ')
+    // Cursor-column moves become a SPACE for display, because that is how this
+    // CLI separates words. Here they must vanish instead: the renderer also
+    // repositions WITHIN a long value, and a space injected into the middle of
+    // a token truncates the prefix match and breaks the no-spaces shape check —
+    // the token is then neither found nor recognised, which is exactly how a
+    // successful mint came back empty.
+    .replace(new RegExp(`${ESC}\\[[0-9]+G`, 'g'), '')
     .replace(new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, 'g'), '')
     .replace(new RegExp(`${ESC}[()][A-Z0-9]`, 'g'), '')
     .replace(new RegExp(`${ESC}[=>78]`, 'g'), '')

@@ -298,7 +298,19 @@ export function submitCode(provider: AuthProvider, code: string): { ok: boolean;
     // code sat there masked as asterisks while nothing happened, which is
     // exactly the symptom this cost. Verified against the real CLI — with \r it
     // answers immediately, including "Invalid code" for a bad one.
-    s.child.stdin.write(`${trimmed}\r`);
+    // Send the code and the Enter SEPARATELY.
+    //
+    // A short string written in one chunk is processed as individual
+    // keystrokes and a trailing \r submits it — which is why a 16-character
+    // dummy worked in testing. A real code is 92 characters, and a chunk that
+    // size is handled as a PASTE: the text lands in the field and the carriage
+    // return riding along with it is absorbed rather than read as Enter. The
+    // log caught it exactly — 92 asterisks sitting in the prompt, phase still
+    // awaiting_code, nothing submitted.
+    s.child.stdin.write(trimmed);
+    setTimeout(() => {
+      try { sessions.get(provider)?.child.stdin?.write('\r'); } catch { /* gone */ }
+    }, 300).unref?.();
     s.notice = undefined;
     s.phase = 'running';
     const before = s.raw.length;

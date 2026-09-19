@@ -43,7 +43,7 @@ if (process.env.TANDEM_ROLE === 'builder' || process.env.TANDEM_ROLE === 'final_
   }
   for (const cmd of (recipes[did] ?? [])) { try { require('child_process').execSync(cmd, { cwd, stdio: 'pipe', env: process.env }); } catch {} }
   emitB({ type: 'thread.started', thread_id: thread }); emitB({ type: 'turn.started' });
-  emitB({ type: 'item.completed', item: { type: 'agent_message', text: `Session work done by codex (${did}).` } });
+  emitB({ type: 'item.completed', item: { type: 'agent_message', text: `Session work done by codex (${did}).${process.env.FAKE_BUILDER_NOTE ? `\n\n${process.env.FAKE_BUILDER_NOTE}` : ''}` } });
   emitB({ type: 'turn.completed', usage: { input_tokens: 700, output_tokens: 40, reasoning_output_tokens: 0 } });
   process.exit(0);
 }

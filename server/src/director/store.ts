@@ -81,6 +81,10 @@ try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_wait_reason TEXT'); } c
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_retry_at INTEGER'); } catch { /* exists */ }
 // the Builder Agent profile the Director selected for this session (stable id)
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN agent_profile_id TEXT'); } catch { /* exists */ }
+// the authoritative final state of a completed session (JSON SessionFinalState):
+// final verdict, what the Reviewer verified, what stands open — composed from
+// the record at completion, never from the Builder's last message
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN final_state TEXT'); } catch { /* exists */ }
 // auto-resume after a restart: how many boots in a row relaunched this run, and
 // when the last one was. Only ever read to detect a restart LOOP.
 try { db.exec('ALTER TABLE project_runs ADD COLUMN auto_resume_streak INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
@@ -102,6 +106,7 @@ function rowToSession(r: any): PdSession {
     stopReason: (r.stop_reason as PdSession['stopReason']) ?? null,
     resultSummary: r.result_summary ?? null,
     reviewVerdict: (r.review_verdict as PdSession['reviewVerdict']) ?? null,
+    finalState: (() => { try { return r.final_state ? JSON.parse(r.final_state) : null; } catch { return null; } })(),
     reviewWait: r.review_wait_reason && r.review_retry_at
       ? { reason: r.review_wait_reason, retryAt: r.review_retry_at }
       : null,
@@ -303,13 +308,13 @@ export function sessionTitlePrefix(session: PdSession): string {
 
 export function patchSession(runId: string, key: string, patch: Partial<{
   chatId: string; status: PdSessionStatus; branch: string | null; cwd: string;
-  resultSummary: string; reviewVerdict: string; startedAt: number; endedAt: number; prompt: string;
+  resultSummary: string; reviewVerdict: string; finalState: string | null; startedAt: number; endedAt: number; prompt: string;
   lastBaselineSeq: number; stopReason: 'user_stop' | 'project_pause' | 'restart' | 'provider_outage' | null;
   reviewWaitReason: string | null; reviewRetryAt: number | null; agentProfileId: string | null;
 }>): void {
   const map: Record<string, string> = {
     chatId: 'chat_id', status: 'status', branch: 'branch', cwd: 'cwd',
-    resultSummary: 'result_summary', reviewVerdict: 'review_verdict',
+    resultSummary: 'result_summary', reviewVerdict: 'review_verdict', finalState: 'final_state',
     startedAt: 'started_at', endedAt: 'ended_at', prompt: 'prompt',
     lastBaselineSeq: 'last_baseline_seq', stopReason: 'stop_reason',
     reviewWaitReason: 'review_wait_reason', reviewRetryAt: 'review_retry_at',
@@ -448,6 +453,15 @@ export function planDocument(runId: string): string {
 }
 
 /** Compact, engine-generated state snapshot handed to the Director each turn. */
+/** one line the Director can act on: verdict, who gave it, what it verified, what is open */
+function finalStateLine(f: NonNullable<PdSession['finalState']>): string {
+  const who = f.reviewer === 'builder_reviewer' ? 'Builder Reviewer' : 'reviewer';
+  const verified = f.verified.length ? `; verified ${f.verified.map((v) => v.id).join(', ')}` : '';
+  const open = f.open.length ? `; OPEN ${f.open.map((o) => `${o.id}${o.blocking ? ' (blocking)' : o.blocking === false ? ' (non-blocking)' : ''}`).join(', ')}` : '';
+  const closed = f.closed.length ? `; closed by Director ${f.closed.map((c) => c.id).join(', ')}` : '';
+  return `final: ${f.verdict.toUpperCase()}${f.round ? ` (${who}, round ${f.round})` : ''}${verified}${closed}${open}`;
+}
+
 export function stateSnapshot(runId: string): string {
   const run = getRun(runId);
   if (!run) return '(project run not found)';
@@ -478,7 +492,10 @@ export function stateSnapshot(runId: string): string {
         s.status === 'awaiting_review' && s.reviewWait
           ? `implementation done, required review NOT run (${s.reviewWait.reason}); retries automatically at ${new Date(s.reviewWait.retryAt).toISOString().slice(11, 16)} UTC — not complete, dependents stay blocked`
           : '',
-        s.resultSummary ? `result: ${s.resultSummary.slice(0, 120)}` : '',
+        // the authoritative final state leads; the Builder's hand-off follows,
+        // labelled as what it is — written before the final review
+        s.finalState ? finalStateLine(s.finalState) : '',
+        s.finalState?.builderHandoff ? `builder hand-off (historical, pre-review): ${s.finalState.builderHandoff.slice(0, 100)}` : s.resultSummary ? `result: ${s.resultSummary.slice(0, 120)}` : '',
         // the task's durable review budget, so the Director never expects a
         // round that the policy will not grant
         (() => { const l = s.chatId ? getLedger(s.chatId) : null;

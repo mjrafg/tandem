@@ -290,15 +290,24 @@ function PromptBlock({ title, text }: { title: string; text: string }) {
 
 // ---------------------------------------------------------------- findings
 
+const reviewerLabel = (r: FindingsPayload['reviewer']) => (r === 'director_reviewer' ? 'Director Reviewer' : r === 'builder_reviewer' ? 'Builder Reviewer' : 'Reviewer');
+
 export function FindingsRow({ ev }: { ev: ChatEvent }) {
   const p = ev.payload as FindingsPayload;
   if (p.verdict === 'pass') {
     return (
-      <div className="fade-up flex items-center gap-2 rounded-lg px-2 py-[5px]">
-        <span className="w-[13px]" />
-        <CircleCheck size={14} className="text-ok" />
-        <span className="text-[13px] text-ok">Reviewer verdict · PASS</span>
-        <span className="text-[11.5px] text-dim">round {p.round}</span>
+      <div className="fade-up rounded-lg px-2 py-[5px]">
+        <div className="flex items-center gap-2">
+          <span className="w-[13px]" />
+          <CircleCheck size={14} className="text-ok" />
+          <span className="text-[13px] text-ok">{reviewerLabel(p.reviewer)} verdict · PASS</span>
+          <span className="text-[11.5px] text-dim">round {p.round}</span>
+        </div>
+        {(p.verifiedEvidence?.length ?? 0) > 0 && (
+          <div className="ml-[37px] mt-0.5 space-y-0.5 text-[12.5px] text-mut">
+            {p.verifiedEvidence!.map((v) => <div key={v.id}><span className="mono text-dim">{v.id}</span> verified — {v.evidence}</div>)}
+          </div>
+        )}
       </div>
     );
   }
@@ -306,7 +315,7 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
     <div className="fade-up ml-[21px] my-1.5 overflow-hidden rounded-xl border border-warn/25 bg-[#191510]">
       <div className="flex items-center gap-2 border-b border-warn/15 px-3.5 py-2">
         <AlertTriangle size={14} className="text-warn" />
-        <span className="text-[13px] font-medium text-warn">Builder Reviewer findings · round {p.round}</span>
+        <span className="text-[13px] font-medium text-warn">{reviewerLabel(p.reviewer)} findings · round {p.round}</span>
         <span className="text-[11.5px] text-dim">{p.round === 1 ? 'advisory — the Builder answers each one' : 'new findings and failed repairs only'}</span>
         {(p.repairSkippedAtCap || p.finalRepairNotReviewed) && (
           <span className="ml-auto rounded-full border border-line px-2 py-[1px] text-[10.5px] text-dim">

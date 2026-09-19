@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS review_findings (
 );
 CREATE INDEX IF NOT EXISTS idx_review_findings_task ON review_findings(chat_id, task_seq);
 `);
+// additive: what the Reviewer ran or saw that showed a repair holds
+try { db.exec('ALTER TABLE review_findings ADD COLUMN resolution_evidence TEXT'); } catch { /* exists */ }
 
 function rowTo(r: any): ReviewFindingRecord {
   return {
@@ -52,6 +54,7 @@ function rowTo(r: any): ReviewFindingRecord {
     dispositionReason: r.disposition_reason ?? null, dispositionEvidence: r.disposition_evidence ?? null,
     repairStatus: r.repair_status ?? null, arbitrationDecision: r.arbitration_decision ?? null,
     arbitrationReason: r.arbitration_reason ?? null, arbitrationRequired: r.arbitration_required ?? null,
+    resolutionEvidence: r.resolution_evidence ?? null,
     blocking: r.blocking == null ? null : !!r.blocking, restated: r.restated ?? 0, updatedAt: r.updated_at,
   };
 }
@@ -139,11 +142,11 @@ export function markRepairClaimed(chatId: string, ids: string[], status: 'claime
   db.transaction(() => { for (const id of ids) up.run(status, now, chatId, id); })();
 }
 
-/** the Reviewer confirmed a repair: the finding is resolved */
-export function markVerified(chatId: string, ids: string[]): void {
-  const up = db.prepare("UPDATE review_findings SET state = 'resolved', repair_status = 'verified', blocking = 0, updated_at = ? WHERE chat_id = ? AND id = ?");
+/** the Reviewer confirmed a repair: the finding is resolved, and what showed it is kept */
+export function markVerified(chatId: string, items: { id: string; evidence?: string }[]): void {
+  const up = db.prepare("UPDATE review_findings SET state = 'resolved', repair_status = 'verified', blocking = 0, resolution_evidence = COALESCE(NULLIF(?, ''), resolution_evidence), updated_at = ? WHERE chat_id = ? AND id = ?");
   const now = Date.now();
-  db.transaction(() => { for (const id of ids) up.run(now, chatId, id); })();
+  db.transaction(() => { for (const it of items) up.run(it.evidence ?? '', now, chatId, it.id); })();
 }
 
 /** objective verification showed the repair did not work: the SAME finding, reopened */

@@ -10,6 +10,9 @@ import { directorSystemText, getPrompt, renderPrompt, reviewerSystemText } from 
 import { getSettings } from '../settings';
 import { findOrCreateProject } from '../projectRoutes';
 import { executeRole, providerLabel, providerShortLabel } from '../providers/executor';
+import { listFindings } from '../engine/findings';
+import { getLedger as getReviewLedger } from '../engine/reviewLedger';
+import type { SessionFinalState } from '../../../shared/types';
 import { resolveBuilderRole, resolveDirectorReviewerRole, resolveDirectorRoleConfig } from '../providers/resolve';
 import { rememberSession, storedSessionRef } from '../providers/sessions';
 import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, repoBusyBy, stopRun } from '../engine/run';
@@ -320,7 +323,7 @@ async function reviewArtifact(runId: string, prompt: string, round: number): Pro
       return null;
     }
     const { verdict, items } = parseVerdict(result.answer);
-    addEvent(chat.id, 'findings', { verdict, round, items }, { runId: ctx.runId });
+    addEvent(chat.id, 'findings', { verdict, round, items, reviewer: 'director_reviewer' }, { runId: ctx.runId });
     const findingsText = items.map((f, i) => `${i + 1}. [${f.severity}] ${f.title}\n   ${f.detail}${f.recommendation ? `\n   Recommendation: ${f.recommendation}` : ''}`).join('\n');
     return { verdict, findingsText };
   } finally {
@@ -939,7 +942,8 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     endedAt: Date.now(),
     // a reviewer-only retry produces no assistant message — keep the summary
     // recorded when the implementation actually finished
-    ...(outcome.summary ? { resultSummary: outcome.summary.slice(0, 1_000) } : {}),
+    ...(outcome.summary ? { resultSummary: outcome.summary.slice(0, 2_500) } : {}),
+    ...(outcome.finalState ? { finalState: JSON.stringify(outcome.finalState) } : {}),
     ...(outcome.reviewVerdict ? { reviewVerdict: outcome.reviewVerdict } : {}),
     reviewWaitReason: status === 'awaiting_review' ? pending!.reason : null,
     reviewRetryAt: status === 'awaiting_review' ? pending!.retryAt : null,
@@ -1020,7 +1024,7 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
       }
     }
     const ready = readySessions(runId);
-    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict === 'pass' ? ' Reviewer verdict: PASS.' : outcome.reviewVerdict === 'resolved' ? ' Verdict: RESOLVED — the Reviewer raised findings, the Builder answered them, and you (as arbiter) closed every remaining one as non-blocking; the result carries your approval.' : outcome.reviewVerdict === 'findings' ? ' Verdict: FINDINGS — blocking findings stand OPEN (the Director judged them blocking, or they could not be decided); decide whether they need a follow-up session.' : ' NOTE: no reviewer verdict was recorded, so this result carries NO reviewer approval — treat it as unverified when deciding what depends on it.'} Result summary: ${outcome.summary.slice(0, 600) || '(no summary)'}${ready.length ? ` Sessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
+    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict === 'pass' ? ' Final verdict: PASS.' : outcome.reviewVerdict === 'resolved' ? ' Final verdict: RESOLVED — the Reviewer raised findings, the Builder answered them, and you (as arbiter) closed every remaining one as non-blocking; the result carries your approval.' : outcome.reviewVerdict === 'findings' ? ' Final verdict: FINDINGS — blocking findings stand OPEN (the Director judged them blocking, or they could not be decided); decide whether they need a follow-up session.' : ' NOTE: no reviewer verdict was recorded, so this result carries NO reviewer approval — treat it as unverified when deciding what depends on it.'}\n${outcome.summary.slice(0, 2_200) || '(no summary)'}${ready.length ? `\nSessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
   } else if (status === 'paused') {
     // a deliberate user stop is NOT a failure: no needs_attention, no forced
     // recovery review. Whether the PROJECT continues depends on the canonical
@@ -1041,7 +1045,82 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   }
 }
 
-interface Outcome { phase: string; failed: boolean; timedOut: boolean; summary: string; reviewVerdict: 'pass' | 'findings' | 'resolved' | null; errorText: string }
+interface Outcome {
+  phase: string; failed: boolean; timedOut: boolean;
+  /**
+   * The AUTHORITATIVE account of the result: final verdict, who gave it, what
+   * was verified (with evidence), what stands open — and only then the
+   * Builder's last hand-off, labelled as written before the final review.
+   * This used to be the last assistant message alone, i.e. the Builder's
+   * pre-review hand-off; a "worth re-running" note in it outranked a Reviewer
+   * PASS that had run exactly that, and the Director commissioned the check
+   * again (Mini Issue Board, S2).
+   */
+  summary: string;
+  finalState: SessionFinalState | null;
+  reviewVerdict: 'pass' | 'findings' | 'resolved' | null;
+  errorText: string;
+}
+
+/**
+ * The final state of a session's task from the durable record: the ledger's
+ * verdict, the findings registry (what was verified and what stands open) and
+ * the final Reviewer's own report. The Builder's last message is kept as the
+ * hand-off it is — historical context, never the outcome.
+ */
+export function sessionFinalState(chatId: string, rows: { kind: string; p: any }[]): SessionFinalState | null {
+  const verdictEvents = rows.filter((r) => r.kind === 'findings');
+  const last = verdictEvents[verdictEvents.length - 1]?.p;
+  const arbs = rows.filter((r) => r.kind === 'arbitration').map((r) => r.p);
+  const finalArb = arbs.filter((a) => a.final).slice(-1)[0];
+  const reviewCalls = rows.filter((r) => r.kind === 'ai_call' && (r.p.role === 'builder_reviewer' || r.p.role === 'reviewer') && r.p.status === 'done');
+  const report = String(reviewCalls[reviewCalls.length - 1]?.p.response?.text ?? '').trim();
+  const builderCalls = rows.filter((r) => r.kind === 'ai_call' && (r.p.role === 'builder' || r.p.role === 'final_repair') && r.p.status === 'done');
+  const handoff = String(builderCalls[builderCalls.length - 1]?.p.response?.text
+    ?? [...rows].reverse().find((r) => r.kind === 'assistant_message' && (r.p.text ?? '').trim())?.p.text ?? '').trim();
+  if (!last && !handoff) return null;
+
+  const ledger = getReviewLedger(chatId);
+  const registry = ledger ? listFindings(chatId, ledger.taskSeq) : [];
+  const verdict: SessionFinalState['verdict'] = !last ? 'unreviewed'
+    : ledger?.lastVerdict === 'resolved' ? 'resolved'
+      : last.verdict === 'pass' ? 'pass'
+        : finalArb ? (finalArb.items?.some((a: any) => a.blocking) ? 'findings' : 'resolved') : 'findings';
+  const verified = registry.filter((f) => f.repairStatus === 'verified').map((f) => ({ id: f.id, title: f.title, evidence: f.resolutionEvidence ?? '' }));
+  // events carry the evidence too (a registry-less legacy chat still gets it)
+  for (const v of (last?.verifiedEvidence ?? []) as { id: string; evidence: string }[]) {
+    const hit = verified.find((x) => x.id === v.id);
+    if (hit && !hit.evidence) hit.evidence = v.evidence;
+    else if (!hit) verified.push({ id: v.id, title: registry.find((f) => f.id === v.id)?.title ?? v.id, evidence: v.evidence });
+  }
+  const closed = registry.filter((f) => ['builder_upheld', 'non_blocking', 'deferred'].includes(f.state)).map((f) => ({ id: f.id, title: f.title, state: f.state }));
+  const open = registry.filter((f) => !['resolved', 'builder_upheld', 'non_blocking', 'deferred'].includes(f.state))
+    .map((f) => ({ id: f.id, title: f.title, state: f.state, blocking: f.blocking, repairStatus: f.repairStatus }));
+  return {
+    verdict,
+    round: last?.round ?? null,
+    reviewer: last ? 'builder_reviewer' : null,
+    reviewerReport: report.slice(0, 1_500),
+    verified, closed, open,
+    builderHandoff: handoff.slice(0, 1_500),
+  };
+}
+
+/** The outcome as prose, authoritative part first — what the observation, the summary and the recovery context carry. */
+export function composeOutcomeSummary(f: SessionFinalState | null, fallback: string): string {
+  if (!f) return fallback;
+  const who = f.reviewer === 'builder_reviewer' ? 'Builder Reviewer' : 'Reviewer';
+  const head = f.verdict === 'unreviewed'
+    ? 'FINAL STATE: NOT REVIEWED — no verdict was recorded; this result carries no reviewer approval.'
+    : `FINAL STATE: ${f.verdict.toUpperCase()} — ${who}, round ${f.round}.`;
+  const parts = [head];
+  if (f.verified.length) parts.push(`Verified by the ${who} (already done — do not commission again): ${f.verified.map((v) => `${v.id} "${v.title}"${v.evidence ? ` — ${v.evidence}` : ''}`).join('; ')}.`);
+  if (f.closed.length) parts.push(`Closed by the Director without a change: ${f.closed.map((c) => `${c.id} "${c.title}" (${c.state.replace(/_/g, ' ')})`).join('; ')}.`);
+  if (f.open.length) parts.push(`Still OPEN: ${f.open.map((o) => `${o.id} "${o.title}" (${o.state.replace(/_/g, ' ')}${o.repairStatus ? `, repair ${o.repairStatus}` : ''}${o.blocking ? ', BLOCKING' : o.blocking === false ? ', non-blocking' : ''})`).join('; ')}.`);
+  if (f.reviewerReport) parts.push(`${who}'s final report: ${f.reviewerReport.slice(0, 900)}`);
+  if (f.builderHandoff) parts.push(`Builder's last hand-off (HISTORICAL — written before the final review; any check it recommends was the ${who}'s to run, and the final state above is the authority on whether it was): ${f.builderHandoff.slice(0, 700)}`);
+  return parts.join('\n');
+}
 
 function readOutcome(chatId: string, sinceSeq: number): Outcome {
   const rows = db.prepare('SELECT kind, payload FROM events WHERE chat_id = ? AND seq > ? ORDER BY seq').all(chatId, sinceSeq) as any[];
@@ -1051,9 +1130,11 @@ function readOutcome(chatId: string, sinceSeq: number): Outcome {
   let summary = '';
   let reviewVerdict: Outcome['reviewVerdict'] = null;
   let errorText = '';
+  const parsed: { kind: string; p: any }[] = [];
   const FAIL_MESSAGES = new Set(['Builder call failed', 'Builder repair call failed', 'Final repair call failed', 'The run failed unexpectedly']);
   for (const r of rows) {
     const p = JSON.parse(r.payload);
+    parsed.push({ kind: r.kind, p });
     // NOTE: the run phase is 'finished' even when the builder errored (only an
     // unexpected throw yields 'failed', and a Stop yields 'stopped'), so the
     // error events below — not the phase — are the authoritative failure signal.
@@ -1076,7 +1157,12 @@ function readOutcome(chatId: string, sinceSeq: number): Outcome {
       if (p.source !== 'context' && /timed out/i.test(text)) { timedOut = true; if (!errorText) errorText = text; }
     }
   }
-  return { phase, failed, timedOut, summary: summary || errorText, reviewVerdict, errorText };
+  // the last assistant message is the Builder's hand-off — context, not the
+  // outcome. The outcome is composed from the record, with that hand-off last
+  // and labelled; a run that recorded no verdict and no hand-off keeps the
+  // error text as its summary, exactly as before.
+  const finalState = sessionFinalState(chatId, parsed);
+  return { phase, failed, timedOut, summary: composeOutcomeSummary(finalState, summary || errorText), finalState, reviewVerdict, errorText };
 }
 
 /** Enough real context for an intelligent recovery decision — never a bare "it failed". */

@@ -157,6 +157,9 @@ async function runBuilder() {
     while (Date.now() < until) { try { execSync('sleep 5'); } catch {} }
   }
   let text = `Session work done (${did}).`;
+  // FAKE_BUILDER_NOTE: a hand-off line recommending a future check — the Reviewer's job, and the
+  // kind of sentence that must never outrank the Reviewer's later verdict downstream
+  if (process.env.FAKE_BUILDER_NOTE) text += `\n\n${process.env.FAKE_BUILDER_NOTE}`;
   // Findings are advice: when the engine asks for dispositions, answer every
   // numbered finding. FAKE_DISPOSITION picks the word (default accepted), so a
   // scenario can make the Builder reject with evidence and send it to the Director.

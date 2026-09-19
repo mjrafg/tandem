@@ -435,6 +435,8 @@ export interface FindingsPayload {
   verdict: 'pass' | 'findings';
   round: number;
   items: Finding[];
+  /** which reviewer role produced this verdict; absent on events recorded before the roles were split */
+  reviewer?: 'builder_reviewer' | 'director_reviewer';
   /** set on the event that closes the loop after the un-reviewed final repair */
   /** historical: a round-2 findings verdict followed by an unreviewed final repair */
   finalRepairNotReviewed?: boolean;
@@ -444,6 +446,8 @@ export interface FindingsPayload {
   scope?: { verify: string[]; closed: string[] };
   /** round 2: earlier findings the Reviewer confirmed resolved */
   verified?: string[];
+  /** round 2: what the Reviewer ran or saw that shows each verified finding is fixed */
+  verifiedEvidence?: { id: string; evidence: string }[];
   /** round 2: earlier findings whose repair objectively failed — updated in place, never re-raised */
   repairFailed?: { id: string; evidence: string }[];
   /** round 2: "new" items that were in fact known findings, folded back onto their original id */
@@ -521,6 +525,28 @@ export interface ArbitrationPayload {
   failed?: string;
 }
 
+/**
+ * The final state of a session's task as downstream orchestration must see
+ * it. Composed at completion from the ledger, the findings registry and the
+ * final Reviewer's own report — the record, not the last thing anyone said.
+ */
+export interface SessionFinalState {
+  verdict: 'pass' | 'findings' | 'resolved' | 'unreviewed';
+  /** the round that produced the final verdict, and who reviewed */
+  round: number | null;
+  reviewer: 'builder_reviewer' | null;
+  /** the final Reviewer's own report — what it ran, what it saw — capped */
+  reviewerReport: string;
+  /** findings the Reviewer verified as fixed, with its evidence */
+  verified: { id: string; title: string; evidence: string }[];
+  /** findings closed by the Director without a change */
+  closed: { id: string; title: string; state: string }[];
+  /** findings still open, and whether the Director judged them blocking */
+  open: { id: string; title: string; state: string; blocking: boolean | null; repairStatus: string | null }[];
+  /** the Builder's last hand-off — historical, written BEFORE the final review */
+  builderHandoff: string;
+}
+
 /** One finding's durable lifecycle record for a task (review_findings). */
 export interface ReviewFindingRecord {
   chatId: string;
@@ -544,6 +570,8 @@ export interface ReviewFindingRecord {
   arbitrationDecision: ArbitrationDecision | null;
   arbitrationReason: string | null;
   arbitrationRequired: string | null;
+  /** what the Reviewer ran or saw that showed the repair holds (set when verified) */
+  resolutionEvidence: string | null;
   /** the Director's final word on whether it blocks; null until decided */
   blocking: boolean | null;
   /** how many times a later round restated it instead of raising something new */
@@ -936,6 +964,13 @@ export interface PdSession {
   resultSummary: string | null;
   /** `resolved` = findings were raised and every one was closed by Director arbitration as non-blocking */
   reviewVerdict: 'pass' | 'findings' | 'resolved' | null;
+  /**
+   * The authoritative final state of a completed session, built from the
+   * durable record (final verdict, what the Reviewer verified, what stands
+   * open) — never from the Builder's last message, which predates the final
+   * review and may recommend checks that review then performed.
+   */
+  finalState?: SessionFinalState | null;
   /** set while status is awaiting_review: why the review is waiting and when it retries */
   reviewWait?: { reason: string; retryAt: number } | null;
   /** live sub-state derived from the underlying chat (display only) */

@@ -831,13 +831,14 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
   const items = round >= 2 ? raiseFindings(h.chat.id, taskSeq, round, fresh) : raiseFindings(h.chat.id, taskSeq, round, parsed.items);
   // a round-2 verdict is PASS only when nothing is new AND no repair failed
   const verdict: 'pass' | 'findings' = parsed.verdict === 'pass' && failedRepairs.length === 0 ? 'pass' : (items.length === 0 && failedRepairs.length === 0 ? 'pass' : 'findings');
-  if (verifiedIds.length) markVerified(h.chat.id, verifiedIds);
+  const verifiedWithEvidence = verifiedIds.map((id) => ({ id, evidence: parsed.verifiedEvidence.find((v) => v.id === id)?.evidence ?? '' }));
+  if (verifiedIds.length) markVerified(h.chat.id, verifiedWithEvidence);
   if (failedRepairs.length) markRepairFailed(h.chat.id, failedRepairs);
   if (folded.length) markRestated(h.chat.id, folded.map((f) => f.id));
   // on round 2, every claimed repair the Reviewer neither confirmed nor failed stays claimed — unverified in truth
   const payload: FindingsPayload = {
-    verdict, round, items, ...(scope ? { scope } : {}),
-    ...(verifiedIds.length ? { verified: verifiedIds } : {}),
+    verdict, round, items, reviewer: 'builder_reviewer', ...(scope ? { scope } : {}),
+    ...(verifiedIds.length ? { verified: verifiedIds, verifiedEvidence: verifiedWithEvidence } : {}),
     ...(failedRepairs.length ? { repairFailed: failedRepairs } : {}),
     ...(folded.length ? { folded } : {}),
   };
@@ -853,19 +854,20 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
 }
 
 /** Parse the Reviewer's contracted output format (protocol, not intent). */
-export function parseVerdict(text: string, known?: ReviewFindingRecord[]): { verdict: 'pass' | 'findings'; items: Finding[]; verified: string[]; repairFailed: { id: string; evidence: string }[] } {
+export function parseVerdict(text: string, known?: ReviewFindingRecord[]): { verdict: 'pass' | 'findings'; items: Finding[]; verified: string[]; verifiedEvidence: { id: string; evidence: string }[]; repairFailed: { id: string; evidence: string }[] } {
   const verified: string[] = [];
+  const verifiedEvidence: { id: string; evidence: string }[] = [];
   const repairFailed: { id: string; evidence: string }[] = [];
   // round-2 lines about earlier findings, by id — parsed wherever they appear
   for (const raw of text.split('\n')) {
     const m = raw.trim().replace(/^[*_`>\-\s]+/, '').match(/^(RESOLVED|REPAIR_FAILED)\s+`?(F-\d+)`?\s*(?:[—–\-:]\s*(.*))?$/i);
     if (!m) continue;
-    if (m[1].toUpperCase() === 'RESOLVED') verified.push(m[2].toUpperCase());
+    if (m[1].toUpperCase() === 'RESOLVED') { verified.push(m[2].toUpperCase()); verifiedEvidence.push({ id: m[2].toUpperCase(), evidence: (m[3] ?? '').trim() }); }
     else repairFailed.push({ id: m[2].toUpperCase(), evidence: (m[3] ?? '').trim() });
   }
   const firstLine = text.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !/^(RESOLVED|REPAIR_FAILED)\b/i.test(l)) ?? '';
   const explicitFindingsHeader = /^`?FINDINGS`?\b/i.test(firstLine);
-  if (/^`?PASS`?\b/i.test(firstLine)) return { verdict: 'pass', items: [], verified, repairFailed };
+  if (/^`?PASS`?\b/i.test(firstLine)) return { verdict: 'pass', items: [], verified, verifiedEvidence, repairFailed };
 
   const items: Finding[] = [];
   const lines = text.split('\n');
@@ -906,11 +908,11 @@ export function parseVerdict(text: string, known?: ReviewFindingRecord[]): { ver
     // (under either header): that is a structured reply about known findings,
     // not an unstructured one — and a failed repair is a FINDINGS verdict
     if (known && (verified.length > 0 || repairFailed.length > 0)) {
-      return { verdict: repairFailed.length > 0 || explicitFindingsHeader ? 'findings' : 'pass', items: [], verified, repairFailed };
+      return { verdict: repairFailed.length > 0 || explicitFindingsHeader ? 'findings' : 'pass', items: [], verified, verifiedEvidence, repairFailed };
     }
     items.push({ severity: 'major', title: 'Reviewer reported issues (unstructured output)', detail: text.trim().slice(0, 4_000) });
   }
-  return { verdict: 'findings', items, verified, repairFailed };
+  return { verdict: 'findings', items, verified, verifiedEvidence, repairFailed };
 }
 
 function findingsAsText(items: Finding[]): string {

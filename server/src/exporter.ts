@@ -156,8 +156,8 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
     }
     case 'findings': {
       const p = e.payload as FindingsPayload;
-      if (p.verdict === 'pass') return [`✅ **Reviewer PASS** (round ${p.round})`];
-      const lines = [`⚠️ **Builder Reviewer findings** (round ${p.round})${p.repairSkippedAtCap ? ' — no further review; the Director decided on the final state' : p.finalRepairNotReviewed ? ' — final repair afterwards was **not re-reviewed**' : ''}:`, ''];
+      if (p.verdict === 'pass') return [`✅ **${reviewerLabel(p.reviewer)} PASS** (round ${p.round})${(p.verified ?? []).length ? ` — verified ${(p.verified ?? []).join(', ')}` : ''}`, ...(p.verifiedEvidence ?? []).map((v) => `  - ${v.id}: ${v.evidence}`)];
+      const lines = [`⚠️ **${reviewerLabel(p.reviewer)} findings** (round ${p.round})${p.repairSkippedAtCap ? ' — no further review; the Director decided on the final state' : p.finalRepairNotReviewed ? ' — final repair afterwards was **not re-reviewed**' : ''}:`, ''];
       for (const id of p.verified ?? []) lines.push(`- ✅ ${id} — repair verified, resolved`);
       for (const r of p.repairFailed ?? []) lines.push(`- ❌ ${r.id} — repair failed: ${r.evidence}`);
       for (const r of p.folded ?? []) lines.push(`- ↩ ${r.id} — restated by the Reviewer, not a new finding`);
@@ -239,6 +239,11 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
     default:
       return [`- (${(e as ChatEvent).kind})`];
   }
+}
+
+/** which reviewer produced a verdict — events recorded before the split name none */
+function reviewerLabel(r: FindingsPayload['reviewer']): string {
+  return r === 'director_reviewer' ? 'Director Reviewer' : r === 'builder_reviewer' ? 'Builder Reviewer' : 'Reviewer';
 }
 
 function roleLabel(role: string): string {
@@ -379,13 +384,13 @@ ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
     }
     case 'findings': {
       const p = e.payload as FindingsPayload;
-      if (p.verdict === 'pass') return `<div class="ev"><span class="pass">✓ Reviewer PASS</span> <span class="kv">(round ${p.round})</span></div>`;
+      if (p.verdict === 'pass') return `<div class="ev"><span class="pass">✓ ${reviewerLabel(p.reviewer)} PASS</span> <span class="kv">(round ${p.round})</span>${(p.verifiedEvidence ?? []).length ? `<ul>${(p.verifiedEvidence ?? []).map((v) => `<li><code>${escapeHtml(v.id)}</code> verified — ${escapeHtml(v.evidence)}</li>`).join('')}</ul>` : ''}</div>`;
       const r2 = [
         ...(p.verified ?? []).map((id) => `<li><span class="pass">✓</span> <code>${escapeHtml(id)}</code> — repair verified, resolved</li>`),
         ...(p.repairFailed ?? []).map((r) => `<li><span class="err">✗</span> <code>${escapeHtml(r.id)}</code> — repair failed: ${escapeHtml(r.evidence)}</li>`),
         ...(p.folded ?? []).map((r) => `<li><code>${escapeHtml(r.id)}</code> — restated by the Reviewer, not a new finding</li>`),
       ].join('');
-      return `<div class="ev"><details open><summary><span class="warn">Builder Reviewer findings</span> · round ${p.round}${p.repairSkippedAtCap ? ' · no further review — the Director decided on the final state' : p.finalRepairNotReviewed ? ' · final repair not re-reviewed' : ''}</summary><div class="body"><ul>${r2}${p.items.map((f) => `<li>${f.id ? `<code>${escapeHtml(f.id)}</code> ` : ''}<span class="sev ${f.severity}">${f.severity}</span><b>${escapeHtml(f.title)}</b>${f.file ? ` — <code>${escapeHtml(f.file)}${f.line ? ':' + f.line : ''}</code>` : ''}<br>${escapeHtml(f.detail)}${f.recommendation ? `<br><i>Recommendation: ${escapeHtml(f.recommendation)}</i>` : ''}</li>`).join('')}</ul></div></details></div>`;
+      return `<div class="ev"><details open><summary><span class="warn">${reviewerLabel(p.reviewer)} findings</span> · round ${p.round}${p.repairSkippedAtCap ? ' · no further review — the Director decided on the final state' : p.finalRepairNotReviewed ? ' · final repair not re-reviewed' : ''}</summary><div class="body"><ul>${r2}${p.items.map((f) => `<li>${f.id ? `<code>${escapeHtml(f.id)}</code> ` : ''}<span class="sev ${f.severity}">${f.severity}</span><b>${escapeHtml(f.title)}</b>${f.file ? ` — <code>${escapeHtml(f.file)}${f.line ? ':' + f.line : ''}</code>` : ''}<br>${escapeHtml(f.detail)}${f.recommendation ? `<br><i>Recommendation: ${escapeHtml(f.recommendation)}</i>` : ''}</li>`).join('')}</ul></div></details></div>`;
     }
     case 'compaction': {
       const p = e.payload as CompactionPayload;

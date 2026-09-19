@@ -23,6 +23,8 @@ export const CLAUDE_CODE_MODELS: ModelDescriptor[] = [
 ];
 
 export const CODEX_MODELS: ModelDescriptor[] = [
+  // requires Codex CLI ≥ 0.155 (0.147 refuses it with "requires a newer version of Codex")
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra', note: 'Codex CLI 0.155+' },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
   { id: 'gpt-5-codex', label: 'GPT-5 Codex' },

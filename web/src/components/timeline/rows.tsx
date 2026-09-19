@@ -19,6 +19,9 @@ const roleMeta: Record<string, { label: string; dot: string }> = {
   reviewer: { label: 'Reviewer', dot: 'bg-reviewer' },
   compactor: { label: 'Compactor', dot: 'bg-compactor' },
   final_repair: { label: 'Final repair', dot: 'bg-builder' },
+  // a Director turn labelled "Builder" is how a misconfigured Director looked
+  // like a Builder failure — the role is its own, whatever provider runs it
+  director: { label: 'Director', dot: 'bg-accent' },
 };
 
 const providerName = (p: string) => (p === 'claude-code' ? 'Claude' : p === 'codex' ? 'Codex' : p);

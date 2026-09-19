@@ -81,6 +81,9 @@ check "Codex Builder used -p profile + --approve-for-me, not the read-only sandb
 CLR=$(last_argv "$STATE/claude-argv.log")
 check "Claude Reviewer turn was read-only (mutation tools denied) and fresh (no --resume)" "$([[ "$CLR" == *"--disallowedTools"* && "$CLR" != *"--resume"* ]] && echo 1 || echo 0)" "$CLR"
 check "Claude Reviewer got the reviewer prompt on stdin" "$( grep -q "The user's original request" "$STATE/claude-review-prompts.log" 2>/dev/null && echo 1 || echo 0 )"
+check "Claude Reviewer's shell probe was recorded live as a command event" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='command' AND payload LIKE '%fake-reviewer-probe%' AND payload LIKE '%\"status\":\"done\"%'")" -ge 1 ] && echo 1 || echo 0 )"
+check "Claude Reviewer's file read was recorded as a file_read event" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='file_read' AND payload LIKE '%REVIEW_PROBE.md%'")" -ge 1 ] && echo 1 || echo 0 )"
+check "Claude Reviewer's verdict did NOT become a conversation message" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='assistant_message' AND payload LIKE '%PASS%'")" = 0 ] && echo 1 || echo 0 )"
 SP=$(q "SELECT builder_session_provider FROM chats WHERE id='$CHAT'"); SID=$(q "SELECT builder_session_id FROM chats WHERE id='$CHAT'")
 check "stored session belongs to codex with the thread id" "$([ "$SP" = codex ] && [[ "$SID" == codex-thread-* ]] && echo 1 || echo 0)" "$SP $SID"
 
@@ -114,7 +117,15 @@ check "the Claude session id was never handed to Codex" "$( grep -q "fake-sess-"
 check "the Codex thread id was never handed to Claude" "$( grep -q "codex-thread-" "$STATE/claude-argv.log" && echo 0 || echo 1 )"
 check "every Builder turn produced a file (e.txt from the last one)" "$( [ -f "$PROJ/e.txt" ] && echo 1 || echo 0 )"
 
-echo "== 5. Reviewer on Claude sees a repair round like Codex would"
+echo "== 5. Reviewer → Codex: its activity shows live, its verdict stays out of the conversation"
+put_settings '{"roles":{"reviewer":{"provider":"codex","model":"gpt-5.6-sol","effort":"low","enabled":true}}}' >/dev/null
+N_CMD_BEFORE=$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='command' AND payload LIKE '%fake-reviewer-probe%'")
+send "$CHAT" "RECIPE_ONE again please" true
+check "Reviewer ai_call ran on codex" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='ai_call' AND payload LIKE '%\"role\":\"reviewer\"%' AND payload LIKE '%\"provider\":\"codex\"%'")" -ge 1 ] && echo 1 || echo 0 )"
+check "Codex Reviewer's shell probe was recorded live as a command event" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='command' AND payload LIKE '%fake-reviewer-probe%' AND payload LIKE '%\"status\":\"done\"%'")" -gt "${N_CMD_BEFORE:-0}" ] && echo 1 || echo 0 )"
+check "Codex Reviewer's verdict did NOT become a conversation message" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='assistant_message' AND payload LIKE '%PASS%'")" = 0 ] && echo 1 || echo 0 )"
+
+echo "== 6. no errors across the scenario"
 NF=$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='error'")
 check "no error events in the whole scenario" "$([ "${NF:-0}" = 0 ] && echo 1 || echo 0)" "$(q "SELECT payload FROM events WHERE chat_id='$CHAT' AND kind='error' LIMIT 1")"
 

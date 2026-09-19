@@ -302,7 +302,8 @@ async function reviewArtifact(runId: string, prompt: string, round: number): Pro
       systemPrompt: '',
       userPrompt: `${prompt}\n\n${getPrompt('reviewer.output_format')}`,
       cwd: project.rootPath,
-      emitActivity: false,
+      // activity shows live; the reply is the verdict, recorded as findings
+      emitReply: false,
       timeoutMs: REVIEW_TIMEOUT,
     });
     if (result.status !== 'completed') {

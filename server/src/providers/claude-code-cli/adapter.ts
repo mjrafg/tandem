@@ -48,6 +48,7 @@ async function runTurn(req: ProviderTurnRequest): Promise<ProviderTurnResult> {
     resumeSessionId: req.session?.id ?? null,
     policy: req.policy,
     emitActivity: req.emitActivity,
+    emitReply: req.emitReply,
     nameSession: req.nameSession,
     timeoutMs: req.timeoutMs,
   });

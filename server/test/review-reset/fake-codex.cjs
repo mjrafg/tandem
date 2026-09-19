@@ -55,5 +55,9 @@ if (isSession && String(n) === String(process.env.FAKE_CODEX_SLEEP_ON_CALL || ''
 }
 const findings = isSession && n <= Number(process.env.FAKE_FINDINGS_FOR || 2);
 emit({ type: 'thread.started', thread_id: 't-' + n }); emit({ type: 'turn.started' });
+// a real Reviewer runs a probe before it judges; the engine must record it
+// live as a command event while the verdict text stays out of the conversation
+emit({ type: 'item.started', item: { id: 'cmd-' + n, type: 'command_execution', command: 'git status --short # fake-reviewer-probe' } });
+emit({ type: 'item.completed', item: { id: 'cmd-' + n, type: 'command_execution', command: 'git status --short # fake-reviewer-probe', aggregated_output: ' M a.txt\n', exit_code: 0 } });
 emit({ type: 'item.completed', item: { type: 'agent_message', text: findings ? `1. [major] Round ${n} finding — a.txt\n   The file needs another change.\n   Recommendation: change it again` : 'PASS' } });
 emit({ type: 'turn.completed', usage: { input_tokens: 1000, output_tokens: 20, reasoning_output_tokens: 0 } });

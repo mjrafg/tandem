@@ -135,11 +135,15 @@ export async function runCodexTurn(h: RunHandle, opts: {
   /** a Codex thread id to continue (`codex exec resume`) */
   resumeThreadId?: string | null;
   policy: RoleExecutionPolicy;
+  /** tool activity (commands, edits) as timeline events; default true */
   emitActivity?: boolean;
+  /** the model's messages as assistant messages; default true, false for the Reviewer */
+  emitReply?: boolean;
   nameSession?: boolean;
   timeoutMs: number;
 }): Promise<CodexResult> {
   const emitActivity = opts.emitActivity !== false;
+  const emitReply = opts.emitReply !== false;
   const readOnly = opts.policy.filesystem === 'read-only';
   const distDir = path.dirname(process.argv[1] ?? '.');
   const workdirScript = path.resolve(distDir, 'mcp-workdir.cjs');
@@ -251,6 +255,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
     if (type === 'thread.started' && typeof ev.thread_id === 'string') {
       threadId = ev.thread_id; // the session this turn can be continued from
     } else if (type === 'item.started' && itemType(ev) === 'command_execution') {
+      if (!emitActivity) return;
       const created = addEvent(h.chat.id, 'command', {
         command: String(ev.item.command ?? ''), cwd: opts.cwd, stdout: '', stderr: '', exitCode: null, durationMs: 0, status: 'running',
       }, { runId: h.ctx.runId });
@@ -259,6 +264,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
       const it = ev.item ?? {};
       const kind = itemType(ev);
       if (kind === 'command_execution') {
+        if (!emitActivity) return;
         const pending = pendingCommands.get(String(it.id ?? ''));
         if (pending) {
           pendingCommands.delete(String(it.id));
@@ -275,7 +281,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
         lastText = it.text;
         // Codex reports a message only once it is complete, so the role's
         // visible reply is one event per message rather than a stream
-        if (emitActivity && it.text.trim()) {
+        if (emitReply && it.text.trim()) {
           const msg = beginAssistantMessage(h.chat.id, h.ctx.runId);
           appendAssistantText(msg, it.text);
           finishAssistantMessage(msg);

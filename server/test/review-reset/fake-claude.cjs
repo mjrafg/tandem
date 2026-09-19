@@ -179,7 +179,16 @@ function runReviewer() {
   const findings = isSession && n <= Number(process.env.FAKE_FINDINGS_FOR || 2);
   const text = findings ? `1. [major] Round ${n} finding — a.txt\n   The file needs another change.\n   Recommendation: change it again` : 'PASS';
   emit({ type: 'system', subtype: 'init', session_id: 'fake-review-' + n, model: 'fake-model' });
-  emit({ type: 'result', subtype: 'success', is_error: false, result: text, num_turns: 1, session_id: 'fake-review-' + n,
+  // a real Reviewer inspects before it judges: one read and one shell probe,
+  // reported exactly as the CLI reports tool use, so the engine's live record
+  // of Reviewer activity is exercised (the verdict text must NOT become a
+  // conversation message; the tool activity must)
+  emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu-read-' + n, name: 'Read', input: { file_path: path.join(process.cwd(), 'REVIEW_PROBE.md') } }] } });
+  emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu-read-' + n, content: 'line one\nline two' }] } });
+  emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu-bash-' + n, name: 'Bash', input: { command: 'git status --short # fake-reviewer-probe' } }] } });
+  emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu-bash-' + n, content: ' M a.txt' }] } });
+  emit({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+  emit({ type: 'result', subtype: 'success', is_error: false, result: text, num_turns: 3, session_id: 'fake-review-' + n,
     usage: { input_tokens: 800, output_tokens: 30, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, iterations: [] } });
   process.exit(0);
 }

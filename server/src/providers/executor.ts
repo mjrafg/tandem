@@ -42,6 +42,7 @@ export async function executeRole(req: RoleExecutionRequest): Promise<ProviderTu
     policy: policyFor(req.role),
     ...(session ? { session } : {}),
     ...(req.emitActivity !== undefined ? { emitActivity: req.emitActivity } : {}),
+    ...(req.emitReply !== undefined ? { emitReply: req.emitReply } : {}),
     ...(req.nameSession ? { nameSession: true } : {}),
   });
 }

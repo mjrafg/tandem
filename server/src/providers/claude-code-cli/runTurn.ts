@@ -94,11 +94,15 @@ export async function runClaudeTurn(h: RunHandle, opts: {
    * its data.
    */
   policy: RoleExecutionPolicy;
+  /** tool activity (commands, reads, searches, edits) as timeline events; default true */
   emitActivity?: boolean;
+  /** the model's prose as assistant messages; default true, false for the Reviewer */
+  emitReply?: boolean;
   nameSession?: boolean;
   timeoutMs: number;
 }): Promise<ClaudeTurnResult> {
   const emitActivity = opts.emitActivity !== false;
+  const emitReply = opts.emitReply !== false;
   const readOnly = opts.policy.filesystem === 'read-only';
   const jailed = readOnly && bwrapAvailable();
   // a Director session's FIRST Builder turn also names the session: the model
@@ -256,7 +260,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
         break;
       }
       case 'stream_event': {
-        if (!emitActivity) break;
+        if (!emitReply) break; // partials carry only text
         if (ev.parent_tool_use_id) break; // subagent internals
         const se = ev.event;
         if (!se) break;
@@ -280,7 +284,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
             if (!emitActivity) continue;
             const mapped = mapToolUse(h, opts.cwd, block.name, block.input ?? {});
             if (mapped) pendingTools.set(block.id, { ...mapped, startedAt: Date.now() });
-          } else if (block.type === 'text' && emitActivity && !partialsSeen && block.text?.trim()) {
+          } else if (block.type === 'text' && emitReply && !partialsSeen && block.text?.trim()) {
             const msg = beginAssistantMessage(h.chat.id, h.ctx.runId);
             appendAssistantText(msg, block.text);
             finishAssistantMessage(msg);
@@ -425,7 +429,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   });
 
   // guarantee a visible reply even if no text streamed
-  if (ok && emitActivity && streamedChars === 0 && resultText.trim()) {
+  if (ok && emitReply && streamedChars === 0 && resultText.trim()) {
     const msg = beginAssistantMessage(h.chat.id, h.ctx.runId);
     appendAssistantText(msg, resultText);
     finishAssistantMessage(msg);

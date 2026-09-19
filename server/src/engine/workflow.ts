@@ -607,7 +607,10 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
       systemPrompt: reviewerSystemText(h.settings),
       userPrompt: prompt,
       cwd: h.project.rootPath,
-      emitActivity: false,
+      // the Reviewer's commands, reads and searches show live in the timeline
+      // like the Builder's; only its reply stays out of the conversation,
+      // because that reply is the verdict parsed into a findings event below
+      emitReply: false,
       timeoutMs: REVIEW_TIMEOUT,
     });
   } finally {

@@ -87,8 +87,20 @@ export interface ProviderTurnRequest {
   session?: ProviderSessionRef;
   timeoutMs: number;
   policy: RoleExecutionPolicy;
-  /** false for background work that must not appear as conversation */
+  /**
+   * Record the role's tool activity — commands, reads, searches, edits — as
+   * timeline events while it works. Default true. This is the live log the
+   * operator watches; false only for background work that should leave no
+   * trace in the chat at all.
+   */
   emitActivity?: boolean;
+  /**
+   * Record the role's prose as assistant messages in the conversation.
+   * Default true. The Reviewer sets this false: its reply is a verdict that
+   * the workflow parses and renders as findings, not a message to the user,
+   * while its activity above still shows.
+   */
+  emitReply?: boolean;
   /** first Builder turn of a Director session: ask the model to name it */
   nameSession?: boolean;
 }

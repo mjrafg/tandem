@@ -73,6 +73,13 @@ try { db.exec('ALTER TABLE chats ADD COLUMN builder_session_id TEXT'); } catch {
 try { db.exec('ALTER TABLE chats ADD COLUMN git_state TEXT'); } catch { /* exists */ }
 // which provider created the stored session (pre-existing sessions are Claude's)
 try { db.exec("ALTER TABLE chats ADD COLUMN builder_session_provider TEXT DEFAULT 'claude-code'"); } catch { /* exists */ }
+// which logical ROLE created it: a project chat's session is the Director's,
+// every other chat's is the Builder's. A Builder Reviewer thread is never
+// resumed as a Builder even on the same provider and model.
+try { db.exec('ALTER TABLE chats ADD COLUMN builder_session_role TEXT'); } catch { /* exists */ }
+try {
+  db.exec("UPDATE chats SET builder_session_role = CASE WHEN kind = 'project' THEN 'director' ELSE 'builder' END WHERE builder_session_role IS NULL AND builder_session_id IS NOT NULL");
+} catch { /* kind column may not exist yet on a brand-new db; the next boot fills it */ }
 // Project Director: a chat is either a normal session or a project chat
 try { db.exec("ALTER TABLE chats ADD COLUMN kind TEXT DEFAULT 'chat'"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE chats ADD COLUMN project_run_id TEXT'); } catch { /* exists */ }
@@ -98,13 +105,21 @@ export function getBuilderSessionProvider(chatId: string): import('../../shared/
   return row?.p === 'codex' ? 'codex' : 'claude-code';
 }
 
+/** the logical role that created the stored session (legacy rows: by chat kind) */
+export function getBuilderSessionRole(chatId: string): import('../../shared/types').AiRole {
+  const row = db.prepare('SELECT builder_session_role AS r, kind FROM chats WHERE id = ?').get(chatId) as any;
+  if (row?.r) return row.r;
+  return row?.kind === 'project' ? 'director' : 'builder';
+}
+
 export function setBuilderSession(
   chatId: string,
   sessionId: string | null,
   provider: import('../../shared/types').Provider = 'claude-code',
+  role: import('../../shared/types').AiRole = 'builder',
 ): void {
-  db.prepare('UPDATE chats SET builder_session_id = ?, builder_session_provider = ? WHERE id = ?')
-    .run(sessionId, provider, chatId);
+  db.prepare('UPDATE chats SET builder_session_id = ?, builder_session_provider = ?, builder_session_role = ? WHERE id = ?')
+    .run(sessionId, provider, role, chatId);
 }
 
 // ---------------------------------------------------------------- kv

@@ -6,13 +6,17 @@
  */
 import { providerRegistry, canonicalProvider } from '../../src/providers/registry';
 import { policyFor } from '../../src/providers/policies';
-import { resolveBuilderRole, resolveDirectorRoleConfig, resolveReviewerRole, validateProviderModel } from '../../src/providers/resolve';
+import { resolveBuilderReviewerRole, resolveBuilderRole, resolveDirectorReviewerRole, resolveDirectorRoleConfig, validateProviderModel } from '../../src/providers/resolve';
+import { parseArbitration, parseDispositions, parseProceed } from '../../src/engine/arbitration';
+import { parseVerdict } from '../../src/engine/workflow';
+import { policyFor as _p, roleFamily } from '../../src/providers/policies';
 import { resumableSession } from '../../src/providers/sessions';
 import { providerOfModel } from '../../src/providers/catalog';
 import { classifyCodexFailure } from '../../src/providers/codex-cli/errors';
 import { classifyClaudeFailure } from '../../src/providers/claude-code-cli/errors';
 import { outageFromFailure } from '../../src/engine/reviewWait';
-import { DEFAULT_SETTINGS, validateRoleConfigs } from '../../src/settings';
+import { DEFAULT_SETTINGS, getSettings, migrateReviewerSplit, validateRoleConfigs } from '../../src/settings';
+import { kvGet, kvSet } from '../../src/db';
 import type { AppSettings } from '../../../shared/types';
 
 let bad = 0;
@@ -26,7 +30,7 @@ check('stored ids resolve unchanged', providerRegistry.get('codex').descriptor.i
 let threw = ''; try { providerRegistry.get('openai-api'); } catch (e) { threw = String(e); }
 check('unknown provider is rejected', /Unknown AI provider "openai-api"/.test(threw), threw);
 check('registry lists exactly the two CLI providers', providerRegistry.ids().sort().join(',') === 'claude-code,codex');
-check('every provider implements every role', providerRegistry.list().every((d) => ['builder', 'reviewer', 'director', 'final_repair'].every((r) => d.roles.includes(r as any))));
+check('every provider implements every role', providerRegistry.list().every((d) => ['builder', 'builder_reviewer', 'director_reviewer', 'director', 'final_repair', 'arbiter'].every((r) => d.roles.includes(r as any))));
 check('canonicalization is case-insensitive and null for junk', canonicalProvider(' Codex-CLI ') === 'codex' && canonicalProvider(42) === null);
 
 console.log('--- capabilities are declared, not assumed');
@@ -37,38 +41,71 @@ check('both declare resumable sessions', claude.descriptor.capabilities.resumabl
 check('model catalogs are provider-owned and disjoint', claude.descriptor.models.every((m) => providerOfModel(m.id) === 'claude-code') && codex.descriptor.models.every((m) => providerOfModel(m.id) === 'codex'));
 check('each default model is in its own catalog', claude.descriptor.models.some((m) => m.id === claude.descriptor.defaultModel) && codex.descriptor.models.some((m) => m.id === codex.descriptor.defaultModel));
 
-console.log('--- role resolution, each role on each provider');
+console.log('--- role resolution, each of the four roles on each provider, independently');
 for (const p of ['codex', 'claude-code'] as const) {
   const model = p === 'codex' ? 'gpt-5.6-terra' : 'claude-sonnet-5';
   const s = settings({
     builder: { provider: p, model, effort: 'low', instructions: '' },
-    reviewer: { provider: p, model, effort: 'medium', instructions: '', enabled: true },
+    builder_reviewer: { provider: p, model, effort: 'medium', instructions: '', enabled: true },
     director: { provider: p, model, effort: 'high' },
+    director_reviewer: { provider: p, model, effort: 'high', instructions: '' },
   });
-  const b = resolveBuilderRole(s), r = resolveReviewerRole(s), d = resolveDirectorRoleConfig(s);
+  const b = resolveBuilderRole(s), br = resolveBuilderReviewerRole(s), d = resolveDirectorRoleConfig(s), dr = resolveDirectorReviewerRole(s);
   check(`Builder resolves ${p}`, b.provider === p && b.model === model && b.effort === 'low', JSON.stringify(b));
-  check(`Reviewer resolves ${p}`, r.provider === p && r.model === model && r.effort === 'medium', JSON.stringify(r));
+  check(`Builder Reviewer resolves ${p}`, br.provider === p && br.model === model && br.effort === 'medium', JSON.stringify(br));
   check(`Director resolves ${p}`, d.provider === p && d.model === model && d.effort === 'high', JSON.stringify(d));
+  check(`Director Reviewer resolves ${p}`, dr.ok && dr.role.provider === p && dr.role.model === model, JSON.stringify(dr));
+}
+{
+  // the example configuration from the brief: four different choices, none leaking
+  const s = settings({
+    builder: { provider: 'claude-code', model: 'claude-opus-5', effort: 'high', instructions: '' },
+    builder_reviewer: { provider: 'claude-code', model: 'claude-sonnet-5', effort: 'medium', instructions: '', enabled: true },
+    director: { provider: 'claude-code', model: 'claude-fable-5-1', effort: 'high' },
+    director_reviewer: { provider: 'codex', model: 'gpt-5.6-sol', effort: 'high', instructions: '' },
+  });
+  const br = resolveBuilderReviewerRole(s), dr = resolveDirectorReviewerRole(s);
+  check('Builder Reviewer = Claude Sonnet 5 / medium', br.provider === 'claude-code' && br.model === 'claude-sonnet-5' && br.effort === 'medium');
+  check('Director Reviewer = Codex GPT-5.6 / high, independent of the Builder Reviewer', dr.ok && dr.role.provider === 'codex' && dr.role.model === 'gpt-5.6-sol' && dr.role.effort === 'high');
+  const d = resolveDirectorRoleConfig(s);
+  check('Director = Claude Fable 5.1, not inherited from anyone', d.provider === 'claude-code' && d.model === 'claude-fable-5-1');
 }
 {
   const s = settings({ builder: { provider: 'codex', model: 'gpt-5.6-sol', effort: 'high', instructions: '' } });
   const d = resolveDirectorRoleConfig(s);
   check('Director does NOT inherit a Codex Builder provider', d.provider === 'claude-code' && providerOfModel(d.model) === 'claude-code', JSON.stringify(d));
-  const r = resolveReviewerRole(s);
-  check('Reviewer does NOT inherit the Builder provider', r.provider === 'codex' && r.model === DEFAULT_SETTINGS.roles.reviewer.model);
+  const r = resolveBuilderReviewerRole(s);
+  check('Builder Reviewer does NOT inherit the Builder provider', r.provider === 'codex' && r.model === DEFAULT_SETTINGS.roles.builder_reviewer.model);
 }
 {
-  const s = settings({ reviewer: { provider: 'claude-code', model: 'claude-sonnet-5', effort: 'medium', instructions: '', enabled: true } });
-  const r = resolveReviewerRole(s), b = resolveBuilderRole(s);
-  check('Reviewer = Claude Code / Sonnet 5 resolves through the registry', r.provider === 'claude-code' && r.model === 'claude-sonnet-5' && providerRegistry.get(r.provider).descriptor.label === 'Claude Code CLI');
-  check('…and the Builder is untouched by it', b.provider === 'claude-code' && b.model === DEFAULT_SETTINGS.roles.builder.model);
+  const bad = settings({ director_reviewer: { provider: 'anthropic-api' as any, model: 'x', effort: 'high', instructions: '' } });
+  const dr = resolveDirectorReviewerRole(bad);
+  check('an invalid Director Reviewer is REPORTED, not replaced by the Builder Reviewer', !dr.ok && /Director Reviewer configuration problem/.test((dr as any).error), JSON.stringify(dr));
+  const cross = settings({ director_reviewer: { provider: 'codex', model: 'claude-opus-5', effort: 'high', instructions: '' } });
+  check('a cross-provider Director Reviewer model is reported too', !resolveDirectorReviewerRole(cross).ok);
 }
 {
   const legacy = settings({ builder: { provider: 'nope' as any, model: 'claude-opus-5', effort: 'high', instructions: '' } });
-  check('an unknown stored provider falls back to the historical one', resolveBuilderRole(legacy).provider === 'claude-code');
-  const swapped = settings({ reviewer: { provider: 'claude-code', model: 'gpt-5.6-sol', effort: 'high', instructions: '', enabled: true } });
-  const r = resolveReviewerRole(swapped);
+  check('an unknown stored Builder provider falls back to the historical one', resolveBuilderRole(legacy).provider === 'claude-code');
+  const swapped = settings({ builder_reviewer: { provider: 'claude-code', model: 'gpt-5.6-sol', effort: 'high', instructions: '', enabled: true } });
+  const r = resolveBuilderReviewerRole(swapped);
   check('a model from the other backend is replaced by the provider default on read', r.provider === 'claude-code' && r.model === claude.descriptor.defaultModel, JSON.stringify(r));
+}
+
+console.log('--- the reviewer split migration');
+{
+  kvSet('settings', { roles: { builder: { provider: 'claude-code', model: 'claude-opus-5', effort: 'high', instructions: '' }, reviewer: { provider: 'codex', model: 'gpt-5.6-terra', effort: 'medium', instructions: 'be strict', enabled: true } } });
+  const before = getSettings();
+  check('before migration both reviewers read the legacy value in memory', before.roles.builder_reviewer.model === 'gpt-5.6-terra' && before.roles.director_reviewer.model === 'gpt-5.6-terra' && before.roles.director_reviewer.instructions === 'be strict');
+  migrateReviewerSplit();
+  const stored = kvGet<any>('settings');
+  check('migration wrote both roles and removed the legacy key', stored.roles.builder_reviewer?.model === 'gpt-5.6-terra' && stored.roles.director_reviewer?.model === 'gpt-5.6-terra' && !('reviewer' in stored.roles));
+  check('the Director Reviewer carries no "enabled" switch', !('enabled' in stored.roles.director_reviewer) && stored.roles.builder_reviewer.enabled === true);
+  stored.roles.builder_reviewer = { ...stored.roles.builder_reviewer, provider: 'claude-code', model: 'claude-sonnet-5' };
+  kvSet('settings', stored);
+  const after = getSettings();
+  check('after migration changing the Builder Reviewer leaves the Director Reviewer untouched', after.roles.builder_reviewer.model === 'claude-sonnet-5' && after.roles.director_reviewer.model === 'gpt-5.6-terra' && after.roles.director_reviewer.provider === 'codex');
+  kvSet('settings', {});
 }
 
 console.log('--- provider/model validation');
@@ -79,22 +116,32 @@ check('claude + gpt model refused', !validateProviderModel('claude-code', 'gpt-5
 check('unknown provider refused', !validateProviderModel('openrouter', 'anything').ok);
 check('unfamiliar model on its own provider accepted', validateProviderModel('codex', 'gpt-7-preview').ok);
 check('settings PUT refuses cross-provider pair', /not a model/.test(validateRoleConfigs({ roles: { builder: { provider: 'codex', model: 'claude-opus-5' } } } as any) ?? ''));
+check('settings PUT refuses a cross-provider Director Reviewer pair', /not a model/.test(validateRoleConfigs({ roles: { director_reviewer: { provider: 'claude-code', model: 'gpt-5.6-sol' } } } as any) ?? ''));
 check('settings PUT refuses unknown provider', /Unknown AI provider/.test(validateRoleConfigs({ roles: { director: { provider: 'anthropic-api', model: 'x' } } } as any) ?? ''));
 check('settings PUT accepts a valid director change', validateRoleConfigs({ roles: { director: { provider: 'codex', model: 'gpt-5.6-sol' } } } as any) === null);
 
-console.log('--- sessions never cross providers');
-const claudeSess = { provider: 'claude-code' as const, id: 'sess-claude-1' };
-const codexSess = { provider: 'codex' as const, id: 'thread-codex-1' };
-check('Claude session resumes on Claude', resumableSession(claudeSess, 'claude-code').session?.id === 'sess-claude-1');
-check('Codex session resumes on Codex', resumableSession(codexSess, 'codex').session?.id === 'thread-codex-1');
-check('switching Claude → Codex does NOT reuse the Claude session', resumableSession(claudeSess, 'codex').session === undefined && resumableSession(claudeSess, 'codex').switchedFrom === 'claude-code');
-check('switching Codex → Claude does NOT reuse the Codex session', resumableSession(codexSess, 'claude-code').session === undefined && resumableSession(codexSess, 'claude-code').switchedFrom === 'codex');
-check('no stored session → no resume, no switch note', JSON.stringify(resumableSession(null, 'codex')) === '{}');
+console.log('--- sessions never cross providers, and never cross roles');
+const claudeSess = { provider: 'claude-code' as const, role: 'builder' as const, id: 'sess-claude-1' };
+const codexSess = { provider: 'codex' as const, role: 'builder' as const, id: 'thread-codex-1' };
+check('Claude Builder session resumes on Claude as Builder', resumableSession(claudeSess, 'claude-code', 'builder').session?.id === 'sess-claude-1');
+check('…and as the final repair (same conversation)', resumableSession(claudeSess, 'claude-code', 'final_repair').session?.id === 'sess-claude-1');
+check('Codex session resumes on Codex', resumableSession(codexSess, 'codex', 'builder').session?.id === 'thread-codex-1');
+check('switching Claude → Codex does NOT reuse the Claude session', resumableSession(claudeSess, 'codex', 'builder').session === undefined && resumableSession(claudeSess, 'codex', 'builder').switchedFrom === 'claude-code');
+check('switching Codex → Claude does NOT reuse the Codex session', resumableSession(codexSess, 'claude-code', 'builder').session === undefined && resumableSession(codexSess, 'claude-code', 'builder').switchedFrom === 'codex');
+const reviewerThread = { provider: 'claude-code' as const, role: 'builder_reviewer' as const, id: 'sess-review-9' };
+check('a Builder Reviewer thread is never resumed as the Builder (same provider)', resumableSession(reviewerThread, 'claude-code', 'builder').session === undefined && resumableSession(reviewerThread, 'claude-code', 'builder').otherRole === 'builder_reviewer');
+check('…nor as the Director', resumableSession(reviewerThread, 'claude-code', 'director').session === undefined);
+check('…nor as the Director Reviewer', resumableSession(reviewerThread, 'claude-code', 'director_reviewer').session === undefined);
+check('a Director session is never resumed as the Builder', resumableSession({ provider: 'claude-code', role: 'director', id: 'd1' }, 'claude-code', 'builder').session === undefined);
+check('no stored session → no resume, no note', JSON.stringify(resumableSession(null, 'codex', 'builder')) === '{}');
 
 console.log('--- role policy is separate from provider');
-const b = policyFor('builder'), r = policyFor('reviewer'), d = policyFor('director');
+const b = policyFor('builder'), r = policyFor('builder_reviewer'), d = policyFor('director');
 check('Builder writes, has workdir tools, no director tools', b.filesystem === 'read-write' && b.workdirTools && !b.directorTools);
-check('Reviewer is read-only with no workdir tools', r.filesystem === 'read-only' && !r.workdirTools && r.browserTools);
+check('Builder Reviewer is read-only with no workdir tools', r.filesystem === 'read-only' && !r.workdirTools && r.browserTools);
+check('Director Reviewer has the same read-only posture', JSON.stringify(policyFor('director_reviewer')) === JSON.stringify(r));
+check('the arbiter is read-only with no tools at all', policyFor('arbiter').filesystem === 'read-only' && !policyFor('arbiter').browserTools && !policyFor('arbiter').directorTools);
+check('tool grants follow the role family', roleFamily('builder_reviewer') === 'reviewer' && roleFamily('director_reviewer') === 'reviewer' && roleFamily('final_repair') === 'builder');
 check('Director is read-only with director tools only', d.filesystem === 'read-only' && d.directorTools && !d.workdirTools && !d.browserTools);
 check('final repair carries Builder authority', JSON.stringify(policyFor('final_repair')) === JSON.stringify(b));
 
@@ -107,6 +154,27 @@ check('Claude session limit → quota', cs.kind === 'quota');
 check('Claude 529 → overloaded (transient wait)', classifyClaudeFailure('API Error: 529 Overloaded').kind === 'overloaded' && outageFromFailure(classifyClaudeFailure('API Error: 529 Overloaded'), 'Claude Code CLI')?.transient === true);
 check('an auth failure is not a wait', classifyClaudeFailure('OAuth session expired and could not be refreshed').kind === 'authentication' && outageFromFailure(classifyClaudeFailure('OAuth session expired'), 'x') === null);
 check('a generic crash is not a wait', outageFromFailure(classifyCodexFailure('codex: fatal: unexpected internal error'), 'x') === null);
+
+console.log('--- the contracts: dispositions, decisions, round 2');
+const F = [{ id: 'F-001', severity: 'major' as const, title: 'DOM tests crash before collection', detail: 'x' }, { id: 'F-002', severity: 'minor' as const, title: 'Co-author trailer', detail: 'y' }];
+const disp = parseDispositions('Did the work.\n\nFINDING 1: accepted\nReason: fixed the jsdom setup\nEvidence: vitest now collects\nFINDING 2: rejected\nReason: the brief line is not a user requirement\nEvidence: git log', F);
+check('dispositions parse with ids, reasons and evidence', disp[0].id === 'F-001' && disp[0].disposition === 'accepted' && disp[1].disposition === 'rejected' && disp[1].evidence === 'git log' && disp[1].source === 'builder');
+check('an unanswered finding is recorded as accepted (assumed)', parseDispositions('no block here', F)[1].disposition === 'accepted' && parseDispositions('no block here', F)[1].source === 'assumed');
+check('a word outside the contract is recorded as accepted (assumed)', parseDispositions('FINDING 1: maybe\nReason: hm', F)[0].source === 'assumed');
+const arb = parseArbitration('FINDING 1: builder_upheld\nReason: generated brief, not a requirement\nRequired: none\nBlocking: no\nFINDING 2: reviewer_upheld\nReason: real crash\nRequired: tests must collect\nBlocking: yes\nPROCEED: no — a real defect remains',
+  [{ finding: F[1], index: 1 }, { finding: F[0], index: 2 }]);
+check('decisions parse with the new vocabulary', arb[0].decision === 'builder_upheld' && arb[0].blocking === false && arb[1].decision === 'reviewer_upheld' && arb[1].blocking === true && arb[1].required === 'tests must collect');
+check('non_blocking and deferred are accepted and never blocking', parseArbitration('FINDING 1: non_blocking\nReason: r\nBlocking: yes', [{ finding: F[0], index: 1 }])[0].blocking === false && parseArbitration('FINDING 1: deferred\nReason: r', [{ finding: F[0], index: 1 }])[0].decision === 'deferred');
+check('a missing decision is unresolved and blocking', parseArbitration('nothing usable', [{ finding: F[0], index: 1 }])[0].decision === 'unresolved' && parseArbitration('nothing usable', [{ finding: F[0], index: 1 }])[0].blocking === true);
+check('the PROCEED line parses', parseProceed('…\nPROCEED: no — a real defect remains').proceed === false && parseProceed('PROCEED: yes').proceed === true && parseProceed('no line').proceed === undefined);
+const known = F.map((f) => ({ ...f, chatId: 'c', taskSeq: 1, round: 1, category: null, file: null, line: null, evidence: null, recommendation: null, state: 'accepted' as const, disposition: 'accepted' as const, dispositionReason: null, dispositionEvidence: null, repairStatus: 'claimed' as const, arbitrationDecision: null, arbitrationReason: null, arbitrationRequired: null, blocking: null, restated: 0, updatedAt: 0 }));
+const r2a = parseVerdict('PASS\nRESOLVED F-001 — vitest collects and passes\nRESOLVED F-002 — n/a', known);
+check('round 2 PASS with RESOLVED lines parses to pass + verified ids', r2a.verdict === 'pass' && r2a.verified.join(',') === 'F-001,F-002' && r2a.items.length === 0);
+const r2b = parseVerdict('FINDINGS\nREPAIR_FAILED F-001 — still crashes: TypeError in setup', known);
+check('REPAIR_FAILED reopens the SAME finding and raises nothing new', r2b.verdict === 'findings' && r2b.repairFailed[0].id === 'F-001' && /still crashes/.test(r2b.repairFailed[0].evidence) && r2b.items.length === 0);
+const r2c = parseVerdict('FINDINGS\nRESOLVED F-001 — ok\n1. [minor] Unused import — b.ts:3\n   dead code\n   Evidence: b.ts line 3\n   Category: preference\n   Recommendation: remove it', known);
+check('a genuinely new round-2 finding parses with evidence and category', r2c.items.length === 1 && r2c.items[0].category === 'preference' && r2c.items[0].evidence === 'b.ts line 3' && r2c.verified[0] === 'F-001');
+check('round 1 output still parses as before', parseVerdict('FINDINGS\n1. [major] Broken — a.ts:1\n   detail').items[0].title === 'Broken' && parseVerdict('PASS').verdict === 'pass');
 
 console.log(bad ? `\n${bad} FAILED` : '\nALL PROVIDER UNIT CHECKS PASSED');
 process.exit(bad ? 1 : 0);

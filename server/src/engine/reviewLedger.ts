@@ -38,11 +38,28 @@ export interface ReviewLedger {
   originalRequest: string;
   reviewsConsumed: number;
   repairsConsumed: number;
-  lastVerdict: 'pass' | 'findings' | null;
+  /** `resolved` = the Director closed every remaining finding as non-blocking */
+  lastVerdict: 'pass' | 'findings' | 'resolved' | null;
   finalRepairDone: boolean;
   /** identity of the revision the last verdict was about */
   reviewedRevision: string | null;
+  /**
+   * Findings the Director has closed for this task (Builder upheld, or
+   * deferred as non-blocking). A later review round is told these stand
+   * closed and must not reopen them without new evidence — and that has to
+   * survive a restart, which is why it is here and not in memory.
+   */
+  closedFindings: ClosedFinding[];
   updatedAt: number;
+}
+
+export interface ClosedFinding {
+  id?: string;
+  title: string;
+  severity: 'major' | 'minor';
+  decision: 'builder_upheld' | 'non_blocking' | 'deferred';
+  reason: string;
+  round: number;
 }
 
 db.exec(`
@@ -58,6 +75,8 @@ CREATE TABLE IF NOT EXISTS review_ledger (
   updated_at INTEGER NOT NULL
 );
 `);
+// additive: the Director's closed findings for the task (JSON array)
+try { db.exec('ALTER TABLE review_ledger ADD COLUMN closed_findings TEXT'); } catch { /* exists */ }
 
 function rowTo(r: any): ReviewLedger {
   return {
@@ -65,7 +84,13 @@ function rowTo(r: any): ReviewLedger {
     reviewsConsumed: r.reviews_consumed, repairsConsumed: r.repairs_consumed,
     lastVerdict: r.last_verdict ?? null, finalRepairDone: !!r.final_repair_done,
     reviewedRevision: r.reviewed_revision ?? null, updatedAt: r.updated_at,
+    closedFindings: parseClosed(r.closed_findings),
   };
+}
+
+function parseClosed(raw: unknown): ClosedFinding[] {
+  if (typeof raw !== 'string' || !raw) return [];
+  try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; } catch { return []; }
 }
 
 export function getLedger(chatId: string): ReviewLedger | null {
@@ -84,7 +109,8 @@ export function openTask(chatId: string, originalRequest: string): ReviewLedger 
   db.prepare(`INSERT INTO review_ledger (chat_id, task_seq, original_request, reviews_consumed, repairs_consumed, last_verdict, final_repair_done, reviewed_revision, updated_at)
     VALUES (?, ?, ?, 0, 0, NULL, 0, NULL, ?)
     ON CONFLICT(chat_id) DO UPDATE SET task_seq = excluded.task_seq, original_request = excluded.original_request,
-      reviews_consumed = 0, repairs_consumed = 0, last_verdict = NULL, final_repair_done = 0, reviewed_revision = NULL, updated_at = excluded.updated_at`)
+      reviews_consumed = 0, repairs_consumed = 0, last_verdict = NULL, final_repair_done = 0, reviewed_revision = NULL,
+      closed_findings = NULL, updated_at = excluded.updated_at`)
     .run(chatId, seq, originalRequest, now);
   return getLedger(chatId)!;
 }
@@ -102,6 +128,27 @@ export function recordReview(chatId: string, round: number, verdict: 'pass' | 'f
 /** A deleted chat leaves no task behind. */
 export function deleteLedger(chatId: string): void {
   db.prepare('DELETE FROM review_ledger WHERE chat_id = ?').run(chatId);
+}
+
+/**
+ * The Director closed findings for this task. Appends; never removes — a
+ * closed finding stays closed for the task's life unless new evidence reopens
+ * it through a fresh review, which is a new row in this list, not an edit.
+ */
+export function recordClosedFindings(chatId: string, items: ClosedFinding[]): void {
+  if (items.length === 0) return;
+  const cur = getLedger(chatId)?.closedFindings ?? [];
+  db.prepare('UPDATE review_ledger SET closed_findings = ?, updated_at = ? WHERE chat_id = ?')
+    .run(JSON.stringify([...cur, ...items]), Date.now(), chatId);
+}
+
+/**
+ * Every remaining finding was closed by arbitration as non-blocking: the
+ * task's standing verdict becomes `resolved`. This never spends a round — it
+ * only reinterprets the last one in the light of the Director's decision.
+ */
+export function recordResolution(chatId: string): void {
+  db.prepare("UPDATE review_ledger SET last_verdict = 'resolved', updated_at = ? WHERE chat_id = ?").run(Date.now(), chatId);
 }
 
 export function recordRepair(chatId: string, final: boolean): void {

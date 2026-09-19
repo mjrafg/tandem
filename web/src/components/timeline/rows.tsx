@@ -7,8 +7,7 @@ import { Link } from 'react-router-dom';
 import { useState } from 'react';
 import type {
   AiCallPayload, BrowserActionPayload, ChatEvent, CheckpointPayload, CommandPayload, CompactionPayload, ErrorPayload,
-  FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, SessionsPayload, StatusPayload, ToolCallPayload,
-} from '@shared/types';
+  FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, SessionsPayload, StatusPayload, ToolCallPayload, ArbitrationPayload, DispositionsPayload } from '@shared/types';
 import { fmtDuration, fmtTokens, plural } from '../../lib/format';
 import { DiffView } from '../DiffView';
 import { CopyButton, Markdown } from '../Markdown';
@@ -17,11 +16,14 @@ import { ActivityRow, KV } from './ActivityRow';
 const roleMeta: Record<string, { label: string; dot: string }> = {
   builder: { label: 'Builder', dot: 'bg-builder' },
   reviewer: { label: 'Reviewer', dot: 'bg-reviewer' },
+  builder_reviewer: { label: 'Builder Reviewer', dot: 'bg-reviewer' },
+  director_reviewer: { label: 'Director Reviewer', dot: 'bg-reviewer' },
   compactor: { label: 'Compactor', dot: 'bg-compactor' },
   final_repair: { label: 'Final repair', dot: 'bg-builder' },
   // a Director turn labelled "Builder" is how a misconfigured Director looked
   // like a Builder failure — the role is its own, whatever provider runs it
   director: { label: 'Director', dot: 'bg-accent' },
+  arbiter: { label: 'Director · arbitration', dot: 'bg-accent' },
 };
 
 const providerName = (p: string) => (p === 'claude-code' ? 'Claude' : p === 'codex' ? 'Codex' : p);
@@ -304,17 +306,26 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
     <div className="fade-up ml-[21px] my-1.5 overflow-hidden rounded-xl border border-warn/25 bg-[#191510]">
       <div className="flex items-center gap-2 border-b border-warn/15 px-3.5 py-2">
         <AlertTriangle size={14} className="text-warn" />
-        <span className="text-[13px] font-medium text-warn">Reviewer findings · round {p.round}</span>
+        <span className="text-[13px] font-medium text-warn">Builder Reviewer findings · round {p.round}</span>
+        <span className="text-[11.5px] text-dim">{p.round === 1 ? 'advisory — the Builder answers each one' : 'new findings and failed repairs only'}</span>
         {(p.repairSkippedAtCap || p.finalRepairNotReviewed) && (
           <span className="ml-auto rounded-full border border-line px-2 py-[1px] text-[10.5px] text-dim">
-            {p.repairSkippedAtCap ? 'open — review cap reached, no repair' : 'final repair not re-reviewed'}
+            {p.repairSkippedAtCap ? 'no further review — the Director decides on the final state' : 'final repair not re-reviewed'}
           </span>
         )}
       </div>
       <div className="space-y-3 px-3.5 py-2.5">
+        {(p.verified?.length || p.repairFailed?.length || p.folded?.length) ? (
+          <div className="space-y-1 text-[12.5px]">
+            {p.verified?.map((id) => <div key={id} className="text-ok"><CircleCheck size={12} className="mr-1 inline" />{id} — repair verified, resolved</div>)}
+            {p.repairFailed?.map((r) => <div key={r.id} className="text-err"><AlertTriangle size={12} className="mr-1 inline" />{r.id} — repair failed: <span className="text-mut">{r.evidence}</span></div>)}
+            {p.folded?.map((r) => <div key={r.id} className="text-dim">{r.id} — restated by the Reviewer, not a new finding</div>)}
+          </div>
+        ) : null}
         {p.items.map((f, i) => (
           <div key={i} className="text-[13px]">
             <div className="flex flex-wrap items-center gap-2">
+              {f.id && <span className="mono text-[11px] text-dim">{f.id}</span>}
               <span className={`rounded-full px-2 py-[1px] text-[10.5px] font-semibold uppercase tracking-wide ${
                 f.severity === 'major' ? 'bg-err/15 text-err' : 'bg-warn/15 text-warn'
               }`}>{f.severity}</span>
@@ -324,6 +335,8 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
               )}
             </div>
             <p dir="auto" className="mt-1 leading-relaxed text-mut">{f.detail}</p>
+            {f.evidence && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Evidence:</span> {f.evidence}</p>}
+            {f.category && <span className="mt-1 inline-block rounded-full border border-line px-2 py-[1px] text-[10.5px] text-dim">{f.category.replace('_', ' ')}</span>}
             {f.recommendation && <p dir="auto" className="mt-0.5 text-[12.5px] italic text-dim">Recommendation: {f.recommendation}</p>}
           </div>
         ))}
@@ -648,4 +661,86 @@ function truncate(s: string, n: number): string {
 
 function matchCount(n: number): string {
   return `${n} ${n === 1 ? 'match' : 'matches'}`;
+}
+
+
+// ---------------------------------------------------------------- dispositions & arbitration
+
+const DISPOSITION_STYLE: Record<string, string> = {
+  accepted: 'bg-ok/15 text-ok',
+  partially_accepted: 'bg-ok/10 text-ok',
+  rejected: 'bg-err/15 text-err',
+  cannot_address: 'bg-warn/15 text-warn',
+};
+
+/** The Builder's answer to each finding — what it fixed, what it rejected and why. */
+export function DispositionsRow({ ev }: { ev: ChatEvent }) {
+  const p = ev.payload as DispositionsPayload;
+  return (
+    <div className="fade-up ml-[21px] my-1.5 overflow-hidden rounded-xl border border-line bg-[#131417]">
+      <div className="flex items-center gap-2 border-b border-line px-3.5 py-2">
+        <span className="h-[8px] w-[8px] rounded-full bg-builder" />
+        <span className="text-[13px] font-medium">Builder&apos;s response to the findings · round {p.round}</span>
+        {p.final && <span className="text-[11.5px] text-dim">final pass — nothing after this is re-reviewed</span>}
+      </div>
+      <div className="space-y-2.5 px-3.5 py-2.5">
+        {p.items.map((r) => (
+          <div key={r.index} className="text-[13px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`rounded-full px-2 py-[1px] text-[10.5px] font-semibold uppercase tracking-wide ${DISPOSITION_STYLE[r.disposition] ?? 'bg-line text-dim'}`}>
+                {r.disposition.replace('_', ' ')}
+              </span>
+              <span dir="auto" className="font-medium text-ink">{r.id ?? `${r.index}.`} {r.title}</span>
+              {r.source === 'assumed' && <span className="text-[11px] text-dim">(not answered — recorded as accepted)</span>}
+            </div>
+            <p dir="auto" className="mt-0.5 leading-relaxed text-mut">{r.reason}</p>
+            {r.evidence && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Evidence:</span> {r.evidence}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const DECISION_LABEL: Record<string, { label: string; cls: string }> = {
+  builder_upheld: { label: 'Builder upheld', cls: 'bg-ok/15 text-ok' },
+  reviewer_upheld: { label: 'Reviewer upheld', cls: 'bg-err/15 text-err' },
+  non_blocking: { label: 'Non-blocking', cls: 'bg-line text-dim' },
+  deferred: { label: 'Deferred', cls: 'bg-line text-dim' },
+  different_resolution_required: { label: 'Different resolution required', cls: 'bg-warn/15 text-warn' },
+  unresolved: { label: 'Undecided — stands open', cls: 'bg-err/15 text-err' },
+};
+
+/** The Director's decision on each disputed finding, with its reasoning. */
+export function ArbitrationRow({ ev }: { ev: ChatEvent }) {
+  const p = ev.payload as ArbitrationPayload;
+  return (
+    <div className="fade-up ml-[21px] my-1.5 overflow-hidden rounded-xl border border-accent/25 bg-[#12141a]">
+      <div className="flex items-center gap-2 border-b border-accent/15 px-3.5 py-2">
+        <span className="h-[8px] w-[8px] rounded-full bg-accent" />
+        <span className="text-[13px] font-medium text-accent">{p.final ? 'Director\'s final decision' : 'Director\'s decision'} · round {p.round}</span>
+        {p.final && <span className={`text-[11.5px] ${p.proceed === false ? 'text-err' : 'text-ok'}`}>{p.proceed === false ? 'may not proceed as it stands' : p.proceed ? 'may proceed' : ''}</span>}
+        {p.failed && <span className="ml-auto text-[11.5px] text-err">the Director could not decide: {p.failed}</span>}
+      </div>
+      <div className="space-y-2.5 px-3.5 py-2.5">
+        {p.summary && <p dir="auto" className="text-[12.5px] text-mut">{p.summary}</p>}
+        {p.items.map((a) => {
+          const d = DECISION_LABEL[a.decision] ?? { label: a.decision, cls: 'bg-line text-dim' };
+          return (
+            <div key={a.index} className="text-[13px]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`rounded-full px-2 py-[1px] text-[10.5px] font-semibold uppercase tracking-wide ${d.cls}`}>{d.label}</span>
+                <span dir="auto" className="font-medium text-ink">{a.id ?? `${a.index}.`} {a.title}</span>
+                {a.disposition && <span className="text-[11px] text-dim">Builder said: {a.disposition.replace('_', ' ')}</span>}
+                {a.repairStatus && <span className="text-[11px] text-dim">repair {a.repairStatus}</span>}
+                <span className={`ml-auto text-[11px] ${a.blocking ? 'text-err' : 'text-dim'}`}>{a.blocking ? 'blocking' : 'not blocking'}</span>
+              </div>
+              <p dir="auto" className="mt-0.5 leading-relaxed text-mut">{a.reason}</p>
+              {a.required && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Required:</span> {a.required}</p>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }

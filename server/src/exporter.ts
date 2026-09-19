@@ -146,13 +146,26 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       lines.push('', '</details>');
       return lines;
     }
+    case 'finding_dispositions': {
+      const p = e.payload as any;
+      return [`🛠 **Builder's response to the findings** (round ${p.round})${p.final ? ' — final pass, not re-reviewed' : ''}`, '', ...p.items.map((r: any) => `- ${r.id ?? `${r.index}.`} **${String(r.disposition).replace(/_/g, ' ')}**${r.source === 'assumed' ? ' (not answered — recorded as accepted)' : ''} — ${r.title}: ${r.reason}${r.evidence ? ` _Evidence: ${r.evidence}_` : ''}`)];
+    }
+    case 'arbitration': {
+      const p = e.payload as any;
+      return [`⚖️ **Director's ${p.final ? 'final ' : ''}decision** (round ${p.round})${p.final && p.proceed != null ? ` — proceed: ${p.proceed ? 'yes' : 'no'}` : ''}${p.failed ? ` — could not decide: ${p.failed}` : ''}${p.summary ? ` — ${p.summary}` : ''}`, '', ...p.items.map((a: any) => `- ${a.id ?? `${a.index}.`} **${String(a.decision).replace(/_/g, ' ')}**${a.blocking ? ' (blocking)' : ''} — ${a.title}: ${a.reason}${a.required ? ` _Required: ${a.required}_` : ''}`)];
+    }
     case 'findings': {
       const p = e.payload as FindingsPayload;
       if (p.verdict === 'pass') return [`✅ **Reviewer PASS** (round ${p.round})`];
-      const lines = [`⚠️ **Reviewer findings** (round ${p.round})${p.repairSkippedAtCap ? ' — open: review cap reached, no repair started' : p.finalRepairNotReviewed ? ' — final repair afterwards was **not re-reviewed**' : ''}:`, ''];
+      const lines = [`⚠️ **Builder Reviewer findings** (round ${p.round})${p.repairSkippedAtCap ? ' — no further review; the Director decided on the final state' : p.finalRepairNotReviewed ? ' — final repair afterwards was **not re-reviewed**' : ''}:`, ''];
+      for (const id of p.verified ?? []) lines.push(`- ✅ ${id} — repair verified, resolved`);
+      for (const r of p.repairFailed ?? []) lines.push(`- ❌ ${r.id} — repair failed: ${r.evidence}`);
+      for (const r of p.folded ?? []) lines.push(`- ↩ ${r.id} — restated by the Reviewer, not a new finding`);
       for (const f of p.items) {
-        lines.push(`- **[${f.severity}] ${f.title}**${f.file ? ` — \`${f.file}${f.line ? `:${f.line}` : ''}\`` : ''}`);
+        lines.push(`- ${f.id ? `${f.id} ` : ''}**[${f.severity}] ${f.title}**${f.file ? ` — \`${f.file}${f.line ? `:${f.line}` : ''}\`` : ''}`);
         lines.push(`  ${f.detail}`);
+        if (f.evidence) lines.push(`  Evidence: ${f.evidence}`);
+        if (f.category) lines.push(`  Category: ${f.category}`);
         if (f.recommendation) lines.push(`  _Recommendation: ${f.recommendation}_`);
       }
       return lines;
@@ -356,10 +369,23 @@ ${p.tools?.length ? `<details><summary>Tandem tools available · ${p.tools.lengt
 ${p.error ? `<h4 class="err">Error</h4><pre>${escapeHtml(p.error)}</pre>` : ''}
 </div></details></div>`;
     }
+    case 'finding_dispositions': {
+      const p = e.payload as any;
+      return `<div class="ev"><details open><summary><b>Builder's response to the findings</b> · round ${p.round}${p.final ? ' · final pass, not re-reviewed' : ''}</summary><div class="body"><ul>${p.items.map((r: any) => `<li>${r.id ? `<code>${escapeHtml(r.id)}</code> ` : ''}<b>${escapeHtml(String(r.disposition).replace(/_/g, ' '))}</b>${r.source === 'assumed' ? ' (not answered — recorded as accepted)' : ''} — ${escapeHtml(r.title)}: ${escapeHtml(r.reason)}${r.evidence ? `<br><i>Evidence: ${escapeHtml(r.evidence)}</i>` : ''}</li>`).join('')}</ul></div></details></div>`;
+    }
+    case 'arbitration': {
+      const p = e.payload as any;
+      return `<div class="ev"><details open><summary><b>Director's ${p.final ? 'final ' : ''}decision</b> · round ${p.round}${p.final && p.proceed != null ? ` · proceed: ${p.proceed ? 'yes' : 'no'}` : ''}${p.failed ? ` · could not decide: ${escapeHtml(p.failed)}` : ''}</summary><div class="body"><ul>${p.items.map((a: any) => `<li>${a.id ? `<code>${escapeHtml(a.id)}</code> ` : ''}<b>${escapeHtml(String(a.decision).replace(/_/g, ' '))}</b>${a.blocking ? ' (blocking)' : ''} — ${escapeHtml(a.title)}: ${escapeHtml(a.reason)}${a.required ? `<br><i>Required: ${escapeHtml(a.required)}</i>` : ''}</li>`).join('')}</ul></div></details></div>`;
+    }
     case 'findings': {
       const p = e.payload as FindingsPayload;
       if (p.verdict === 'pass') return `<div class="ev"><span class="pass">✓ Reviewer PASS</span> <span class="kv">(round ${p.round})</span></div>`;
-      return `<div class="ev"><details open><summary><span class="warn">Reviewer findings</span> · round ${p.round}${p.repairSkippedAtCap ? ' · open — review cap reached, no repair' : p.finalRepairNotReviewed ? ' · final repair not re-reviewed' : ''}</summary><div class="body"><ul>${p.items.map((f) => `<li><span class="sev ${f.severity}">${f.severity}</span><b>${escapeHtml(f.title)}</b>${f.file ? ` — <code>${escapeHtml(f.file)}${f.line ? ':' + f.line : ''}</code>` : ''}<br>${escapeHtml(f.detail)}${f.recommendation ? `<br><i>Recommendation: ${escapeHtml(f.recommendation)}</i>` : ''}</li>`).join('')}</ul></div></details></div>`;
+      const r2 = [
+        ...(p.verified ?? []).map((id) => `<li><span class="pass">✓</span> <code>${escapeHtml(id)}</code> — repair verified, resolved</li>`),
+        ...(p.repairFailed ?? []).map((r) => `<li><span class="err">✗</span> <code>${escapeHtml(r.id)}</code> — repair failed: ${escapeHtml(r.evidence)}</li>`),
+        ...(p.folded ?? []).map((r) => `<li><code>${escapeHtml(r.id)}</code> — restated by the Reviewer, not a new finding</li>`),
+      ].join('');
+      return `<div class="ev"><details open><summary><span class="warn">Builder Reviewer findings</span> · round ${p.round}${p.repairSkippedAtCap ? ' · no further review — the Director decided on the final state' : p.finalRepairNotReviewed ? ' · final repair not re-reviewed' : ''}</summary><div class="body"><ul>${r2}${p.items.map((f) => `<li>${f.id ? `<code>${escapeHtml(f.id)}</code> ` : ''}<span class="sev ${f.severity}">${f.severity}</span><b>${escapeHtml(f.title)}</b>${f.file ? ` — <code>${escapeHtml(f.file)}${f.line ? ':' + f.line : ''}</code>` : ''}<br>${escapeHtml(f.detail)}${f.recommendation ? `<br><i>Recommendation: ${escapeHtml(f.recommendation)}</i>` : ''}</li>`).join('')}</ul></div></details></div>`;
     }
     case 'compaction': {
       const p = e.payload as CompactionPayload;

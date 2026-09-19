@@ -34,7 +34,7 @@ export const claudeCodeDescriptor: ProviderDescriptor = {
     fileOperationEvents: true,
     browserTools: true,
   },
-  roles: ['builder', 'final_repair', 'reviewer', 'director'],
+  roles: ['builder', 'final_repair', 'builder_reviewer', 'director_reviewer', 'director', 'arbiter'],
 };
 
 async function runTurn(req: ProviderTurnRequest): Promise<ProviderTurnResult> {
@@ -54,7 +54,7 @@ async function runTurn(req: ProviderTurnRequest): Promise<ProviderTurnResult> {
   return {
     status: r.stopped ? 'stopped' : r.ok ? 'completed' : 'failed',
     answer: r.resultText,
-    ...(r.sessionId ? { session: { provider: 'claude-code' as const, id: r.sessionId } } : {}),
+    ...(r.sessionId ? { session: { provider: 'claude-code' as const, role: req.role, id: r.sessionId } } : {}),
     ...(r.usage ? { usage: r.usage } : {}),
     ...(r.actualModel ? { actualModel: r.actualModel } : {}),
     durationMs: r.durationMs,

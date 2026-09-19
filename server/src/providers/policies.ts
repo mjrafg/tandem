@@ -32,11 +32,37 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
   },
   // judges the result: inspects everything, changes nothing, and never gets
   // the Builder's app-state tools (which is what keeps a review independent)
+  builder_reviewer: {
+    filesystem: 'read-only',
+    workdirTools: false,
+    browserTools: true,
+    integrationTools: true,
+    directorTools: false,
+  },
+  // judges the Director's decisions: the same read-only posture
+  director_reviewer: {
+    filesystem: 'read-only',
+    workdirTools: false,
+    browserTools: true,
+    integrationTools: true,
+    directorTools: false,
+  },
+  // the historical generic reviewer — identical to builder_reviewer; kept so a
+  // recorded role can still be looked up, never resolved for new work
   reviewer: {
     filesystem: 'read-only',
     workdirTools: false,
     browserTools: true,
     integrationTools: true,
+    directorTools: false,
+  },
+  // decides a Builder/Reviewer disagreement: reads the repository to weigh
+  // evidence, changes nothing, orchestrates nothing
+  arbiter: {
+    filesystem: 'read-only',
+    workdirTools: false,
+    browserTools: false,
+    integrationTools: false,
     directorTools: false,
   },
   // orchestrates: reads the repository, drives sessions through its own tools
@@ -51,4 +77,15 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
 
 export function policyFor(role: AiRole): RoleExecutionPolicy {
   return POLICIES[role];
+}
+
+/**
+ * The role FAMILY tool authorization is filtered by: integration tool grants,
+ * skills and browser buckets are configured per family, so both reviewers
+ * receive "reviewer" tools and both Builder roles receive "builder" tools.
+ * The precise logical role still goes on every record.
+ */
+export function roleFamily(role: AiRole): 'builder' | 'reviewer' {
+  return role === 'builder_reviewer' || role === 'director_reviewer' || role === 'reviewer' || role === 'arbiter' || role === 'director'
+    ? 'reviewer' : 'builder';
 }

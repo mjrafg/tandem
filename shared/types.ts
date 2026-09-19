@@ -8,9 +8,27 @@
  * registry boundary, and canonicalized to these.
  */
 export type Provider = 'claude-code' | 'codex';
+/**
+ * The two ROLE FAMILIES tool authorization is filtered by (integration tool
+ * grants, skills, browser buckets). Precise logical roles map onto these:
+ * builder/final_repair → builder; builder_reviewer/director_reviewer → reviewer.
+ */
 export type RoleName = 'builder' | 'reviewer';
-/** every role the execution layer can run — roles are what, providers are who */
-export type AiRole = RoleName | 'final_repair' | 'director';
+/**
+ * The four independently configured logical roles. The two reviewers are
+ * separate roles with separate configuration: the Builder Reviewer reviews
+ * session output and takes part in the two-round review loop; the Director
+ * Reviewer independently reviews Director-level decisions (plans, recovery).
+ * Neither inherits from the other.
+ */
+export type ConfigurableRole = 'builder' | 'builder_reviewer' | 'director' | 'director_reviewer';
+/**
+ * Every role the execution layer can run — roles are what, providers are who.
+ * `arbiter` is the Director in a narrower seat: deciding a Builder / Builder
+ * Reviewer disagreement. `reviewer` is the historical generic reviewer, kept
+ * only so recorded events stay typed.
+ */
+export type AiRole = 'builder' | 'final_repair' | 'builder_reviewer' | 'director_reviewer' | 'director' | 'arbiter' | 'reviewer';
 export type Effort = 'low' | 'medium' | 'high';
 export const EFFORTS: Effort[] = ['low', 'medium', 'high'];
 
@@ -76,6 +94,8 @@ export interface ProviderDescriptor {
  */
 export interface ProviderSessionRef {
   provider: Provider;
+  /** the logical role that created it — a Builder Reviewer thread is never resumed as a Builder */
+  role: AiRole;
   id: string;
 }
 
@@ -136,7 +156,7 @@ export interface RoleConfig {
   model: string;
   effort: Effort;
   instructions: string;
-  /** reviewer only — whether review runs after code changes */
+  /** builder_reviewer only — whether review runs after code changes */
   enabled?: boolean;
 }
 
@@ -173,7 +193,16 @@ export interface DirectorRoleConfig {
 }
 
 export interface AppSettings {
-  roles: { builder: RoleConfig; reviewer: RoleConfig; director?: DirectorRoleConfig };
+  roles: {
+    builder: RoleConfig;
+    /** reviews Builder session output; runs the two-round review loop */
+    builder_reviewer: RoleConfig;
+    director?: DirectorRoleConfig;
+    /** independently reviews Director-level decisions (plans, recovery) */
+    director_reviewer: RoleConfig;
+    /** the pre-split generic Reviewer — read once by the migration, then removed */
+    reviewer?: RoleConfig;
+  };
   finalRepairInstructions: string;
   sharedInstructions: string;
   context: ContextConfig;
@@ -259,6 +288,8 @@ export type EventKind =
   | 'file_change'
   | 'ai_call'
   | 'findings'
+  | 'finding_dispositions'
+  | 'arbitration'
   | 'compaction'
   | 'run'
   | 'error'
@@ -331,14 +362,16 @@ export interface AiUsage {
 }
 
 export interface AiCallPayload {
-  /** 'compactor' appears only in historical events from the removed Compactor role */
-  role: RoleName | 'final_repair' | 'compactor' | 'director';
+  /** the precise logical role; 'reviewer' and 'compactor' appear only in historical events */
+  role: AiRole | 'compactor';
   provider: Provider;
   model: string;
   effort: Effort;
   status: StepStatus;
   request: { prompt: string; system?: string };
   response?: { text: string; usage?: AiUsage };
+  /** the provider-native session/thread this call created or continued, when it reported one */
+  sessionId?: string;
   cli?: { command: string; cwd: string; exitCode: number | null };
   startedAt: number;
   durationMs?: number;
@@ -357,12 +390,45 @@ export interface AiCallPayload {
   tools?: { name: string; description: string }[];
 }
 
+/**
+ * What kind of thing a finding is. The Reviewer names it so the Builder and
+ * the Director can tell a defect from a preference without re-deriving it:
+ * a `preference` or `metadata` finding is advice by definition and never a
+ * blocking product defect on its own.
+ */
+export type FindingCategory =
+  | 'defect' | 'regression' | 'security' | 'missing_requirement' | 'risk'
+  | 'preference' | 'metadata' | 'policy_conflict';
+
+/**
+ * Where a finding stands. One finding keeps one identity from the round that
+ * raised it through the Builder's answer, the repair, the verification round,
+ * the Director's decision and the final state — it is never re-created as a
+ * new finding because it appeared in a later round.
+ */
+export type FindingState =
+  | 'open'                 // raised, not yet answered
+  | 'accepted' | 'partially_accepted' | 'rejected' | 'cannot_address'   // the Builder's answer
+  | 'repaired'             // a repair was made and verified by the Reviewer
+  | 'repair_failed'        // objective verification showed the repair did not work
+  | 'builder_upheld' | 'reviewer_upheld' | 'non_blocking' | 'deferred' | 'different_resolution_required'   // the Director's decision
+  | 'resolved';            // closed: verified, or judged not to need a change
+
+/** whether a claimed repair was ever checked */
+export type RepairStatus = 'pending' | 'claimed' | 'verified' | 'failed' | 'unverified';
+
 export interface Finding {
+  /** stable identity for the task, e.g. F-001; absent only in events recorded before identities existed */
+  id?: string;
   severity: 'major' | 'minor';
   title: string;
   file?: string;
   line?: number;
   detail: string;
+  /** what the Reviewer observed that supports the finding */
+  evidence?: string;
+  category?: FindingCategory;
+  /** a possible resolution — advice, never an instruction */
   recommendation?: string;
 }
 export interface FindingsPayload {
@@ -374,6 +440,115 @@ export interface FindingsPayload {
   finalRepairNotReviewed?: boolean;
   /** the review cap was reached, so no repair was started for these findings */
   repairSkippedAtCap?: boolean;
+  /** a verification round: which earlier findings it was asked to verify, and which stood closed */
+  scope?: { verify: string[]; closed: string[] };
+  /** round 2: earlier findings the Reviewer confirmed resolved */
+  verified?: string[];
+  /** round 2: earlier findings whose repair objectively failed — updated in place, never re-raised */
+  repairFailed?: { id: string; evidence: string }[];
+  /** round 2: "new" items that were in fact known findings, folded back onto their original id */
+  folded?: { id: string; restated: string }[];
+}
+
+/**
+ * The Builder's answer to one finding. Findings are advice: the Builder owns
+ * the implementation and says, per finding, what it did with it. `assumed`
+ * marks a disposition Tandem filled in because the Builder gave none — the
+ * historical behavior, where every finding was treated as accepted.
+ */
+export type FindingDisposition = 'accepted' | 'partially_accepted' | 'rejected' | 'cannot_address';
+export interface FindingResponse {
+  /** the finding's stable id */
+  id?: string;
+  /** 1-based position in the findings list it answers */
+  index: number;
+  title: string;
+  severity: Finding['severity'];
+  disposition: FindingDisposition;
+  reason: string;
+  evidence?: string;
+  source: 'builder' | 'assumed';
+}
+export interface DispositionsPayload {
+  /** the review round whose findings these answer */
+  round: number;
+  items: FindingResponse[];
+  /** the final Builder repair pass — nothing after it is re-reviewed */
+  final?: boolean;
+}
+
+/**
+ * The Director's decision on a finding the Builder did not simply accept.
+ * `unresolved` is Tandem's own marker for a decision the Director failed to
+ * give (an unusable reply, a failed call): the finding then stands open and
+ * blocking, and nothing is repaired on nobody's instruction.
+ */
+export type ArbitrationDecision =
+  | 'builder_upheld'                  // the Builder was right not to change it
+  | 'reviewer_upheld'                 // a real problem; a change is required
+  | 'non_blocking'                    // valid, but does not block this session or its integration
+  | 'deferred'                        // valid; to be handled later, not here
+  | 'different_resolution_required'   // neither position is right; the Director states the outcome
+  | 'unresolved';
+export interface ArbitrationItem {
+  id?: string;
+  index: number;
+  title: string;
+  /** where the finding stood when the Director looked at it */
+  state?: FindingState;
+  repairStatus?: RepairStatus;
+  severity: Finding['severity'];
+  /** what the Builder said, when it said anything */
+  disposition?: FindingDisposition;
+  decision: ArbitrationDecision;
+  reason: string;
+  /** for reviewer_upheld / different_resolution: what must actually change */
+  required?: string;
+  /** does this finding block the session's result as it stands */
+  blocking: boolean;
+}
+export interface ArbitrationPayload {
+  round: number;
+  items: ArbitrationItem[];
+  /** true when no repair round remains, so upheld findings stay open rather than being repaired */
+  atCap?: boolean;
+  /** the Director's FINAL decision on the session's result: may it proceed as it stands */
+  final?: boolean;
+  /** the Director's overall verdict on the final state */
+  proceed?: boolean;
+  summary?: string;
+  /** the Director call itself failed; every item is `unresolved` */
+  failed?: string;
+}
+
+/** One finding's durable lifecycle record for a task (review_findings). */
+export interface ReviewFindingRecord {
+  chatId: string;
+  id: string;
+  taskSeq: number;
+  /** the review round that raised it */
+  round: number;
+  severity: Finding['severity'];
+  category: FindingCategory | null;
+  title: string;
+  file: string | null;
+  line: number | null;
+  detail: string;
+  evidence: string | null;
+  recommendation: string | null;
+  state: FindingState;
+  disposition: FindingDisposition | null;
+  dispositionReason: string | null;
+  dispositionEvidence: string | null;
+  repairStatus: RepairStatus | null;
+  arbitrationDecision: ArbitrationDecision | null;
+  arbitrationReason: string | null;
+  arbitrationRequired: string | null;
+  /** the Director's final word on whether it blocks; null until decided */
+  blocking: boolean | null;
+  /** how many times a later round restated it instead of raising something new */
+  restated: number;
+  updatedAt: number;
 }
 
 export interface CompactionPayload {
@@ -472,6 +647,8 @@ export type EventPayloadMap = {
   file_change: FileChangePayload;
   ai_call: AiCallPayload;
   findings: FindingsPayload;
+  finding_dispositions: DispositionsPayload;
+  arbitration: ArbitrationPayload;
   compaction: CompactionPayload;
   run: RunPayload;
   error: ErrorPayload;
@@ -757,7 +934,8 @@ export interface PdSession {
   /** why a paused session stopped: the user's own stop, a project-wide pause, a Tandem restart, or a provider limit */
   stopReason?: 'user_stop' | 'project_pause' | 'restart' | 'provider_outage' | null;
   resultSummary: string | null;
-  reviewVerdict: 'pass' | 'findings' | null;
+  /** `resolved` = findings were raised and every one was closed by Director arbitration as non-blocking */
+  reviewVerdict: 'pass' | 'findings' | 'resolved' | null;
   /** set while status is awaiting_review: why the review is waiting and when it retries */
   reviewWait?: { reason: string; retryAt: number } | null;
   /** live sub-state derived from the underlying chat (display only) */

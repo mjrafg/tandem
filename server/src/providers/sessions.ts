@@ -12,35 +12,44 @@
  * a fresh session is seeded from it (see engine/workflow builderMessage). That
  * is what "switching provider does not lose the chat" means here.
  */
-import type { Provider, ProviderSessionRef } from '../../../shared/types';
-import { getBuilderSession, getBuilderSessionProvider, setBuilderSession } from '../db';
+import type { AiRole, Provider, ProviderSessionRef } from '../../../shared/types';
+import { getBuilderSession, getBuilderSessionProvider, getBuilderSessionRole, setBuilderSession } from '../db';
 import { providerRegistry } from './registry';
 
 /** The chat's stored session with its owner, or null when it has none. */
 export function storedSessionRef(chatId: string): ProviderSessionRef | null {
   const id = getBuilderSession(chatId);
   if (!id) return null;
-  return { provider: getBuilderSessionProvider(chatId), id };
+  return { provider: getBuilderSessionProvider(chatId), role: getBuilderSessionRole(chatId), id };
 }
 
 export function rememberSession(chatId: string, ref: ProviderSessionRef | undefined | null): void {
   if (!ref?.id) return;
-  setBuilderSession(chatId, ref.id, ref.provider);
+  setBuilderSession(chatId, ref.id, ref.provider, ref.role);
 }
 
 /**
- * The session to hand this provider, or null to start a fresh one.
+ * The session to hand this provider for this role, or nothing to start fresh.
  *
- * Two independent reasons to refuse: the stored session belongs to another
- * backend, or this backend cannot resume sessions at all. Both are ordinary
- * outcomes, not errors.
+ * Three independent reasons to refuse, all ordinary: the stored session belongs
+ * to another provider; it belongs to another logical role (a Builder Reviewer
+ * thread is not the Builder's conversation, whatever backend both use); or
+ * this backend cannot resume sessions at all.
  */
 export function resumableSession(
   stored: ProviderSessionRef | null | undefined,
   provider: Provider,
-): { session?: ProviderSessionRef; switchedFrom?: Provider } {
+  role: AiRole,
+): { session?: ProviderSessionRef; switchedFrom?: Provider; otherRole?: AiRole } {
   if (!stored?.id) return {};
   if (stored.provider !== provider) return { switchedFrom: stored.provider };
+  if (!sameRoleLineage(stored.role, role)) return { otherRole: stored.role };
   if (!providerRegistry.get(provider).descriptor.capabilities.resumableSessions) return {};
   return { session: stored };
+}
+
+/** the Builder and its final repair are one conversation; every other role is its own */
+function sameRoleLineage(a: AiRole, b: AiRole): boolean {
+  const norm = (r: AiRole) => (r === 'final_repair' ? 'builder' : r);
+  return norm(a) === norm(b);
 }

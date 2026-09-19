@@ -6,11 +6,11 @@ import type { Chat, PdSession, ProjectRun, SessionsPayload } from '../../../shar
 import { config } from '../config';
 import { db, getChat, getEvent, getProject, rowToChat, setGitStateRow } from '../db';
 import { addEvent, broadcastChat, deriveTitle, setChatRunning, setChatTitle, updateEvent } from '../events';
-import { directorSystemText, getPrompt, renderPrompt } from '../prompts';
+import { directorSystemText, getPrompt, renderPrompt, reviewerSystemText } from '../prompts';
 import { getSettings } from '../settings';
 import { findOrCreateProject } from '../projectRoutes';
 import { executeRole, providerLabel, providerShortLabel } from '../providers/executor';
-import { resolveBuilderRole, resolveDirectorRoleConfig, resolveReviewerRole } from '../providers/resolve';
+import { resolveBuilderRole, resolveDirectorReviewerRole, resolveDirectorRoleConfig } from '../providers/resolve';
 import { rememberSession, storedSessionRef } from '../providers/sessions';
 import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, repoBusyBy, stopRun } from '../engine/run';
 import { computeUsage, shouldAutoCompact } from '../context';
@@ -278,7 +278,12 @@ async function runDirectorTurn(runId: string, message: string): Promise<(Provide
 
 // ---------------------------------------------------------------- review plumbing
 
-/** Run one independent review (the configured Reviewer, whatever backend that is) on an orchestration artifact. */
+/**
+ * Run one independent review of a Director decision, by the DIRECTOR REVIEWER
+ * — a role of its own, configured separately from the Builder Reviewer and
+ * never falling back to it. A configuration problem is reported as exactly
+ * that, and the Director learns the review did not happen.
+ */
 async function reviewArtifact(runId: string, prompt: string, round: number): Promise<{ verdict: 'pass' | 'findings'; findingsText: string } | null> {
   const run = getRun(runId);
   if (!run) return null;
@@ -292,21 +297,26 @@ async function reviewArtifact(runId: string, prompt: string, round: number): Pro
   try {
     const h = new RunHandle(ctx, chat, project, []);
     h.status('Reviewer is checking the Director\'s plan/decision…');
-    const reviewer = resolveReviewerRole(settings);
+    const resolved = resolveDirectorReviewerRole(settings);
+    if (!resolved.ok) {
+      addEvent(chat.id, 'error', { message: 'Director Reviewer could not run', detail: resolved.error, source: 'director_reviewer', retryable: true });
+      return null;
+    }
+    const reviewer = resolved.role;
     const result = await executeRole({
       handle: h,
-      role: 'reviewer',
+      role: 'director_reviewer',
       provider: reviewer.provider,
       model: reviewer.model,
       effort: reviewer.effort,
-      systemPrompt: '',
+      systemPrompt: reviewerSystemText(settings, 'director_reviewer'),
       userPrompt: `${prompt}\n\n${getPrompt('reviewer.output_format')}`,
       cwd: project.rootPath,
       emitActivity: false,
       timeoutMs: REVIEW_TIMEOUT,
     });
     if (result.status !== 'completed') {
-      addEvent(chat.id, 'error', { message: 'Reviewer could not run', detail: result.failure?.message, source: 'reviewer', retryable: true });
+      addEvent(chat.id, 'error', { message: 'Director Reviewer could not run', detail: result.failure?.message, source: 'director_reviewer', retryable: true });
       return null;
     }
     const { verdict, items } = parseVerdict(result.answer);
@@ -625,7 +635,7 @@ async function mergeDependencyContent(runId: string, key: string, workdir: strin
  *  - the integration branch holds nothing beyond those sessions and the base,
  *  - the working tree is clean INCLUDING staged, unstaged and untracked files —
  *    `git status --porcelain` sees all three, a bare `git diff` does not,
- *  - and every completed session carries a Reviewer verdict of `pass`.
+ *  - and every completed session carries a Reviewer `pass` or a Director `resolved`.
  *
  * Anything else — a findings verdict, a missing verdict, a dirty tree, an
  * unmerged branch, no repository — returns a reason and the caller runs the
@@ -638,9 +648,11 @@ async function alreadyIntegrated(
   const completed = sessions.filter((s) => s.status === 'completed');
   if (completed.length === 0) return { ok: false, reason: 'no completed sessions to account for' };
 
-  const unapproved = completed.filter((s) => s.reviewVerdict !== 'pass');
+  // `resolved` = the Director closed every remaining finding as non-blocking;
+  // that is the Director's own approval, recorded per finding in the evidence
+  const unapproved = completed.filter((s) => s.reviewVerdict !== 'pass' && s.reviewVerdict !== 'resolved');
   if (unapproved.length > 0) {
-    return { ok: false, reason: `${unapproved.map((s) => `${s.key} (${s.reviewVerdict ?? 'no verdict recorded'})`).join(', ')} carries no Reviewer PASS` };
+    return { ok: false, reason: `${unapproved.map((s) => `${s.key} (${s.reviewVerdict ?? 'no verdict recorded'})`).join(', ')} carries neither a Reviewer PASS nor a Director resolution` };
   }
 
   for (const s of completed) {
@@ -1008,7 +1020,7 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
       }
     }
     const ready = readySessions(runId);
-    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict === 'pass' ? ' Reviewer verdict: PASS.' : outcome.reviewVerdict === 'findings' ? ' Reviewer verdict: FINDINGS — the review cap was reached, so the findings below stand OPEN and unrepaired; decide whether they need a follow-up session.' : ' NOTE: no reviewer verdict was recorded, so this result carries NO reviewer approval — treat it as unverified when deciding what depends on it.'} Result summary: ${outcome.summary.slice(0, 600) || '(no summary)'}${ready.length ? ` Sessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
+    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict === 'pass' ? ' Reviewer verdict: PASS.' : outcome.reviewVerdict === 'resolved' ? ' Verdict: RESOLVED — the Reviewer raised findings, the Builder answered them, and you (as arbiter) closed every remaining one as non-blocking; the result carries your approval.' : outcome.reviewVerdict === 'findings' ? ' Verdict: FINDINGS — blocking findings stand OPEN (the Director judged them blocking, or they could not be decided); decide whether they need a follow-up session.' : ' NOTE: no reviewer verdict was recorded, so this result carries NO reviewer approval — treat it as unverified when deciding what depends on it.'} Result summary: ${outcome.summary.slice(0, 600) || '(no summary)'}${ready.length ? ` Sessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
   } else if (status === 'paused') {
     // a deliberate user stop is NOT a failure: no needs_attention, no forced
     // recovery review. Whether the PROJECT continues depends on the canonical
@@ -1029,7 +1041,7 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
   }
 }
 
-interface Outcome { phase: string; failed: boolean; timedOut: boolean; summary: string; reviewVerdict: 'pass' | 'findings' | null; errorText: string }
+interface Outcome { phase: string; failed: boolean; timedOut: boolean; summary: string; reviewVerdict: 'pass' | 'findings' | 'resolved' | null; errorText: string }
 
 function readOutcome(chatId: string, sinceSeq: number): Outcome {
   const rows = db.prepare('SELECT kind, payload FROM events WHERE chat_id = ? AND seq > ? ORDER BY seq').all(chatId, sinceSeq) as any[];
@@ -1048,6 +1060,13 @@ function readOutcome(chatId: string, sinceSeq: number): Outcome {
     if (r.kind === 'run' && ['finished', 'stopped', 'failed'].includes(p.phase)) phase = p.phase;
     if (r.kind === 'assistant_message' && (p.text ?? '').trim()) summary = p.text.trim();
     if (r.kind === 'findings') reviewVerdict = p.verdict;
+    // the Director's decision on the remaining findings comes AFTER the
+    // findings event it judges: none blocking → the result is resolved; any
+    // blocking (or undecided) → the findings stand
+    if (r.kind === 'arbitration' && reviewVerdict === 'findings') {
+      const items = Array.isArray(p.items) ? p.items : [];
+      reviewVerdict = items.some((a: any) => a.blocking) ? 'findings' : 'resolved';
+    }
     if (r.kind === 'error') {
       const text = `${p.message}${p.detail ? ` — ${p.detail}` : ''}`.slice(0, 400);
       if (FAIL_MESSAGES.has(p.message)) { failed = true; errorText = text; }
@@ -1184,8 +1203,9 @@ function deriveLive(chatId: string): { builder: string | null; reviewer: string 
       if ((p.role === 'builder' || p.role === 'final_repair') && builder == null) {
         builder = p.status === 'running' ? 'working' : p.status === 'done' ? 'finished' : p.status;
       }
-      if (p.role === 'reviewer' && reviewer == null) reviewer = p.status === 'running' ? 'reviewing' : p.status;
+      if ((p.role === 'reviewer' || p.role === 'builder_reviewer') && reviewer == null) reviewer = p.status === 'running' ? 'reviewing' : p.status;
     }
+    if (r.kind === 'arbitration' && reviewer == null) reviewer = (Array.isArray(p.items) && p.items.some((a: any) => a.blocking)) ? 'findings' : 'accepted';
     if (r.kind === 'findings' && reviewer == null) reviewer = p.verdict === 'pass' ? 'accepted' : 'findings';
   }
   return { builder, reviewer, note };

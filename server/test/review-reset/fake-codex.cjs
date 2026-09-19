@@ -65,5 +65,18 @@ if (isSession && String(n) === String(process.env.FAKE_CODEX_SLEEP_ON_CALL || ''
 }
 const findings = isSession && n <= Number(process.env.FAKE_FINDINGS_FOR || 2);
 emit({ type: 'thread.started', thread_id: 't-' + n }); emit({ type: 'turn.started' });
-emit({ type: 'item.completed', item: { type: 'agent_message', text: findings ? `1. [major] Round ${n} finding — a.txt\n   The file needs another change.\n   Recommendation: change it again` : 'PASS' } });
+const category = process.env.FAKE_FINDING_CATEGORY || 'defect';
+const isRound2 = /# Round 2 is not round 1 again/.test(stdin);
+const verifySection = (stdin.split('# What this round verifies')[1] || '').split('# Closed by')[0];
+const knownIds = [...new Set((verifySection.match(/\bF-\d{3}\b/g) || []))];
+let text;
+if (isRound2 && knownIds.length) {
+  const mode = process.env.FAKE_R2 || (findings ? 'new' : 'resolved');
+  if (mode === 'resolved') text = `PASS\n${knownIds.map((id) => `RESOLVED ${id} — re-ran the check; it passes now`).join('\n')}`;
+  else if (mode === 'repair_failed') text = `FINDINGS\n${knownIds.map((id) => `REPAIR_FAILED ${id} — re-ran the check; it still fails the same way`).join('\n')}`;
+  else text = `FINDINGS\n${knownIds.map((id) => `RESOLVED ${id} — verified`).join('\n')}\n1. [minor] Round ${n} new finding — b.txt\n   A different file has a new problem.\n   Evidence: b.txt line 1\n   Category: defect\n   Recommendation: fix b.txt`;
+} else {
+  text = findings ? `1. [major] Round ${n} finding — a.txt\n   The file needs another change.\n   Evidence: a.txt line 1 still reads the old value\n   Category: ${category}\n   Recommendation: change it again` : 'PASS';
+}
+emit({ type: 'item.completed', item: { type: 'agent_message', text } });
 emit({ type: 'turn.completed', usage: { input_tokens: 1000, output_tokens: 20, reasoning_output_tokens: 0 } });

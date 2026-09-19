@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AiRole, AiUsage, Effort } from '../../../../shared/types';
 import type { RoleExecutionPolicy } from '../types';
+import { roleFamily } from '../policies';
 import { config, internalBase, shotsDir } from '../../config';
 import { addEvent, appendAssistantText, beginAssistantMessage, finishAssistantMessage, updateEvent } from '../../events';
 import { catalogForRole, hasIntegrationTools } from '../../integrations/exec';
@@ -151,7 +152,8 @@ export async function runCodexTurn(h: RunHandle, opts: {
   // integration tools the admin has allowed for this role (the gateway
   // executes nothing itself — Tandem's execution layer enforces role access
   // again server-side, so this stays true even if the config were tampered with)
-  const withExt = opts.policy.integrationTools && fs.existsSync(extScript) && hasIntegrationTools(opts.role);
+  const family = roleFamily(opts.role);
+  const withExt = opts.policy.integrationTools && fs.existsSync(extScript) && hasIntegrationTools(family);
   const withDirector = opts.policy.directorTools && fs.existsSync(directorScript);
   // a Director session's first Builder turn names itself through a workdir tool
   const nameSession = opts.nameSession
@@ -164,8 +166,10 @@ export async function runCodexTurn(h: RunHandle, opts: {
     TANDEM_CHAT_ID: h.chat.id,
     TANDEM_INTERNAL_TOKEN: config.internalToken,
     TANDEM_SHOTS_DIR: shotsDir,
-    TANDEM_BROWSER_ROLE: opts.role,
-    TANDEM_ROLE: opts.role,
+    // tool servers filter by role FAMILY (see roleFamily); records carry the precise role
+    TANDEM_BROWSER_ROLE: family,
+    TANDEM_ROLE: family,
+      TANDEM_LOGICAL_ROLE: opts.role,
     TANDEM_TOOL_TEXT: toolTextEnv(),
     TANDEM_ATTACHMENTS_DIR: path.join(config.dataDir, 'attachments'),
     ...(nameSession ? { TANDEM_NAME_SESSION: '1' } : {}),
@@ -216,7 +220,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
       ...(withWorkdir || withBrowser
         ? await servedToolRecord([...(withWorkdir ? ['tandem'] : []), ...(withBrowser ? ['tandem_browser'] : [])])
         : []),
-      ...(withExt ? catalogForRole(opts.role).map((t) => ({ name: t.name, description: t.description })) : []),
+      ...(withExt ? catalogForRole(family).map((t) => ({ name: t.name, description: t.description })) : []),
     ]
     : []; // fallback path serves no MCP servers at all
   const fullPrompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n${opts.prompt}` : opts.prompt;
@@ -316,8 +320,9 @@ export async function runCodexTurn(h: RunHandle, opts: {
       TANDEM_CHAT_ID: h.chat.id,
       TANDEM_INTERNAL_TOKEN: config.internalToken,
       TANDEM_SHOTS_DIR: shotsDir,
-      TANDEM_BROWSER_ROLE: opts.role,
-      TANDEM_ROLE: opts.role,
+      TANDEM_BROWSER_ROLE: family,
+      TANDEM_ROLE: family,
+      TANDEM_LOGICAL_ROLE: opts.role,
       TANDEM_TOOL_TEXT: toolTextEnv(),
     },
     stdinData: fullPrompt,
@@ -342,6 +347,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
     status: stopped ? 'stopped' : ok ? 'done' : 'failed',
     durationMs,
     response: lastText || usage ? { text: lastText, usage } : undefined,
+    ...(threadId ? { sessionId: threadId } : {}),
     cli: { command: cliShown, cwd: opts.cwd, exitCode: proc.exitCode },
     ...(error ? { error } : {}),
   });

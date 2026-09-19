@@ -41,7 +41,7 @@ export const codexDescriptor: ProviderDescriptor = {
     fileOperationEvents: true,
     browserTools: true,
   },
-  roles: ['builder', 'final_repair', 'reviewer', 'director'],
+  roles: ['builder', 'final_repair', 'builder_reviewer', 'director_reviewer', 'director', 'arbiter'],
 };
 
 async function runTurn(req: ProviderTurnRequest): Promise<ProviderTurnResult> {
@@ -61,7 +61,7 @@ async function runTurn(req: ProviderTurnRequest): Promise<ProviderTurnResult> {
   return {
     status: r.stopped ? 'stopped' : r.ok ? 'completed' : 'failed',
     answer: r.text,
-    ...(r.threadId ? { session: { provider: 'codex' as const, id: r.threadId } } : {}),
+    ...(r.threadId ? { session: { provider: 'codex' as const, role: req.role, id: r.threadId } } : {}),
     ...(r.usage ? { usage: r.usage } : {}),
     durationMs: r.durationMs,
     ...(!r.ok && !r.stopped ? { failure: classifyCodexFailure(r.error) } : {}),

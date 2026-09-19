@@ -16,7 +16,7 @@ const switchNoted = new Set<string>();
 
 export async function executeRole(req: RoleExecutionRequest): Promise<ProviderTurnResult> {
   const adapter = providerRegistry.get(req.provider);
-  const { session, switchedFrom } = resumableSession(req.session, req.provider);
+  const { session, switchedFrom } = resumableSession(req.session, req.provider, req.role);
 
   // A provider change is a visible fact about the run, not a silent downgrade:
   // the conversation continues from Tandem's own history, but the backend's

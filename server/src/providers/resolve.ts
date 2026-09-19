@@ -21,9 +21,10 @@ export interface ResolvedRole {
 }
 
 /** The provider Tandem used before roles could choose one. */
-export const LEGACY_PROVIDER: Record<'builder' | 'reviewer' | 'director', Provider> = {
+export const LEGACY_PROVIDER: Record<'builder' | 'builder_reviewer' | 'director_reviewer' | 'director', Provider> = {
   builder: 'claude-code',
-  reviewer: 'codex',
+  builder_reviewer: 'codex',
+  director_reviewer: 'codex',
   director: 'claude-code',
 };
 
@@ -38,7 +39,7 @@ function fallbackModel(provider: Provider): string {
  * before providers were selectable resolve to exactly what they did before.
  */
 function coerce(
-  role: 'builder' | 'reviewer' | 'director',
+  role: 'builder' | 'builder_reviewer' | 'director_reviewer' | 'director',
   provider: unknown,
   model: unknown,
   effort: Effort,
@@ -62,9 +63,27 @@ export function resolveBuilderRole(settings: AppSettings, chatId?: string): Reso
   };
 }
 
-export function resolveReviewerRole(settings: AppSettings): ResolvedRole {
-  const r = settings.roles.reviewer;
-  return coerce('reviewer', r.provider, r.model, r.effort);
+/** The Builder Reviewer: reviews session output, runs the two-round loop. */
+export function resolveBuilderReviewerRole(settings: AppSettings): ResolvedRole {
+  const r = settings.roles.builder_reviewer;
+  return coerce('builder_reviewer', r.provider, r.model, r.effort);
+}
+
+/**
+ * The Director Reviewer: independently reviews Director-level decisions.
+ *
+ * Strict on purpose. A misconfigured Director Reviewer is reported as exactly
+ * that — it never quietly runs on the Builder Reviewer's configuration (the
+ * roles are independent) and never quietly runs on a default the operator did
+ * not choose. The caller records the problem and the Director learns the
+ * review did not happen.
+ */
+export function resolveDirectorReviewerRole(settings: AppSettings): { ok: true; role: ResolvedRole } | { ok: false; error: string } {
+  const r = settings.roles.director_reviewer;
+  if (!r) return { ok: false, error: 'No Director Reviewer is configured (Settings → Roles → Director Reviewer).' };
+  const v = validateProviderModel(r.provider, r.model);
+  if (!v.ok) return { ok: false, error: `Director Reviewer configuration problem: ${v.error}` };
+  return { ok: true, role: { provider: v.provider, model: v.model, effort: r.effort } };
 }
 
 /**

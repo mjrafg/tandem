@@ -1,7 +1,7 @@
 import { Eye } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { AppSettings, Effort, Provider, ProviderDescriptor, RoleConfig, RoleName } from '@shared/types';
+import type { AppSettings, ConfigurableRole, Effort, Provider, ProviderDescriptor, RoleConfig } from '@shared/types';
 import { EFFORTS } from '@shared/types';
 import { api } from '../../../api';
 import { Field, Modal, SelectBox, Spinner, Toggle } from '../../ui';
@@ -14,15 +14,22 @@ import { descriptorFor, modelForProvider, providerOptions, useProviders } from '
 // does not follow anyone's. The provider list and each provider's models come
 // from the server's registry (/api/providers); nothing here knows a model name.
 
-const ROLE_INFO: Record<RoleName, { title: string; blurb: string; dot: string }> = {
+type CardRole = Exclude<ConfigurableRole, 'director'>;
+
+const ROLE_INFO: Record<CardRole, { title: string; blurb: string; dot: string }> = {
   builder: {
     title: 'Builder',
-    blurb: 'Does the actual work — investigates, edits, runs, verifies. These settings drive ordinary chats; Project Director sessions run on the Builder Agent the Director assigns.',
+    blurb: 'Does the actual work — investigates, edits, runs, verifies — and OWNS the implementation: Reviewer findings are advice it answers, not orders. These settings drive ordinary chats; Project Director sessions run on the Builder Agent the Director assigns.',
     dot: 'bg-builder',
   },
-  reviewer: {
-    title: 'Reviewer',
-    blurb: 'Independently evaluates each result against your request — changed files when there are any, otherwise the answer itself. Verifies with its own tools inside a read-only jail; max two rounds.',
+  builder_reviewer: {
+    title: 'Builder Reviewer',
+    blurb: 'Independently verifies each session result and reports defects with evidence. Advisory: the Builder answers each finding, the Director arbitrates disagreements. Two rounds at most — round 2 looks for new problems and failed repairs, never re-argues settled ones.',
+    dot: 'bg-reviewer',
+  },
+  director_reviewer: {
+    title: 'Director Reviewer',
+    blurb: 'Independently reviews the Project Director\'s own decisions — the master plan, replanning, significant recovery. A separate role with its own configuration: it never inherits from the Builder Reviewer, and it does not arbitrate sessions.',
     dot: 'bg-reviewer',
   },
 };
@@ -37,8 +44,9 @@ export function RolesPage() {
   return (
     <>
       <PageHeader title="Roles">
-        The three AI roles and what each one runs on. Provider, model, reasoning effort and extra instructions are
-        chosen per role, independently — moving one role to another provider changes nothing about the others.
+        Four AI roles, each on its own provider, model and reasoning effort — chosen independently, so changing one
+        never changes another. Builder owns implementation; Builder Reviewer advises and verifies it; Director
+        arbitrates their disagreements and owns delivery; Director Reviewer independently reviews the Director.
       </PageHeader>
 
       <div className="space-y-3">
@@ -47,7 +55,7 @@ export function RolesPage() {
             The provider list could not be loaded ({providerError}); the selectors below show stored values only.
           </div>
         )}
-        {(Object.keys(ROLE_INFO) as RoleName[]).map((role) => (
+        {(['builder', 'builder_reviewer'] as CardRole[]).map((role) => (
           <RoleCard
             key={role}
             role={role}
@@ -66,6 +74,14 @@ export function RolesPage() {
             d.roles.director = { ...(d.roles.director ?? { model: '' }), ...patch };
           })}
           onPreview={() => setPromptRole('director')}
+        />
+
+        <RoleCard
+          role="director_reviewer"
+          cfg={draft.roles.director_reviewer}
+          providers={providers}
+          onChange={(patch) => set((d) => Object.assign(d.roles.director_reviewer, patch))}
+          onPreview={() => setPromptRole('director_reviewer')}
         />
 
         <div className="card px-4 py-3.5">
@@ -107,7 +123,7 @@ export function RolesPage() {
 }
 
 function RoleCard({ role, cfg, providers, onChange, onPreview }: {
-  role: RoleName;
+  role: CardRole;
   cfg: RoleConfig;
   providers: ProviderDescriptor[];
   onChange: (patch: Partial<RoleConfig>) => void;
@@ -119,7 +135,7 @@ function RoleCard({ role, cfg, providers, onChange, onPreview }: {
       <div className="mb-1 flex items-center gap-2">
         <span className={`h-[8px] w-[8px] shrink-0 rounded-full ${info.dot}`} />
         <span className="min-w-0 truncate text-[13.5px] font-semibold">{info.title}</span>
-        {role === 'reviewer' && (
+        {role === 'builder_reviewer' && (
           <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-3">
             <button
               type="button"
@@ -146,7 +162,7 @@ function RoleCard({ role, cfg, providers, onChange, onPreview }: {
         <Field label="Additional instructions" hint="appended to the built-in role prompt">
           <textarea
             className="input min-h-[56px] resize-y text-[13px]"
-            placeholder={role === 'builder' ? 'e.g. Prefer minimal diffs. Always run the test suite after changes.' : 'e.g. Treat missing tests for changed code as a minor finding.'}
+            placeholder={role === 'builder' ? 'e.g. Prefer minimal diffs.' : role === 'director_reviewer' ? 'e.g. Flag any milestone without a testable acceptance criterion.' : 'e.g. Treat missing tests for changed code as a minor finding.'}
             value={cfg.instructions}
             onChange={(e) => onChange({ instructions: e.target.value })}
           />
@@ -165,7 +181,7 @@ function RoleCard({ role, cfg, providers, onChange, onPreview }: {
  * default), so the form can never submit a pair the server would refuse.
  */
 function ProviderModelEffort({ role, label, providers, provider, model, effort, modelHint, modelPlaceholder, onChange }: {
-  role: RoleName | 'director';
+  role: ConfigurableRole;
   label: string;
   providers: ProviderDescriptor[];
   provider: Provider;
@@ -273,7 +289,7 @@ export function PromptPreviewModal({ role, onClose }: { role: string | null; onC
     return () => { cancelled = true; };
   }, [role]);
 
-  const label = role === 'final_repair' ? 'Final repair' : role ? role.charAt(0).toUpperCase() + role.slice(1) : '';
+  const label = role === 'final_repair' ? 'Final repair' : role === 'builder_reviewer' ? 'Builder Reviewer' : role === 'director_reviewer' ? 'Director Reviewer' : role ? role.charAt(0).toUpperCase() + role.slice(1) : '';
   return (
     <Modal open={!!role} onClose={onClose} title={`Effective prompt — ${label}`} width={640}>
       {prompt == null ? (

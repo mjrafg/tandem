@@ -156,7 +156,16 @@ async function runBuilder() {
     const until = Date.now() + 10 * 60_000;
     while (Date.now() < until) { try { execSync('sleep 5'); } catch {} }
   }
-  const text = `Session work done (${did}).`;
+  let text = `Session work done (${did}).`;
+  // Findings are advice: when the engine asks for dispositions, answer every
+  // numbered finding. FAKE_DISPOSITION picks the word (default accepted), so a
+  // scenario can make the Builder reject with evidence and send it to the Director.
+  if (/FINDING 1: accepted \| partially_accepted/.test(stdin)) {
+    const n = (stdin.match(/^\s*\d+\.\s*(F-\d{3} )?\[(major|minor)\]/gm) || []).length || 1;
+    const isFinalPass = /FINAL repair pass/.test(stdin);
+    const word = (isFinalPass && process.env.FAKE_DISPOSITION_FINAL) || process.env.FAKE_DISPOSITION || 'accepted';
+    text += '\n\n' + Array.from({ length: n }, (_, i) => `FINDING ${i + 1}: ${word}\nReason: ${word === 'rejected' ? 'the finding enforces a generated brief line, not a user requirement' : 'fixed as the finding describes'}\nEvidence: ${word === 'rejected' ? 'git log shows commits attributed to the runtime that made them' : 'a.txt now holds the corrected content'}`).join('\n');
+  }
   emit({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
   // FAKE_BIG_CONTEXT: report a context far past the auto-compact ceiling, for the Builder too
   const bcr = process.env.FAKE_BIG_CONTEXT ? 800000 : 4000;
@@ -177,13 +186,51 @@ function runReviewer() {
   if (isSession) { const f = path.join(process.env.FAKE_STATE_DIR || '/tmp', 'session-review-count'); try { n = Number(fs.readFileSync(f, 'utf8')) || 0; } catch {} n += 1; fs.writeFileSync(f, String(n)); }
   try { fs.appendFileSync(path.join(process.env.FAKE_STATE_DIR || '/tmp', 'claude-review-prompts.log'), `=====PROMPT kind=${isSession ? 'session' : 'other'} n=${n}=====\n${stdin}\n`); } catch {}
   const findings = isSession && n <= Number(process.env.FAKE_FINDINGS_FOR || 2);
-  const text = findings ? `1. [major] Round ${n} finding — a.txt\n   The file needs another change.\n   Recommendation: change it again` : 'PASS';
+  // round 2 speaks about known findings by id: FAKE_R2 = resolved | repair_failed | new (default: resolved
+  // when the engine asked for verification, else a new finding — the historical shape)
+  const isRound2 = /# Round 2 is not round 1 again/.test(stdin);
+  // the ids to speak about are the ones the engine asked this round to verify
+  const verifySection = (stdin.split('# What this round verifies')[1] || '').split('# Closed by')[0];
+  const knownIds = [...new Set((verifySection.match(/\bF-\d{3}\b/g) || []))];
+  let text;
+  if (isRound2 && knownIds.length) {
+    const mode = process.env.FAKE_R2 || (findings ? 'new' : 'resolved');
+    if (mode === 'resolved') text = `PASS\n${knownIds.map((id) => `RESOLVED ${id} — re-ran the check; it passes now`).join('\n')}`;
+    else if (mode === 'repair_failed') text = `FINDINGS\n${knownIds.map((id) => `REPAIR_FAILED ${id} — re-ran the check; it still fails the same way`).join('\n')}`;
+    else text = `FINDINGS\n${knownIds.map((id) => `RESOLVED ${id} — verified`).join('\n')}\n1. [minor] Round ${n} new finding — b.txt\n   A different file has a new problem.\n   Evidence: b.txt line 1\n   Category: defect\n   Recommendation: fix b.txt`;
+  } else {
+    text = findings ? `1. [major] Round ${n} finding — a.txt\n   The file needs another change.\n   Evidence: a.txt line 1 still reads the old value\n   Category: ${process.env.FAKE_FINDING_CATEGORY || 'defect'}\n   Recommendation: change it again` : 'PASS';
+  }
   emit({ type: 'system', subtype: 'init', session_id: 'fake-review-' + n, model: 'fake-model' });
   emit({ type: 'result', subtype: 'success', is_error: false, result: text, num_turns: 1, session_id: 'fake-review-' + n,
     usage: { input_tokens: 800, output_tokens: 30, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, iterations: [] } });
   process.exit(0);
 }
 
-if (process.env.TANDEM_ROLE === 'reviewer') runReviewer();
+// ------------------------------------------------- Arbiter (the Director deciding)
+// FAKE_ARBITER picks the decision word for every finding (default reviewer_upheld,
+// which keeps the historical strictness); FAKE_ARBITER_REQUIRED sets the Required line.
+function runArbiter() {
+  try { fs.appendFileSync(path.join(process.env.FAKE_STATE_DIR || '/tmp', 'arbiter-prompts.log'), `=====ARBITRATION=====\n${stdin}\n`); } catch {}
+  const n = (stdin.match(/^\s*\d+\.\s*\[(major|minor)\]/gm) || []).length || 1;
+  const word = process.env.FAKE_ARBITER || 'reviewer_upheld';
+  const isFinal = /This is the FINAL decision/.test(stdin);
+  // the final decision may use a different word (FAKE_ARBITER_FINAL) — e.g. accept unverified repairs as non_blocking
+  const w = isFinal && process.env.FAKE_ARBITER_FINAL ? process.env.FAKE_ARBITER_FINAL : word;
+  const blk = w === 'reviewer_upheld' || w === 'different_resolution_required';
+  const text = Array.from({ length: n }, (_, i) => `FINDING ${i + 1}: ${w}\nReason: ${w === 'builder_upheld' ? 'the brief line was Director-generated, not a user requirement; the Builder attributed truthfully' : w === 'deferred' || w === 'non_blocking' ? 'valid observation with no acceptance impact for this session' : 'the finding is a real defect against the request'}\nRequired: ${blk ? (process.env.FAKE_ARBITER_REQUIRED || 'the file must hold the corrected content') : 'none'}\nBlocking: ${blk ? 'yes' : 'no'}`).join('\n')
+    + (isFinal ? `\nPROCEED: ${blk ? 'no' : 'yes'} — ${blk ? 'a real defect remains' : 'the result is acceptable as it stands'}` : '');
+  emit({ type: 'system', subtype: 'init', session_id: 'fake-arbiter', model: 'fake-model' });
+  emit({ type: 'result', subtype: 'success', is_error: false, result: text, num_turns: 1, session_id: 'fake-arbiter',
+    usage: { input_tokens: 600, output_tokens: 40, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, iterations: [] } });
+  process.exit(0);
+}
+
+// The engine hands every CLI its precise logical role (TANDEM_LOGICAL_ROLE) beside
+// the tool-grant family (TANDEM_ROLE). The Director's family is "reviewer" (read-only
+// tools), so the family alone cannot tell a Director turn from a review.
+const LOGICAL = process.env.TANDEM_LOGICAL_ROLE || process.env.TANDEM_ROLE || 'builder';
+if (LOGICAL === 'arbiter') runArbiter();
+else if (LOGICAL === 'builder_reviewer' || LOGICAL === 'director_reviewer' || LOGICAL === 'reviewer') runReviewer();
 else if (isDirector) void runDirector();
 else void runBuilder();

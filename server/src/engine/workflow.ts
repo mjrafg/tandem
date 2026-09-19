@@ -1,16 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { config } from '../config';
-import type { AiCallPayload, AttachmentMeta, Finding, FindingsPayload } from '../../../shared/types';
+import type { AiCallPayload, ArbitrationItem, AttachmentMeta, Finding, FindingResponse, FindingsPayload, ReviewFindingRecord } from '../../../shared/types';
 import { computeUsage, recentConversation, shouldAutoCompact } from '../context';
 import { db, getChat, getEvent, getProject } from '../db';
 import { addEvent, updateEvent } from '../events';
 import { getSettings } from '../settings';
 import { builderSystemText, getPrompt, renderPrompt, reviewerSystemText } from '../prompts';
 import { executeRole, providerLabel, providerShortLabel } from '../providers/executor';
-import { resolveBuilderRole, resolveReviewerRole } from '../providers/resolve';
+import { resolveBuilderRole, resolveBuilderReviewerRole } from '../providers/resolve';
 import { rememberSession, resumableSession, storedSessionRef } from '../providers/sessions';
 import { performNativeCompaction } from './providerContext';
+import { arbitrate, dispositionsAsText, mandatedAsText, parseDispositions, type Disputed } from './arbitration';
+import { applyArbitration, applyDispositions, closedFindings as closedFindingRecords, listFindings, markRepairClaimed, markRepairFailed, markRestated, markVerified, raiseFindings, unsettledFindings } from './findings';
 import {
   RunHandle, type RunCtx, isRunning, markDanglingStopped, registerCtx, releaseCtx, repoBusyBy, setChatRunning, stopRun,
 } from './run';
@@ -26,7 +28,7 @@ export { setGitWorkflow } from './gitFlow';
 const BUILDER_TIMEOUT = 30 * 60_000;
 const REVIEW_TIMEOUT = 15 * 60_000;
 /** the review-loop cap — enforced by the orchestration below, not by prompts */
-import { MAX_REVIEW_ROUNDS, deriveLegacyLedger, getLedger, openTask, recordRepair, recordReview, revisionOf, type ReviewLedger } from './reviewLedger';
+import { MAX_REVIEW_ROUNDS, deriveLegacyLedger, getLedger, openTask, recordClosedFindings, recordRepair, recordResolution, recordReview, revisionOf, type ReviewLedger } from './reviewLedger';
 
 /** wording for the changed-files note comes from the prompt registry */
 interface ReviewDelta { files: string[]; note: string }
@@ -140,7 +142,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   // the stored session is continued only by the provider that created it; a
   // Builder moved to another backend starts fresh and is seeded from the record
   const stored = storedSessionRef(h.chat.id);
-  const resume = resumableSession(stored, builderCfg.provider).session?.id ?? null;
+  const resume = resumableSession(stored, builderCfg.provider, 'builder').session?.id ?? null;
 
   // ---- Builder does the work (its own decisions, its own tools)
   const first = await executeRole({
@@ -175,7 +177,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     if (delta) h.status('Reviewer skipped by user for this request.');
     return true;
   }
-  if (h.settings.roles.reviewer.enabled === false) return true;
+  if (h.settings.roles.builder_reviewer.enabled === false) return true;
 
   const subject = subjectFor(delta, first.answer);
   if (!subject) return true; // the run produced neither changes nor a response
@@ -191,7 +193,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     return true;
   }
   // a revision the Reviewer already accepted has nothing new to judge
-  if (ledger.lastVerdict === 'pass' && ledger.reviewedRevision === revisionOf(revisionHash(h.project.rootPath, captureWorktree(h.project.rootPath)), subject)) {
+  if ((ledger.lastVerdict === 'pass' || ledger.lastVerdict === 'resolved') && ledger.reviewedRevision === revisionOf(revisionHash(h.project.rootPath, captureWorktree(h.project.rootPath)), subject)) {
     h.status('This result is the revision the Reviewer already accepted — nothing new to review.');
     return true;
   }
@@ -209,15 +211,28 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
 type PhaseOutcome = 'done' | 'awaiting' | 'stopped' | 'failed';
 
 /**
- * The capped review loop from a given round onward: review → repair → last
- * review. Entered at round 1 by every normal run, and re-entered at the
- * PERSISTED round by a review retry after a Reviewer provider outage — so a
- * failed provider attempt never consumes a round, and a successful retry
- * continues the exact same policy.
+ * The bounded review loop. Entered at round 1 by every normal run, and
+ * re-entered at the PERSISTED round by a review retry after a Reviewer
+ * provider outage — so a failed provider attempt never consumes a round, and a
+ * successful retry continues the exact same policy.
  *
- * A repair only ever runs when a review round remains to verify it. When the
- * cap is reached the findings are reported and the work is preserved as it
- * stands; the loop no longer spends a Builder invocation nobody will check.
+ *   review 1  →  Builder response (fixes what it accepts, answers the rest)
+ *             →  Director arbitration of what the Builder rejected/escalated;
+ *                a repair only for what the Director requires
+ *   review 2  →  verifies the repaired findings by id, looks for NEW problems;
+ *                a repair that did not hold reopens the SAME finding as
+ *                repair_failed — it is never raised again as a new one
+ *             →  ONE final Builder pass over new findings, failed repairs and
+ *                Director-required changes
+ *             →  the Director's FINAL decision: what blocks, may it proceed
+ *
+ * There is no third review. The final pass is not re-reviewed: a repair it
+ * claims is recorded as unverified and the Director decides whether that
+ * uncertainty is acceptable — recorded, never assumed.
+ *
+ * Every finding keeps one identity (F-001…) from the round that raised it to
+ * its final state, in the review_findings registry; the events are the
+ * timeline of how it got there.
  */
 async function runReviewPhase(h: RunHandle, userText: string, opts: {
   round: 1 | 2;
@@ -229,14 +244,34 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   retry: boolean;
   /** repair context rebuilt from events when a retry re-enters at a later round */
   replayRepair?: RepairContext;
+  /** verification scope rebuilt from the registry when a retry re-enters at round 2 */
+  replayScope?: VerifyScope;
   /** the continuation/recovery instruction this run was started with, if any */
   steering?: string;
 }): Promise<PhaseOutcome> {
   // repairs run on the SAME snapshot the first turn used — an admin editing the
   // Agent template mid-session never changes what this session executes
   const builderCfg = resolveBuilderRole(h.settings, h.chat.id);
+  const taskSeq = getLedger(h.chat.id)?.taskSeq ?? 0;
   let subject2 = opts.subject;
   let repairContext: RepairContext | undefined = opts.replayRepair;
+  let scope: VerifyScope | undefined = opts.replayScope;
+
+  const builderTurn = (message: string) => executeRole({
+    handle: h,
+    role: 'builder',
+    provider: builderCfg.provider,
+    model: builderCfg.model,
+    effort: builderCfg.effort,
+    systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
+    userPrompt: message,
+    cwd: h.project.rootPath,
+    session: storedSessionRef(h.chat.id),
+    timeoutMs: opts.builderTimeout,
+  });
+  const closedList = () => closedFindingRecords(h.chat.id, taskSeq).map((c) => ({ id: c.id, title: c.title, severity: c.severity, decision: c.state as 'builder_upheld' | 'non_blocking' | 'deferred', reason: c.arbitrationReason ?? '', round: c.round }));
+  const describe = (f: ReviewFindingRecord) => `${f.id} [${f.severity}] ${f.title}`;
+  const findingOf = (f: ReviewFindingRecord): Finding => ({ id: f.id, severity: f.severity, title: f.title, detail: f.detail, ...(f.file ? { file: f.file } : {}), ...(f.line ? { line: f.line } : {}), ...(f.evidence ? { evidence: f.evidence } : {}), ...(f.category ? { category: f.category } : {}), ...(f.recommendation ? { recommendation: f.recommendation } : {}) });
 
   if (opts.round === 1) {
     const round1 = await review(h, userText, opts.subject, 1, opts.steering);
@@ -245,59 +280,119 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
     if ('failure' in round1) return reviewerFailed(h, userText, 1, opts.subject, round1.failure, opts.retry);
     if (round1.verdict === 'pass') return 'done';
 
-    // ---- repair
     // The state the Reviewer just judged: content signatures, the commit it saw,
     // and private copies of whatever git cannot baseline. Compared after the
-    // repair this yields the paths the repair actually touched — which git
+    // Builder's response this yields the paths it actually touched — which git
     // porcelain cannot tell apart from the edit before it — and a diff that
     // survives the Builder committing its own repair.
     const reviewedBaseline = captureReviewBaseline(h.project.rootPath, path.join(config.dataDir, 'tmp'));
+    const changedSoFar = () => {
+      const paths = changedSince(reviewedBaseline.signatures, signatureMap(h.project.rootPath));
+      const rd = repairDiff(h.project.rootPath, reviewedBaseline, paths, 12_000);
+      return { paths, diff: rd.text, note: rd.note };
+    };
 
     // A due compaction belongs HERE, at a boundary where no CLI is live and the
-    // session is resumable, rather than only after the whole run: the repair and
-    // the last review would otherwise each carry the full pre-compaction
+    // session is resumable, rather than only after the whole run: the response
+    // and the last review would otherwise each carry the full pre-compaction
     // context. Inside a run the chat is legitimately "running", so this boundary
     // call says so explicitly.
     await maybeAutoCompact(h.chat.id, { atRunBoundary: true });
     h.refresh();
 
-    const repair = await executeRole({
-      handle: h,
-      role: 'builder',
-      provider: builderCfg.provider,
-      model: builderCfg.model,
-      effort: builderCfg.effort,
-      systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
-      userPrompt: renderPrompt(
-        opts.subject.kind === 'answer' ? 'repair.answer_findings_message' : 'repair.findings_message',
-        { findings: findingsAsText(round1.items) },
-      ),
-      cwd: h.project.rootPath,
-      session: storedSessionRef(h.chat.id),
-      timeoutMs: opts.builderTimeout,
-    });
-    rememberSession(h.chat.id, repair.session);
+    // ---- the Builder answers the findings: fixes what it accepts, its own way
+    const response = await builderTurn([
+      renderPrompt(opts.subject.kind === 'answer' ? 'repair.answer_findings_message' : 'repair.findings_message', { findings: findingsAsText(round1.items) }),
+      getPrompt('repair.disposition_format'),
+    ].join('\n\n'));
+    rememberSession(h.chat.id, response.session);
     recordRepair(h.chat.id, false);
-    if (h.stopped) return 'stopped';
-    if (repair.status !== 'completed') {
-      h.error({ message: 'Builder repair call failed', detail: repair.failure?.message, source: 'builder', retryable: true });
+    if (h.stopped) { releaseReviewBaseline(reviewedBaseline); return 'stopped'; }
+    if (response.status !== 'completed') {
+      releaseReviewBaseline(reviewedBaseline);
+      h.error({ message: 'Builder repair call failed', detail: response.failure?.message, source: 'builder', retryable: true });
       return 'failed';
     }
+    const dispositions = parseDispositions(response.answer, round1.items);
+    applyDispositions(h.chat.id, dispositions);
+    addEvent(h.chat.id, 'finding_dispositions', { round: 1, items: dispositions }, { runId: h.ctx.runId });
+    const count = (d: FindingResponse['disposition']) => dispositions.filter((x) => x.disposition === d).length;
+    h.status(`The Builder answered the ${dispositions.length} finding${dispositions.length === 1 ? '' : 's'}: `
+      + `${count('accepted')} accepted, ${count('partially_accepted')} partially accepted, ${count('rejected')} rejected, ${count('cannot_address')} escalated`
+      + (dispositions.some((d) => d.source === 'assumed') ? ' (findings it did not answer are recorded as accepted)' : '') + '.');
 
-    // what the repair actually changed, independent of what it said it changed
-    const changedPaths = changedSince(reviewedBaseline.signatures, signatureMap(h.project.rootPath));
-    const rd = repairDiff(h.project.rootPath, reviewedBaseline, changedPaths, 12_000);
+    // ---- the Director decides what the Builder did not accept
+    let handoff = response.answer;
+    let mandated: ArbitrationItem[] = [];
+    let undecided: ArbitrationItem[] = [];
+    const disputed: Disputed[] = dispositions
+      .filter((d) => d.disposition === 'rejected' || d.disposition === 'cannot_address')
+      .map((d) => ({ finding: round1.items[d.index - 1], response: d, index: d.index }));
+    if (disputed.length > 0) {
+      h.status(`${disputed.length} finding${disputed.length === 1 ? '' : 's'} the Builder rejected or escalated go${disputed.length === 1 ? 'es' : ''} to the Project Director for a decision.`);
+      const sofar = changedSoFar();
+      const arb = await arbitrate(h, {
+        round: 1, disputed, originalRequest: userText, steering: opts.steering,
+        builderHandoff: response.answer, changedPaths: sofar.paths, diff: sofar.diff, diffNote: sofar.note,
+        closed: closedList(), final: false,
+      });
+      applyArbitration(h.chat.id, arb.items, { final: false });
+      addEvent(h.chat.id, 'arbitration', arb, { runId: h.ctx.runId });
+      if (h.stopped) { releaseReviewBaseline(reviewedBaseline); return 'stopped'; }
+      const closed = arb.items.filter((a) => a.decision === 'builder_upheld' || a.decision === 'non_blocking' || a.decision === 'deferred');
+      recordClosedFindings(h.chat.id, closed.map((a) => ({ id: a.id, title: a.title, severity: a.severity, decision: a.decision as 'builder_upheld' | 'non_blocking' | 'deferred', reason: a.reason, round: 1 })));
+      mandated = arb.items.filter((a) => a.decision === 'reviewer_upheld' || a.decision === 'different_resolution_required');
+      undecided = arb.items.filter((a) => a.decision === 'unresolved');
+      h.status(arb.failed
+        ? `The Director could not decide (${arb.failed}); the ${disputed.length} disputed finding${disputed.length === 1 ? ' stands' : 's stand'} open.`
+        : `The Director decided: ${arb.items.map((a) => `${a.id ?? a.title} — ${a.decision.replace(/_/g, ' ')}`).join('; ')}.`);
+
+      // ---- only what the Director requires is repaired
+      if (mandated.length > 0) {
+        const repair = await builderTurn(renderPrompt('repair.mandated_message', { findings: mandatedAsText(mandated) }));
+        rememberSession(h.chat.id, repair.session);
+        recordRepair(h.chat.id, false);
+        if (h.stopped) { releaseReviewBaseline(reviewedBaseline); return 'stopped'; }
+        if (repair.status !== 'completed') {
+          releaseReviewBaseline(reviewedBaseline);
+          h.error({ message: 'Builder repair call failed', detail: repair.failure?.message, source: 'builder', retryable: true });
+          return 'failed';
+        }
+        markRepairClaimed(h.chat.id, mandated.map((a) => a.id!).filter(Boolean), 'claimed');
+        handoff = `${response.answer}\n\n--- after the Director's decision ---\n${repair.answer}`;
+      }
+    }
+
+    // ---- what round 2 verifies, and what stands closed
+    const changed = changedSoFar();
     releaseReviewBaseline(reviewedBaseline);
+    const toVerify = listFindings(h.chat.id, taskSeq).filter((f) => f.round === 1 && f.repairStatus === 'claimed');
+    const verify = toVerify.map((f) => `${describe(f)} — ${f.state === 'reviewer_upheld' || f.state === 'different_resolution_required' ? `required by the Director: ${f.arbitrationRequired ?? f.arbitrationReason ?? ''}` : `${(f.disposition ?? '').replace(/_/g, ' ')}: ${f.dispositionReason ?? ''}`}`);
     repairContext = {
       previousFindings: round1.items,
       previousReview: round1.text,
-      handoff: repair.answer,
-      changedPaths,
-      diff: rd.text,
-      diffNote: rd.note,
+      handoff,
+      changedPaths: changed.paths,
+      diff: changed.diff,
+      diffNote: changed.note,
+      dispositions,
     };
+    scope = { verify, closed: closedList().map((c) => `${c.id ?? ''} [${c.severity}] ${c.title} — ${c.decision.replace(/_/g, ' ')}: ${c.reason}`) };
 
-    // the repair may have produced files — re-check the disk before deciding
+    if (verify.length === 0) {
+      // nothing was changed in response to the findings: there is nothing for a
+      // verification round to verify, and spending one would only invite the
+      // same findings again
+      if (undecided.length > 0) {
+        h.status(`Nothing to verify: no finding was accepted, and ${undecided.length} could not be decided — ${undecided.length === 1 ? 'it stands' : 'they stand'} OPEN and blocking. The work is preserved as the Reviewer saw it.`);
+        return 'done';
+      }
+      recordResolution(h.chat.id);
+      h.status('Review complete: the Director closed every finding (Builder upheld, non-blocking or deferred) and nothing was changed, so no verification round is needed. This result carries the Director\'s approval.');
+      return 'done';
+    }
+
+    // the response may have produced files — re-check the disk before deciding
     // what the last round reviews
     h.refresh();
     const delta2 = reviewGate(opts.before, opts.startDir, h.project.rootPath, h, true);
@@ -308,26 +403,107 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
       ? ({ kind: 'changes', ...currentDelta(h) } as ReviewSubject)
       : opts.retry && opts.subject.kind === 'changes'
         ? opts.subject
-        : subjectFor(null, repair.answer) ?? opts.subject;
+        : subjectFor(null, handoff) ?? opts.subject;
   }
 
-  // ---- round 2 (the last review)
-  const round2 = await review(h, userText, subject2, 2, opts.steering, repairContext);
+  // ---- round 2: verify the repairs by id, find what is genuinely new
+  const round2 = await review(h, userText, subject2, 2, opts.steering, repairContext, scope);
   if (h.stopped || 'stopped' in round2) return 'stopped';
   if ('outage' in round2) return recordReviewWait(h, userText, 2, subject2, round2.outage);
   if ('failure' in round2) return reviewerFailed(h, userText, 2, subject2, round2.failure, opts.retry);
   if (round2.verdict === 'pass') return 'done';
 
-  // ---- the cap is reached: report the findings, repair nothing
-  // A repair with no round left to verify it is a Builder invocation whose
-  // result nobody checks. The workflow used to spend one anyway and label it
-  // "not re-reviewed"; the open findings are the honest deliverable instead.
+  // ---- ONE final Builder pass: new findings, failed repairs, Director-required changes
+  const finalBaseline = captureReviewBaseline(h.project.rootPath, path.join(config.dataDir, 'tmp'));
+  const registry = listFindings(h.chat.id, taskSeq);
+  const failed = registry.filter((f) => f.state === 'repair_failed');
+  const fresh = round2.items; // the genuinely new ones (restated known findings were folded by review())
+  const stillRequired = registry.filter((f) => (f.state === 'reviewer_upheld' || f.state === 'different_resolution_required') && f.repairStatus === 'pending');
+  const finalItems: Finding[] = [
+    ...failed.map(findingOf).map((f) => ({ ...f, detail: `${f.detail}\n   (repair_failed: the Reviewer found the earlier repair did not hold — ${f.evidence ?? 'see evidence'})` })),
+    ...stillRequired.map(findingOf),
+    ...fresh,
+  ];
+  h.status(`Round 2 left ${fresh.length} new finding${fresh.length === 1 ? '' : 's'}${failed.length ? `, ${failed.length} failed repair${failed.length === 1 ? '' : 's'}` : ''}. `
+    + 'The Builder gets one final pass; nothing after it is re-reviewed, and the Director decides on the final state.');
+  const finalPass = await builderTurn([renderPrompt('repair.final_message', { findings: findingsAsText(finalItems) }), getPrompt('repair.disposition_format')].join('\n\n'));
+  rememberSession(h.chat.id, finalPass.session);
+  recordRepair(h.chat.id, true);
+  if (h.stopped) { releaseReviewBaseline(finalBaseline); return 'stopped'; }
+  let finalHandoff = '';
+  let finalDispositions: FindingResponse[] = [];
+  if (finalPass.status !== 'completed') {
+    // a failed final pass changes nothing about the findings; the Director
+    // still decides on the state as it stands
+    h.error({ message: 'Builder repair call failed', detail: finalPass.failure?.message, source: 'builder', retryable: true });
+    finalHandoff = `(the final Builder pass failed: ${finalPass.failure?.message ?? 'unknown error'})`;
+  } else {
+    finalHandoff = finalPass.answer;
+    finalDispositions = parseDispositions(finalPass.answer, finalItems);
+    applyDispositions(h.chat.id, finalDispositions);
+    // whatever it accepted it claims to have repaired — and nothing verifies that
+    markRepairClaimed(h.chat.id, finalDispositions.filter((d) => d.id && (d.disposition === 'accepted' || d.disposition === 'partially_accepted')).map((d) => d.id!), 'unverified');
+    addEvent(h.chat.id, 'finding_dispositions', { round: 2, items: finalDispositions, final: true }, { runId: h.ctx.runId });
+  }
+  const finalChangedPaths = changedSince(finalBaseline.signatures, signatureMap(h.project.rootPath));
+  const finalDiff = repairDiff(h.project.rootPath, finalBaseline, finalChangedPaths, 12_000);
+  releaseReviewBaseline(finalBaseline);
+
+  // ---- the Director's final decision: what blocks, may it proceed
+  const unsettled = unsettledFindings(h.chat.id, taskSeq);
+  const disputedFinal: Disputed[] = unsettled.map((f, i) => ({
+    finding: findingOf(f),
+    response: finalDispositions.find((d) => d.id === f.id) ?? repairContext?.dispositions?.find((d) => d.id === f.id),
+    record: f,
+    index: i + 1,
+  }));
+  h.status(`The Project Director makes the final decision on ${unsettled.length} finding${unsettled.length === 1 ? '' : 's'} (${unsettled.filter((f) => f.repairStatus === 'unverified').length} repaired in the final pass and unverified).`);
+  const arb2 = await arbitrate(h, {
+    round: 2, disputed: disputedFinal, originalRequest: userText, steering: opts.steering,
+    builderHandoff: finalHandoff, changedPaths: finalChangedPaths, diff: finalDiff.text, diffNote: finalDiff.note,
+    closed: closedList(), final: true,
+  });
+  applyArbitration(h.chat.id, arb2.items, { final: true });
+  addEvent(h.chat.id, 'arbitration', arb2, { runId: h.ctx.runId });
+  if (h.stopped) return 'stopped';
+  const closed2 = arb2.items.filter((a) => a.decision === 'builder_upheld' || a.decision === 'non_blocking' || a.decision === 'deferred');
+  recordClosedFindings(h.chat.id, closed2.map((a) => ({ id: a.id, title: a.title, severity: a.severity, decision: a.decision as 'builder_upheld' | 'non_blocking' | 'deferred', reason: a.reason, round: 2 })));
+  const blocking = arb2.items.filter((a) => a.blocking);
   updateEvent(round2.eventId, { repairSkippedAtCap: true });
-  const open = round2.items.map((f) => `${f.severity}: ${f.title}`).join(' · ').slice(0, 600);
-  h.status(`Review complete: ${MAX_REVIEW_ROUNDS} of ${MAX_REVIEW_ROUNDS} rounds spent and the verdict is FINDINGS. `
-    + 'No further repair was started, because no review round remains to verify one — the work is preserved '
-    + `exactly as the Reviewer last saw it. Open findings: ${open || '(see the findings above)'}`);
+  if (blocking.length === 0) {
+    recordResolution(h.chat.id);
+    h.status(`Review complete: ${MAX_REVIEW_ROUNDS} of ${MAX_REVIEW_ROUNDS} rounds spent and the final Builder pass made. The Director's final decision: nothing blocks `
+      + `(${arb2.items.map((a) => `${a.id ?? a.title} — ${a.decision.replace(/_/g, ' ')}`).join('; ') || 'no findings remained'})${arb2.summary ? ` — ${arb2.summary}` : ''}. This result carries the Director's approval.`);
+    return 'done';
+  }
+  const open = blocking.map((a) => `${a.id ?? ''} ${a.severity}: ${a.title} (${a.decision.replace(/_/g, ' ')})`).join(' · ').slice(0, 600);
+  h.status(`Review complete: ${MAX_REVIEW_ROUNDS} of ${MAX_REVIEW_ROUNDS} rounds spent and the final Builder pass made. The Director's final decision: ${blocking.length} finding${blocking.length === 1 ? '' : 's'} block${blocking.length === 1 ? 's' : ''} this result`
+    + (closed2.length > 0 ? `, ${closed2.length} closed as non-blocking` : '') + `${arb2.summary ? ` — ${arb2.summary}` : ''}. No further review runs; the work is preserved as it stands. Blocking: ${open}`);
   return 'done';
+}
+
+/** two findings are the same finding when their titles match, ignoring case and punctuation */
+function sameFinding(a: string, b: string): boolean {
+  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9؀-ۿ]+/g, ' ').trim();
+  return norm(a) === norm(b);
+}
+
+/** what a verification round is asked to verify, and what stands closed */
+interface VerifyScope { verify: string[]; closed: string[] }
+
+/**
+ * Rebuild the verification scope after a restart, from the registry: what was
+ * claimed repaired (and by whose decision), and what the Director closed.
+ */
+function replayScope(chatId: string): VerifyScope | undefined {
+  const taskSeq = getLedger(chatId)?.taskSeq ?? 0;
+  const all = listFindings(chatId, taskSeq);
+  if (all.length === 0) return undefined;
+  const closed = all.filter((f) => ['builder_upheld', 'non_blocking', 'deferred'].includes(f.state));
+  return {
+    verify: all.filter((f) => f.round === 1 && f.repairStatus === 'claimed').map((f) => `${f.id} [${f.severity}] ${f.title} — ${(f.disposition ?? f.state).replace(/_/g, ' ')}: ${f.dispositionReason ?? f.arbitrationRequired ?? ''}`),
+    closed: closed.map((c) => `${c.id} [${c.severity}] ${c.title} — ${c.state.replace(/_/g, ' ')}: ${c.arbitrationReason ?? ''}`),
+  };
 }
 
 /**
@@ -345,10 +521,12 @@ function replayRepairContext(chatId: string, round: number): RepairContext | und
   const rows = db.prepare("SELECT kind, payload, seq FROM events WHERE chat_id = ? AND kind = 'ai_call' ORDER BY seq").all(chatId) as { payload: string; seq: number }[];
   const calls = rows.map((r) => ({ seq: r.seq, p: JSON.parse(r.payload) as AiCallPayload }));
   const lastOf = (role: string) => [...calls].reverse().find((c) => c.p.role === role)?.p.response?.text ?? '';
+  const disp = db.prepare("SELECT payload FROM events WHERE chat_id = ? AND kind = 'finding_dispositions' ORDER BY seq DESC LIMIT 1").get(chatId) as { payload: string } | undefined;
   return {
     previousFindings: prev.items,
-    previousReview: lastOf('reviewer'),
+    previousReview: lastOf('builder_reviewer') || lastOf('reviewer'),
     handoff: lastOf('builder'),
+    dispositions: disp ? ((JSON.parse(disp.payload) as { items: FindingResponse[] }).items ?? []) : [],
     changedPaths: [],
     diff: null,
     diffNote: '(this review is a retry after an interruption, so the file-level comparison against the reviewed '
@@ -399,8 +577,8 @@ function reviewerFailed(
       reason: 'Reviewer failure (will retry)', detail: error, retryAt: Date.now() + 15 * 60_000,
     });
   }
-  h.error({ message: 'Reviewer could not run', detail: error, source: 'reviewer', retryable: true });
-  h.status('The review loop stopped because the Reviewer failed — the result above has NOT been reviewed.');
+  h.error({ message: 'Reviewer could not run', detail: error, source: 'builder_reviewer', retryable: true });
+  h.status('The review loop stopped because the Builder Reviewer failed — the result above has NOT been reviewed.');
   return 'done';
 }
 
@@ -434,10 +612,10 @@ export function startReviewRetry(chatId: string): Promise<void> | null {
     try {
       // an admin who turned the Reviewer OFF dissolved the review requirement:
       // finish the run the way a reviewer-off run finishes — loudly unreviewed
-      if (h.settings.roles.reviewer.enabled === false) {
+      if (h.settings.roles.builder_reviewer.enabled === false) {
         deletePendingReview(chatId);
         h.gitFlow = (await adoptRepo(h)) ?? undefined;
-        h.status('The Reviewer was disabled in Settings while this review was waiting — the pending review was dropped and the result remains unreviewed.');
+        h.status('The Builder Reviewer was disabled in Settings while this review was waiting — the pending review was dropped and the result remains unreviewed.');
         if (!ctx.stopped) await finishGitRun(h, pending.userText);
         addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
         return;
@@ -467,6 +645,7 @@ export function startReviewRetry(chatId: string): Promise<void> | null {
       const outcome = await runReviewPhase(h, originalRequest, {
         round,
         replayRepair: round > 1 ? replayRepairContext(chatId, round) : undefined,
+        replayScope: round > 1 ? replayScope(chatId) : undefined,
         steering: ledger && pending.userText.trim() !== ledger.originalRequest.trim() ? pending.userText : undefined,
         subject: pending.subject,
         before: captureWorktree(h.project.rootPath),
@@ -551,6 +730,8 @@ interface RepairContext {
   diff: string | null;
   /** why there is no diff — shown verbatim, so absent evidence reads as absent */
   diffNote: string;
+  /** the Builder's answer to each finding of the previous round */
+  dispositions?: FindingResponse[];
 }
 
 type ReviewResult =
@@ -559,9 +740,9 @@ type ReviewResult =
   | { failure: string }                                             // any other Reviewer failure
   | { stopped: true };
 
-async function review(h: RunHandle, originalRequest: string, subject: ReviewSubject, round: number, steering?: string, repair?: RepairContext): Promise<ReviewResult> {
-  h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is checking the repaired result…');
-  const cfg = resolveReviewerRole(h.settings);
+async function review(h: RunHandle, originalRequest: string, subject: ReviewSubject, round: number, steering?: string, repair?: RepairContext, scope?: VerifyScope): Promise<ReviewResult> {
+  h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is verifying the repaired findings…');
+  const cfg = resolveBuilderReviewerRole(h.settings);
   const evidence = subject.kind === 'changes'
     ? renderPrompt('reviewer.changed_section', {
       changed_files_note: subject.note,
@@ -586,8 +767,14 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
         : '- (no file content changed since the reviewed state)',
       repair_diff: repair.diff ?? repair.diffNote,
     })] : []),
+    ...(repair?.dispositions?.length ? [`# How the Builder answered each finding\n${dispositionsAsText(repair.dispositions)}`] : []),
+    ...(scope ? [renderPrompt('reviewer.verification_section', {
+      verify_findings: scope.verify.join('\n') || '(nothing was accepted or required — this round verifies the result as it stands)',
+      closed_findings: scope.closed.join('\n') || '(none)',
+    })] : []),
     renderPrompt('reviewer.round_section', { review_round: round, max_review_rounds: MAX_REVIEW_ROUNDS }),
     getPrompt('reviewer.output_format'),
+    ...(round >= 2 ? [getPrompt('reviewer.round2_format')] : []),
   ].join('\n\n');
 
   // mark the phase so Builder-only app-state tools are refused server-side
@@ -600,7 +787,7 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
     // either of them runs on
     result = await executeRole({
       handle: h,
-      role: 'reviewer',
+      role: 'builder_reviewer',
       provider: cfg.provider,
       model: cfg.model,
       effort: cfg.effort,
@@ -622,8 +809,38 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
     return { failure: result.failure?.message ?? 'The Reviewer failed.' };
   }
 
-  const { verdict, items } = parseVerdict(result.answer);
-  const payload: FindingsPayload = { verdict, round, items };
+  const taskSeq = getLedger(h.chat.id)?.taskSeq ?? 0;
+  const known = listFindings(h.chat.id, taskSeq);
+  const parsed = parseVerdict(result.answer, round >= 2 ? known : undefined);
+  // round 2 speaks about earlier findings by id, and may restate one instead of
+  // raising something new — that restatement folds back onto the original
+  const verifiedIds = parsed.verified.filter((id) => known.some((k) => k.id === id));
+  const failedRepairs = parsed.repairFailed.filter((r) => known.some((k) => k.id === r.id));
+  const folded: { id: string; restated: string }[] = [];
+  const fresh: Finding[] = [];
+  for (const it of parsed.items) {
+    const dup = known.find((k) => sameFinding(k.title, it.title));
+    if (dup && round >= 2) folded.push({ id: dup.id, restated: it.title });
+    else fresh.push(it);
+  }
+  // a folded restatement of a repaired finding is evidence the repair did not hold
+  for (const f of folded) {
+    const k = known.find((x) => x.id === f.id)!;
+    if (k.repairStatus === 'claimed' && !failedRepairs.some((r) => r.id === f.id)) failedRepairs.push({ id: f.id, evidence: `restated by the Reviewer in round ${round}: ${f.restated}` });
+  }
+  const items = round >= 2 ? raiseFindings(h.chat.id, taskSeq, round, fresh) : raiseFindings(h.chat.id, taskSeq, round, parsed.items);
+  // a round-2 verdict is PASS only when nothing is new AND no repair failed
+  const verdict: 'pass' | 'findings' = parsed.verdict === 'pass' && failedRepairs.length === 0 ? 'pass' : (items.length === 0 && failedRepairs.length === 0 ? 'pass' : 'findings');
+  if (verifiedIds.length) markVerified(h.chat.id, verifiedIds);
+  if (failedRepairs.length) markRepairFailed(h.chat.id, failedRepairs);
+  if (folded.length) markRestated(h.chat.id, folded.map((f) => f.id));
+  // on round 2, every claimed repair the Reviewer neither confirmed nor failed stays claimed — unverified in truth
+  const payload: FindingsPayload = {
+    verdict, round, items, ...(scope ? { scope } : {}),
+    ...(verifiedIds.length ? { verified: verifiedIds } : {}),
+    ...(failedRepairs.length ? { repairFailed: failedRepairs } : {}),
+    ...(folded.length ? { folded } : {}),
+  };
   // the verdict and the round it consumed are one fact: either both are
   // durable or neither is, so no crash can leave a review spent but unrecorded
   // (or recorded but unspent)
@@ -636,14 +853,25 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
 }
 
 /** Parse the Reviewer's contracted output format (protocol, not intent). */
-export function parseVerdict(text: string): { verdict: 'pass' | 'findings'; items: Finding[] } {
-  const firstLine = text.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? '';
-  if (/^`?PASS`?\b/i.test(firstLine)) return { verdict: 'pass', items: [] };
+export function parseVerdict(text: string, known?: ReviewFindingRecord[]): { verdict: 'pass' | 'findings'; items: Finding[]; verified: string[]; repairFailed: { id: string; evidence: string }[] } {
+  const verified: string[] = [];
+  const repairFailed: { id: string; evidence: string }[] = [];
+  // round-2 lines about earlier findings, by id — parsed wherever they appear
+  for (const raw of text.split('\n')) {
+    const m = raw.trim().replace(/^[*_`>\-\s]+/, '').match(/^(RESOLVED|REPAIR_FAILED)\s+`?(F-\d+)`?\s*(?:[—–\-:]\s*(.*))?$/i);
+    if (!m) continue;
+    if (m[1].toUpperCase() === 'RESOLVED') verified.push(m[2].toUpperCase());
+    else repairFailed.push({ id: m[2].toUpperCase(), evidence: (m[3] ?? '').trim() });
+  }
+  const firstLine = text.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !/^(RESOLVED|REPAIR_FAILED)\b/i.test(l)) ?? '';
+  const explicitFindingsHeader = /^`?FINDINGS`?\b/i.test(firstLine);
+  if (/^`?PASS`?\b/i.test(firstLine)) return { verdict: 'pass', items: [], verified, repairFailed };
 
   const items: Finding[] = [];
   const lines = text.split('\n');
   let current: Finding | null = null;
   for (const raw of lines) {
+    if (/^\s*[*_`>\-\s]*(RESOLVED|REPAIR_FAILED)\s+F-\d+/i.test(raw)) { if (current) { items.push(current); current = null; } continue; }
     const m = raw.match(/^\s*\d+\.\s*\[(major|minor)\]\s*(.+)$/i);
     if (m) {
       if (current) items.push(current);
@@ -660,21 +888,36 @@ export function parseVerdict(text: string): { verdict: 'pass' | 'findings'; item
       continue;
     }
     if (current && raw.trim()) {
-      const rec = raw.trim().match(/^Recommendation:\s*(.+)$/i);
+      const t = raw.trim();
+      const rec = t.match(/^Recommendation:\s*(.+)$/i);
+      const evi = t.match(/^Evidence:\s*(.+)$/i);
+      const cat = t.match(/^Category:\s*`?([a-z_ ]+)`?/i);
       if (rec) current.recommendation = rec[1];
-      else current.detail = current.detail ? `${current.detail} ${raw.trim()}` : raw.trim();
+      else if (evi) current.evidence = evi[1];
+      else if (cat) {
+        const c = cat[1].trim().toLowerCase().replace(/\s+/g, '_');
+        if (['defect', 'regression', 'security', 'missing_requirement', 'risk', 'preference', 'metadata', 'policy_conflict'].includes(c)) current.category = c as Finding['category'];
+      } else current.detail = current.detail ? `${current.detail} ${t}` : t;
     }
   }
   if (current) items.push(current);
   if (items.length === 0) {
+    // round 2 may legitimately consist only of RESOLVED / REPAIR_FAILED lines
+    // (under either header): that is a structured reply about known findings,
+    // not an unstructured one — and a failed repair is a FINDINGS verdict
+    if (known && (verified.length > 0 || repairFailed.length > 0)) {
+      return { verdict: repairFailed.length > 0 || explicitFindingsHeader ? 'findings' : 'pass', items: [], verified, repairFailed };
+    }
     items.push({ severity: 'major', title: 'Reviewer reported issues (unstructured output)', detail: text.trim().slice(0, 4_000) });
   }
-  return { verdict: 'findings', items };
+  return { verdict: 'findings', items, verified, repairFailed };
 }
 
 function findingsAsText(items: Finding[]): string {
   return items.map((f, i) =>
-    `${i + 1}. [${f.severity}] ${f.title}${f.file ? ` — ${f.file}${f.line ? `:${f.line}` : ''}` : ''}\n   ${f.detail}${f.recommendation ? `\n   Recommendation: ${f.recommendation}` : ''}`).join('\n');
+    `${i + 1}. ${f.id ? `${f.id} ` : ''}[${f.severity}] ${f.title}${f.file ? ` — ${f.file}${f.line ? `:${f.line}` : ''}` : ''}\n   ${f.detail}`
+    + (f.evidence ? `\n   Evidence: ${f.evidence}` : '') + (f.category ? `\n   Category: ${f.category}` : '')
+    + (f.recommendation ? `\n   Recommendation: ${f.recommendation}` : '')).join('\n');
 }
 
 // ---------------------------------------------------------------- prompts

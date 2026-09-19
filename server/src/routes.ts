@@ -35,7 +35,9 @@ import { broadcast, sseHandler } from './sse';
 import { getSettings, putSettings, validateRoleConfigs } from './settings';
 import { allProviderHealth } from './providers/executor';
 import { providerRegistry } from './providers/registry';
-import { resolveBuilderRole, resolveDirectorRoleConfig, resolveReviewerRole } from './providers/resolve';
+import { resolveBuilderReviewerRole, resolveBuilderRole, resolveDirectorReviewerRole, resolveDirectorRoleConfig } from './providers/resolve';
+import { deleteFindings, listFindings } from './engine/findings';
+import { getLedger } from './engine/reviewLedger';
 import { allStatus, cancelLogin, forgetToken, getLogin, startLogin, storePastedToken, submitCode, tokenMeta, type AuthProvider } from './providerAuth';
 import { buildRolePreview, exportPrompts, importPrompts, listPrompts, resetPrompt, setPromptOverride } from './prompts';
 import { listTools, resetToolText, setToolText } from './toolText';
@@ -121,6 +123,7 @@ export function registerRoutes(app: FastifyInstance): void {
     deletePendingReview(chat.id); // and no orphaned review retry either
     deleteAgentSnapshot(chat.id);
     deleteLedger(chat.id); // the task's review budget goes with it
+    deleteFindings(chat.id); // and its findings
     db.prepare('DELETE FROM events WHERE chat_id = ?').run(chat.id);
     db.prepare('DELETE FROM chats WHERE id = ?').run(chat.id);
     broadcast({ type: 'chat_deleted', chatId: chat.id });
@@ -636,8 +639,10 @@ export function registerRoutes(app: FastifyInstance): void {
       providers: providerRegistry.list(),
       resolved: {
         builder: resolveBuilderRole(s),
-        reviewer: resolveReviewerRole(s),
+        builder_reviewer: resolveBuilderReviewerRole(s),
         director: resolveDirectorRoleConfig(s),
+        // strict: a problem is reported here as it is everywhere else, never papered over
+        director_reviewer: (() => { const r = resolveDirectorReviewerRole(s); return r.ok ? r.role : { error: r.error }; })(),
       },
     };
   });
@@ -645,8 +650,16 @@ export function registerRoutes(app: FastifyInstance): void {
   /** Installed / signed in, per provider. Spends no model usage. */
   app.get('/api/providers/health', async () => ({ providers: await allProviderHealth() }));
 
+  /** The durable lifecycle of a chat's findings (current task): what Observatory reads. */
+  app.get('/api/chats/:id/findings', async (req, reply) => {
+    const chat = getChat((req.params as any).id);
+    if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
+    const ledger = getLedger(chat.id);
+    return { chatId: chat.id, taskSeq: ledger?.taskSeq ?? null, lastVerdict: ledger?.lastVerdict ?? null, findings: ledger ? listFindings(chat.id, ledger.taskSeq) : [] };
+  });
+
   app.get('/api/settings/effective-prompt', async (req) => {
-    const role = ((req.query as any).role ?? 'builder') as RoleName | 'final_repair';
+    const role = String((req.query as any).role ?? 'builder');
     return { role, prompt: buildRolePreview(role, getSettings()) };
   });
 

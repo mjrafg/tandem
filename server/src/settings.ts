@@ -11,12 +11,21 @@ export const DEFAULT_SETTINGS: AppSettings = {
       effort: 'high',
       instructions: '',
     },
-    reviewer: {
+    // reviews Builder session output — advisory to the Builder, independent
+    builder_reviewer: {
       provider: 'codex',
       model: 'gpt-5.6-sol',
       effort: 'high',
       instructions: '',
       enabled: true,
+    },
+    // independently reviews Director-level decisions — a separate role with
+    // separate configuration; it never inherits from the Builder Reviewer
+    director_reviewer: {
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+      effort: 'high',
+      instructions: '',
     },
   },
   finalRepairInstructions: '',
@@ -72,13 +81,50 @@ export function getSettings(): AppSettings {
   // deep-merge over defaults so new fields appear after upgrades
   const merged = structuredClone(DEFAULT_SETTINGS);
   deepMerge(merged as any, stored as any);
+  // a not-yet-migrated store (read before boot migration ran): split in memory
+  // the same way, so no reader ever sees one reviewer standing in for the other
+  if (stored.roles?.reviewer) {
+    if (!stored.roles.builder_reviewer) merged.roles.builder_reviewer = { ...structuredClone(stored.roles.reviewer) };
+    if (!stored.roles.director_reviewer) { const { enabled: _e, ...rest } = structuredClone(stored.roles.reviewer) as any; merged.roles.director_reviewer = rest; }
+  }
   stripObsolete(merged);
   normalizeProviders(merged);
   return merged;
 }
 
 /** the backend each role ran on before roles could choose one */
-const LEGACY: Record<'builder' | 'reviewer' | 'director', Provider> = { builder: 'claude-code', reviewer: 'codex', director: 'claude-code' };
+const LEGACY: Record<'builder' | 'builder_reviewer' | 'director_reviewer' | 'director', Provider> = {
+  builder: 'claude-code', builder_reviewer: 'codex', director_reviewer: 'codex', director: 'claude-code',
+};
+
+/**
+ * One-time split of the generic Reviewer into two independent roles.
+ *
+ * An installation that predates the split has `roles.reviewer`. Both new roles
+ * start from that same configuration — the Director's plan reviews and the
+ * sessions' reviews were both running on it — and from then on they are
+ * separate settings: changing one never touches the other, and neither reads
+ * the other when it is missing (a missing role gets the shipped default and
+ * is reported, never the sibling's value). The legacy key is removed once
+ * both exist, so nothing can keep reading it.
+ */
+export function migrateReviewerSplit(): void {
+  const stored = kvGet<any>('settings');
+  if (!stored?.roles) return;
+  const legacy = stored.roles.reviewer;
+  let changed = false;
+  if (!stored.roles.builder_reviewer) { stored.roles.builder_reviewer = structuredClone(legacy ?? DEFAULT_SETTINGS.roles.builder_reviewer); changed = true; }
+  if (!stored.roles.director_reviewer) {
+    const { enabled: _enabled, ...rest } = structuredClone(legacy ?? DEFAULT_SETTINGS.roles.director_reviewer) as any;
+    stored.roles.director_reviewer = rest; changed = true;
+  }
+  if (legacy) { delete stored.roles.reviewer; changed = true; }
+  if (changed) {
+    kvSet('settings', stored);
+    console.log(`[tandem] settings: Reviewer split into Builder Reviewer (${stored.roles.builder_reviewer.provider}/${stored.roles.builder_reviewer.model}) `
+      + `and Director Reviewer (${stored.roles.director_reviewer.provider}/${stored.roles.director_reviewer.model}); they are independent from here on`);
+  }
+}
 const PROVIDER_DEFAULT_MODEL: Record<Provider, string> = { 'claude-code': 'claude-opus-5', codex: 'gpt-5.6-sol' };
 
 /**
@@ -92,7 +138,7 @@ const PROVIDER_DEFAULT_MODEL: Record<Provider, string> = { 'claude-code': 'claud
  * on the way IN is validateRoleConfigs; this is the safety net on the way out.
  */
 function normalizeProviders(s: AppSettings): void {
-  for (const role of ['builder', 'reviewer'] as const) {
+  for (const role of ['builder', 'builder_reviewer', 'director_reviewer'] as const) {
     const r = s.roles[role];
     r.provider = canonicalProvider(r.provider) ?? LEGACY[role];
     const owner = providerOfModel(r.model ?? '');
@@ -112,7 +158,7 @@ function normalizeProviders(s: AppSettings): void {
  */
 export function validateRoleConfigs(patch: Partial<AppSettings>): string | null {
   const roles = patch.roles ?? {};
-  for (const role of ['builder', 'reviewer', 'director'] as const) {
+  for (const role of ['builder', 'builder_reviewer', 'director_reviewer', 'director'] as const) {
     const r = (roles as any)[role] as { provider?: unknown; model?: unknown } | undefined;
     if (!r) continue;
     const p = r.provider === undefined ? null : canonicalProvider(r.provider);
@@ -128,6 +174,7 @@ export function validateRoleConfigs(patch: Partial<AppSettings>): string | null 
 /** Configuration for the removed Compactor role no longer affects runtime — drop it. */
 function stripObsolete(s: AppSettings): void {
   delete (s.roles as any).compactor;
+  delete s.roles.reviewer; // split into builder_reviewer / director_reviewer
   for (const key of Object.keys(s.context)) {
     if (!(key in DEFAULT_SETTINGS.context)) delete (s.context as any)[key];
   }

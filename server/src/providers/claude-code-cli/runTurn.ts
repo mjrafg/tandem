@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AiRole, AiUsage, ChangedFile, ChatEvent, Effort } from '../../../../shared/types';
 import type { RoleExecutionPolicy } from '../types';
+import { roleFamily } from '../policies';
 import { config, internalBase, shotsDir } from '../../config';
 import { tokenForEnv } from '../../providerAuth';
 import {
@@ -173,7 +174,8 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   // Admin-configured integration tools, served through the gateway (the
   // gateway loads the role-filtered catalog fresh on every invocation, so
   // new integrations become available without any Tandem restart)
-  const withExt = opts.policy.integrationTools && fs.existsSync(extScript) && hasIntegrationTools(opts.role);
+  const family = roleFamily(opts.role);
+  const withExt = opts.policy.integrationTools && fs.existsSync(extScript) && hasIntegrationTools(family);
   const withDirector = opts.policy.directorTools && fs.existsSync(directorScript);
   if (withWorkdir) mcpServers.tandem = { type: 'stdio', command: process.execPath, args: [workdirScript] };
   if (withBrowser) mcpServers.tandem_browser = { type: 'stdio', command: process.execPath, args: [browserScript] };
@@ -197,7 +199,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     ...(withWorkdir || withBrowser
       ? await servedToolRecord([...(withWorkdir ? ['tandem'] : []), ...(withBrowser ? ['tandem_browser'] : [])])
       : []),
-    ...(withExt ? catalogForRole(opts.role).map((t) => ({ name: t.name, description: t.description })) : []),
+    ...(withExt ? catalogForRole(family).map((t) => ({ name: t.name, description: t.description })) : []),
   ];
   const aiCall = addEvent(h.chat.id, 'ai_call', {
     role: opts.role,
@@ -391,8 +393,11 @@ export async function runClaudeTurn(h: RunHandle, opts: {
       // the read guard must never refuse an image the user deliberately
       // attached to the conversation — that is the whole point of attaching it
       TANDEM_ATTACHMENTS_DIR: path.join(config.dataDir, 'attachments'),
-      TANDEM_BROWSER_ROLE: opts.role,
-      TANDEM_ROLE: opts.role,
+      // tool servers filter by role FAMILY (see roleFamily); the record above
+      // carries the precise role
+      TANDEM_BROWSER_ROLE: family,
+      TANDEM_ROLE: family,
+      TANDEM_LOGICAL_ROLE: opts.role,
       TANDEM_TOOL_TEXT: toolTextEnv(),
     },
     stdinData: opts.message,
@@ -420,6 +425,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     // everything this turn produced is already inside the reported context
     completedSeq: maxSeq(h.chat.id),
     response: resultText || usage ? { text: resultText, usage } : undefined,
+    ...(sessionId ? { sessionId } : {}),
     cli: { command: cliShown, cwd: opts.cwd, exitCode: proc.exitCode },
     ...(error ? { error } : {}),
   });

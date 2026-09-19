@@ -54,15 +54,15 @@ curl -s -c "$CJ" -H 'content-type: application/json' -d '{"email":"mjrafg2@gmail
 echo "== /api/providers"
 PROV=$(api "http://127.0.0.1:$PORT/api/providers")
 check "registry lists codex and claude-code with models and capabilities" "$(node -e 'const r=JSON.parse(process.argv[1]); const ids=r.providers.map(p=>p.id).sort().join(","); console.log(ids==="claude-code,codex" && r.providers.every(p=>p.models.length>0 && typeof p.capabilities.resumableSessions==="boolean") ? 1 : 0)' "$PROV")"
-check "resolved roles are reported" "$(node -e 'const r=JSON.parse(process.argv[1]); console.log(r.resolved.builder.provider && r.resolved.reviewer.provider && r.resolved.director.provider ? 1 : 0)' "$PROV")"
+check "resolved roles are reported for all four roles" "$(node -e 'const r=JSON.parse(process.argv[1]); console.log(r.resolved.builder.provider && r.resolved.builder_reviewer.provider && r.resolved.director.provider && r.resolved.director_reviewer.provider ? 1 : 0)' "$PROV")"
 
 echo "== settings validation"
 R=$(put_settings '{"roles":{"builder":{"provider":"codex","model":"claude-opus-5"}}}')
 check "codex + claude model is refused" "$([[ "$R" == *"not a model"* ]] && echo 1 || echo 0)" "$R"
-R=$(put_settings '{"roles":{"reviewer":{"provider":"openai-api","model":"gpt-5"}}}')
+R=$(put_settings '{"roles":{"builder_reviewer":{"provider":"openai-api","model":"gpt-5"}}}')
 check "unknown provider is refused" "$([[ "$R" == *"Unknown AI provider"* ]] && echo 1 || echo 0)" "$R"
-R=$(put_settings '{"roles":{"builder":{"provider":"codex-cli","model":"gpt-5.6-sol","effort":"low"},"reviewer":{"provider":"claude-code-cli","model":"claude-sonnet-5","effort":"medium","enabled":true},"director":{"provider":"claude-code","model":"claude-opus-5","effort":"high"}}}')
-check "Builder=Codex, Reviewer=Claude (aliases accepted, canonical ids stored)" "$(node -e 'const s=JSON.parse(process.argv[1]); console.log(s.roles.builder.provider==="codex"&&s.roles.reviewer.provider==="claude-code"&&s.roles.reviewer.model==="claude-sonnet-5"?1:0)' "$R")" "$R"
+R=$(put_settings '{"roles":{"builder":{"provider":"codex-cli","model":"gpt-5.6-sol","effort":"low"},"builder_reviewer":{"provider":"claude-code-cli","model":"claude-sonnet-5","effort":"medium","enabled":true},"director":{"provider":"claude-code","model":"claude-opus-5","effort":"high"},"director_reviewer":{"provider":"codex","model":"gpt-5.6-terra","effort":"high"}}}')
+check "Builder=Codex, Builder Reviewer=Claude, Director Reviewer=Codex (aliases accepted, canonical ids stored, independent)" "$(node -e 'const s=JSON.parse(process.argv[1]); console.log(s.roles.builder.provider==="codex"&&s.roles.builder_reviewer.provider==="claude-code"&&s.roles.builder_reviewer.model==="claude-sonnet-5"&&s.roles.director_reviewer.provider==="codex"&&s.roles.director_reviewer.model==="gpt-5.6-terra"&&!("reviewer" in s.roles)?1:0)' "$R")" "$R"
 
 echo "== project + chat"
 P=$(api -d "{\"dirPath\":\"$PROJ\"}" "http://127.0.0.1:$PORT/api/projects/directory"); PID=$(node -e 'console.log(JSON.parse(process.argv[1]).id||"")' "$P")
@@ -72,7 +72,7 @@ C=$(api -d "{\"projectId\":\"$PID\"}" "http://127.0.0.1:$PORT/api/chats"); CHAT=
 echo "== 1. reviewed run: Builder on Codex, review on Claude"
 send "$CHAT" "RECIPE_ONE please" true
 check "Builder ai_call ran on codex" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='ai_call' AND payload LIKE '%\"role\":\"builder\"%' AND payload LIKE '%\"provider\":\"codex\"%'")" -ge 1 ] && echo 1 || echo 0 )"
-check "Reviewer ai_call ran on claude-code with claude-sonnet-5" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='ai_call' AND payload LIKE '%\"role\":\"reviewer\"%' AND payload LIKE '%\"provider\":\"claude-code\"%' AND payload LIKE '%claude-sonnet-5%'")" -ge 1 ] && echo 1 || echo 0 )"
+check "Builder Reviewer ai_call ran on claude-code with claude-sonnet-5 (precise role recorded)" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='ai_call' AND payload LIKE '%\"role\":\"builder_reviewer\"%' AND payload LIKE '%\"provider\":\"claude-code\"%' AND payload LIKE '%claude-sonnet-5%'")" -ge 1 ] && echo 1 || echo 0 )"
 check "the review reached a verdict" "$( [ "$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='findings'")" -ge 1 ] && echo 1 || echo 0 )"
 check "the Codex Builder actually did the work (a.txt exists)" "$( [ -f "$PROJ/a.txt" ] && echo 1 || echo 0 )"
 CX1=$(last_argv "$STATE/codex-argv.log" builder)

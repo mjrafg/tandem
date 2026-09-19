@@ -16,6 +16,16 @@ let stdin = ''; try { stdin = fs.readFileSync(0, 'utf8'); } catch {}
 const dir = process.env.FAKE_STATE_DIR || '/tmp';
 const argv = process.argv.slice(2);
 try { fs.appendFileSync(path.join(dir, 'codex-argv.log'), JSON.stringify({ argv, role: process.env.TANDEM_ROLE ?? null }) + '\n'); } catch {}
+// exactly as codex 0.155 behaves: `exec resume` accepts -m/-c/--json/--skip-git-repo-check
+// but rejects the exec-level options after the subcommand
+{
+  const ri = argv.indexOf('resume');
+  if (ri >= 0) {
+    const after = argv.slice(ri + 1);
+    const bad = after.find((a) => ['-p', '--profile', '--approve-for-me', '-s', '--sandbox'].includes(a));
+    if (bad) { process.stderr.write(`error: unexpected argument '${bad}' found\n\nUsage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]\n`); process.exit(2); }
+  }
+}
 const emitB = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 if (process.env.TANDEM_ROLE === 'builder' || process.env.TANDEM_ROLE === 'final_repair') {
   // `codex exec resume <id> …` continues a thread; anything else starts one

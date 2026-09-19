@@ -87,7 +87,7 @@ check "stored session belongs to codex with the thread id" "$([ "$SP" = codex ] 
 echo "== 2. second message resumes the Codex thread"
 send "$CHAT" "RECIPE_TWO please" false
 CX2=$(last_argv "$STATE/codex-argv.log" builder)
-check "Codex resumed its own thread" "$([[ "$CX2" == exec\ resume\ $SID* ]] && echo 1 || echo 0)" "$CX2"
+check "Codex resumed its own thread, with exec-level options BEFORE the subcommand" "$([[ "$CX2" == exec\ --json* && "$CX2" == *"--approve-for-me"*"resume $SID"* ]] && echo 1 || echo 0)" "$CX2"
 
 echo "== 3. Builder → Claude Code: the Codex thread must not be resumed"
 put_settings '{"roles":{"builder":{"provider":"claude-code","model":"claude-opus-5","effort":"high"}}}' >/dev/null

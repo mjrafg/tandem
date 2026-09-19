@@ -178,11 +178,14 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const writable = readOnly ? [] : [...new Set([h.project.rootPath, opts.cwd])];
   const profileName = writeRoleProfile(opts.role, h.ctx.runId, writable, blocks);
 
-  // `codex exec [options] [PROMPT]` starts a thread; `codex exec resume <id>
-  // [options]` continues one. Options are accepted in both positions.
-  const args = ['exec'];
-  if (opts.resumeThreadId) args.push('resume', opts.resumeThreadId);
-  args.push('--json', '--skip-git-repo-check');
+  // `codex exec [options] [PROMPT]` starts a thread; `codex exec [options]
+  // resume <id> [PROMPT]` continues one. The subcommand accepts only a subset
+  // of the options (-m, -c, --json, --skip-git-repo-check); `-p`,
+  // `--approve-for-me` and `--sandbox` belong to `exec` itself and are
+  // rejected AFTER `resume` ("unexpected argument '-p'" — which is how the
+  // first resumed Director turn died). Every option therefore goes before the
+  // subcommand, where the CLI accepts all of them (verified on 0.155.1).
+  const args = ['exec', '--json', '--skip-git-repo-check'];
   // Permission profile + automatic approval. `--approve-for-me` is the only
   // way this Codex version permits MCP tool calls in exec mode (without it the
   // role is served tools it can never call); it cannot be combined with
@@ -192,6 +195,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
   else args.push('--sandbox', readOnly ? 'read-only' : 'workspace-write');
   if (opts.model.trim()) args.push('-m', opts.model.trim());
   args.push('-c', `model_reasoning_effort="${opts.effort}"`);
+  if (opts.resumeThreadId) args.push('resume', opts.resumeThreadId);
 
   // Tandem's own read-only enforcement around the whole codex process tree —
   // for read-only roles only; a Builder must be able to write its project.

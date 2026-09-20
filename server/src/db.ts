@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import { config } from './config';
-import type { Chat, ChatEvent, EventKind, Project } from '../../shared/types';
+import type { Difficulty, Chat, ChatEvent, EventKind, Project } from '../../shared/types';
 
 export const db = new Database(path.join(config.dataDir, 'tandem.db'));
 db.pragma('journal_mode = WAL');
@@ -83,6 +83,8 @@ try {
 // Project Director: a chat is either a normal session or a project chat
 try { db.exec("ALTER TABLE chats ADD COLUMN kind TEXT DEFAULT 'chat'"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE chats ADD COLUMN project_run_id TEXT'); } catch { /* exists */ }
+// a standalone chat's user-chosen difficulty (Director sessions keep theirs on pd_sessions)
+try { db.exec('ALTER TABLE chats ADD COLUMN difficulty TEXT'); } catch { /* exists */ }
 
 export function getGitStateRow(chatId: string): import('../../shared/types').GitFlowState | null {
   const row = db.prepare('SELECT git_state AS s FROM chats WHERE id = ?').get(chatId) as any;
@@ -161,7 +163,12 @@ export function rowToChat(r: any): Chat {
     gitState,
     ...(r.kind === 'project' ? { kind: 'project' as const, projectRunId: r.project_run_id ?? null } : {}),
     ...(r.kind === 'pd-session' ? { kind: 'pd-session' as const, session: sessionParent(r.id) } : {}),
+    ...(r.kind !== 'pd-session' && r.kind !== 'project' ? { difficulty: asDifficulty(r.difficulty) } : {}),
   };
+}
+
+export function asDifficulty(v: unknown): Difficulty | null {
+  return v === 'easy' || v === 'medium' || v === 'hard' || v === 'very_hard' ? v : null;
 }
 
 /**

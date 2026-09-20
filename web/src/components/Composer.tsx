@@ -1,6 +1,6 @@
-import { ArrowUp, FileArchive, FileCode, FileText, Image as ImageIcon, Paperclip, ShieldCheck, ShieldOff, Square, X } from 'lucide-react';
+import { ArrowUp, FileArchive, FileCode, FileText, Gauge, Image as ImageIcon, Paperclip, ShieldCheck, ShieldOff, Square, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import type { Chat } from '@shared/types';
+import { DIFFICULTIES, DIFFICULTY_LABEL, type Chat, type Difficulty } from '@shared/types';
 import { api } from '../api';
 import { fmtBytes } from '../lib/format';
 import { useStore } from '../store';
@@ -199,6 +199,7 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
               {reviewOn ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
               Reviewer {reviewOn ? 'On' : 'Off'}
             </button>
+            <DifficultyPicker chat={chat} />
             <span className="hidden px-1 text-[11px] text-dim sm:inline">
               {chat.running
                 ? 'Run in progress'
@@ -229,5 +230,54 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The chat's difficulty, chosen here for a standalone chat. It is stored on
+ * the chat and resolved on the next request, so a change applies without
+ * restarting anything; "Default" clears it (role default / the chat's Agent).
+ * Project sessions never render the Composer — the Director sets theirs.
+ */
+function DifficultyPicker({ chat }: { chat: Chat }) {
+  const toast = useStore((s) => s.toast);
+  const [busy, setBusy] = useState(false);
+  const value = chat.difficulty ?? '';
+  const pick = async (next: Difficulty | null) => {
+    if ((chat.difficulty ?? null) === next) return;
+    setBusy(true);
+    try {
+      await api.setChatDifficulty(chat.id, next);
+    } catch (e) {
+      toast((e as Error).message || 'Could not change the difficulty.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <label
+      className={`btn relative gap-1.5 rounded-lg px-2 py-1 text-[11.5px] font-medium transition-colors ${
+        value ? 'bg-accent/10 text-accent hover:bg-accent/[0.17]' : 'text-dim hover:bg-bg3 hover:text-mut'
+      } ${busy ? 'opacity-60' : ''}`}
+      title={value
+        ? `Difficulty ${DIFFICULTY_LABEL[value as Difficulty]}: the next request uses this tier's Builder and Builder Reviewer (Settings → Roles → Difficulty tiers)`
+        : 'Difficulty: none — the next request uses the role defaults. Pick a tier to route it to that tier\'s models.'}
+    >
+      <Gauge size={13} className="shrink-0" />
+      <span className="hidden sm:inline">Difficulty</span>
+      <span>{value ? DIFFICULTY_LABEL[value as Difficulty] : 'Default'}</span>
+      <select
+        aria-label="Difficulty"
+        className="absolute inset-0 cursor-pointer opacity-0"
+        value={value}
+        disabled={busy}
+        onChange={(e) => void pick((e.target.value || null) as Difficulty | null)}
+      >
+        <option value="" className="bg-bg1 text-ink">Default (role / Agent)</option>
+        {DIFFICULTIES.map((d) => (
+          <option key={d} value={d} className="bg-bg1 text-ink">{DIFFICULTY_LABEL[d]}</option>
+        ))}
+      </select>
+    </label>
   );
 }

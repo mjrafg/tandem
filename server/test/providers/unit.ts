@@ -210,6 +210,19 @@ console.log('--- difficulty tiers resolve live, per request');
   check('set_session_difficulty returns the previous level and the next resolution uses the new tier', prev === 'hard' && b3.difficulty === 'easy' && b3.provider === 'codex' && b3.model === 'gpt-5.6-sol');
   // a tier with a model from the other backend is refused by validation and neutralized on read
   check('settings PUT refuses a cross-provider tier', /not a model/.test(validateRoleConfigs({ difficulty: { hard: { builder: { provider: 'codex', model: 'claude-opus-5', effort: 'high' } } } } as any) ?? ''));
+  // a standalone chat: the user's own difficulty on the chat row, same tiers, same live resolution
+  db.prepare("INSERT INTO chats (id, project_id, title, created_at, updated_at, running, kind, difficulty) VALUES ('c-plain','p1','plain',0,0,0,'chat','easy')").run();
+  const p1 = resolveBuilderRole(cfgC, 'c-plain');
+  check('a standalone chat with difficulty easy resolves the easy tier (source difficulty)', p1.source === 'difficulty' && p1.difficulty === 'easy' && p1.model === 'gpt-5.6-sol');
+  db.prepare("UPDATE chats SET difficulty = 'hard' WHERE id = 'c-plain'").run();
+  const p2 = resolveBuilderRole(cfgC, 'c-plain');
+  check('changing the chat difficulty changes the NEXT resolution', p2.difficulty === 'hard' && p2.model === 'claude-opus-5');
+  db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
+  const p3 = resolveBuilderRole(cfgC, 'c-plain');
+  check('clearing it returns to the role default', p3.source === 'role' && p3.difficulty === undefined);
+  // a Director session row always wins over anything on its chat row
+  db.prepare("UPDATE chats SET difficulty = 'very_hard' WHERE id = 'c-s1'").run();
+  check('a project session takes its difficulty from the session row, never the chat row', resolveBuilderRole(cfgC, 'c-s1').difficulty === 'easy');
   check('settings PUT refuses an unknown level', /Unknown difficulty/.test(validateRoleConfigs({ difficulty: { brutal: { builder: null } } } as any) ?? ''));
   kvSet('settings', { difficulty: { medium: { builder: { provider: 'codex', model: 'claude-opus-5', effort: 'high' }, reviewer: { provider: 'claude-code', model: 'claude-sonnet-5', effort: 'high' } } } });
   const read = getSettings();

@@ -318,6 +318,12 @@ export interface Chat {
    * only for project-owned sessions, so a standalone chat never shows a parent.
    */
   session?: SessionParent | null;
+  /**
+   * A standalone chat's difficulty, chosen by the user; null = none (role
+   * default / Agent). Project-owned sessions carry theirs on the session row,
+   * set by the Director, and this field is absent for them.
+   */
+  difficulty?: Difficulty | null;
 }
 
 export interface SessionParent {

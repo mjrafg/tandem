@@ -1,4 +1,4 @@
-import type {
+import type { Difficulty,
   AgentProfile, ObservabilityKey,
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
   DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
@@ -68,6 +68,7 @@ export const api = {
   chats: () => j<Chat[]>('/api/chats'),
   newChat: (projectId: string) => j<Chat>('/api/chats', { method: 'POST', body: JSON.stringify({ projectId }) }),
   renameChat: (id: string, title: string) => j<Chat>(`/api/chats/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  setChatDifficulty: (id: string, difficulty: Difficulty | null) => j<Chat>(`/api/chats/${id}`, { method: 'PATCH', body: JSON.stringify({ difficulty }) }),
   deleteChat: (id: string) => j<{ ok: true }>(`/api/chats/${id}`, { method: 'DELETE' }),
   chatEvents: (id: string) => j<{ chat: Chat; events: ChatEvent[]; usage: ContextUsage }>(`/api/chats/${id}/events`),
   send: (id: string, text: string, attachmentIds?: string[], review = true) =>

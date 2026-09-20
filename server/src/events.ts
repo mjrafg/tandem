@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Chat, ChatEvent, EventKind, EventPayloadMap } from '../../shared/types';
+import type { Difficulty, Chat, ChatEvent, EventKind, EventPayloadMap } from '../../shared/types';
 import { db, getChat, getEvent, rowToChat, rowToEvent } from './db';
 import { broadcast } from './sse';
 import { computeUsage } from './context';
@@ -85,6 +85,12 @@ export function setChatRunning(chatId: string, running: boolean): void {
 
 export function setChatTitle(chatId: string, title: string): void {
   db.prepare('UPDATE chats SET title = ?, updated_at = ? WHERE id = ?').run(title, Date.now(), chatId);
+  broadcastChat(chatId);
+}
+
+/** A standalone chat's difficulty; null clears it. Live: the next request resolves with it. */
+export function setChatDifficulty(chatId: string, difficulty: Difficulty | null): void {
+  db.prepare('UPDATE chats SET difficulty = ? WHERE id = ?').run(difficulty, chatId);
   broadcastChat(chatId);
 }
 

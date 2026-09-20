@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { AppSettings, AttachmentMeta, BrowserActionPayload, RoleName } from '../../shared/types';
+import { DIFFICULTIES, DIFFICULTY_LABEL, type AppSettings, type AttachmentMeta, type BrowserActionPayload, type Difficulty, type RoleName } from '../../shared/types';
 import {
   createSession, destroySession, getUser, loginAllowed, recordLoginAttempt,
   setPassword, setSessionCookie, verifyPassword,
@@ -11,7 +11,7 @@ import { computeUsage } from './context';
 import { config, shotsDir } from './config';
 import { db, getChat, getProject, rowToChat } from './db';
 import {
-  addEvent, broadcastChat, deriveTitle, getEvents, listChats, setChatTitle,
+  addEvent, broadcastChat, deriveTitle, getEvents, listChats, setChatDifficulty, setChatTitle,
 } from './events';
 import { toHtml, toMarkdown, type ExportBundle } from './exporter';
 import { performNativeCompaction } from './engine/providerContext';
@@ -107,8 +107,21 @@ export function registerRoutes(app: FastifyInstance): void {
   app.patch('/api/chats/:id', async (req, reply) => {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
-    const { title } = (req.body ?? {}) as { title?: string };
+    const { title, difficulty } = (req.body ?? {}) as { title?: string; difficulty?: unknown };
     if (title?.trim()) setChatTitle(chat.id, title.trim().slice(0, 80));
+    if (difficulty !== undefined) {
+      // the Director owns a project session's difficulty (set_session_difficulty)
+      if (chat.kind === 'pd-session' || chat.kind === 'project') return reply.code(409).send({ error: 'This chat belongs to a project — its difficulty is set by the Project Director.' });
+      if (difficulty !== null && !DIFFICULTIES.includes(difficulty as Difficulty)) return reply.code(400).send({ error: `Unknown difficulty "${String(difficulty)}".` });
+      const next = difficulty as Difficulty | null;
+      if ((chat.difficulty ?? null) !== next) {
+        setChatDifficulty(chat.id, next);
+        // on the record, and visible in the timeline: the next request resolves with it
+        addEvent(chat.id, 'status', { text: next
+          ? `Difficulty set to ${DIFFICULTY_LABEL[next]} — the next request uses the ${DIFFICULTY_LABEL[next].toLowerCase()} tier's Builder and Builder Reviewer (Settings → Roles → Difficulty tiers; "inherit" keeps the role default).`
+          : 'Difficulty cleared — the next request uses the role defaults.' });
+      }
+    }
     return getChat(chat.id);
   });
 

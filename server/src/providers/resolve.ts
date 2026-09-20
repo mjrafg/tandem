@@ -9,7 +9,7 @@
  */
 import type { AppSettings, Difficulty, Effort, ModelSource, Provider } from '../../../shared/types';
 import { builderExecFor } from '../agents/exec';
-import { db } from '../db';
+import { asDifficulty, db } from '../db';
 import { providerOfModel } from './catalog';
 import { canonicalProvider, providerRegistry } from './registry';
 
@@ -33,13 +33,17 @@ export interface ResolvedRole {
  */
 export function sessionDifficulty(chatId: string | undefined): Difficulty | null {
   if (!chatId) return null;
+  // a Director-owned session: the Director's judgement on the session row
   try {
     const r = db.prepare('SELECT difficulty FROM pd_sessions WHERE chat_id = ? ORDER BY started_at DESC LIMIT 1').get(chatId) as { difficulty?: string } | undefined;
-    const d = r?.difficulty;
-    return d === 'easy' || d === 'medium' || d === 'hard' || d === 'very_hard' ? d : null;
+    const d = asDifficulty(r?.difficulty);
+    if (d) return d;
   } catch {
-    return null; // the table is created by the Director store; before it exists there are no sessions
+    /* the table is created by the Director store; before it exists there are no sessions */
   }
+  // a standalone chat: whatever the user picked in the Composer, if anything
+  const c = db.prepare('SELECT difficulty FROM chats WHERE id = ?').get(chatId) as { difficulty?: string } | undefined;
+  return asDifficulty(c?.difficulty);
 }
 
 /** the configured tier for a role at a difficulty, or null when the tier inherits */
@@ -94,7 +98,10 @@ function coerce(
  * session's difficulty changes the very next request.
  */
 export function resolveBuilderRole(settings: AppSettings, chatId?: string): ResolvedRole {
-  const agent = chatId ? builderExecFor(chatId, settings) : null;
+  // a snapshot only counts as an Agent when the chat has one; without it
+  // builderExecFor echoes the role values, and the source is the role
+  const exec = chatId ? builderExecFor(chatId, settings) : null;
+  const agent = exec?.agentName ? exec : null;
   const difficulty = sessionDifficulty(chatId);
   const tier = tierFor(settings, difficulty, 'builder');
   const b = settings.roles.builder;

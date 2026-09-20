@@ -330,6 +330,25 @@ export function getAgentSnapshot(chatId: string): AgentSnapshot | null {
   };
 }
 
+/**
+ * A standalone chat's Agent, chosen (or changed, or cleared) by the user in the
+ * Composer. Unlike a Director session, whose snapshot is captured once at
+ * launch, a chat's snapshot is replaced when its owner picks another Agent:
+ * that is a deliberate act by the person running the chat, not an admin
+ * editing a template. The new snapshot is captured from the profile as it is
+ * NOW and then frozen exactly like any other. Returns the captured snapshot,
+ * or null when cleared.
+ */
+export function setChatAgent(chatId: string, profileId: string | null): AgentSnapshot | null {
+  if (!profileId) {
+    deleteAgentSnapshot(chatId);
+    return null;
+  }
+  const profile = resolveAgentForLaunch(profileId);
+  deleteAgentSnapshot(chatId);
+  return captureAgentSnapshot(chatId, profile);
+}
+
 export function deleteAgentSnapshot(chatId: string): void {
   db.prepare('DELETE FROM chat_agent_snapshots WHERE chat_id = ?').run(chatId);
 }

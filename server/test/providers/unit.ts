@@ -16,6 +16,7 @@ import { classifyCodexFailure } from '../../src/providers/codex-cli/errors';
 import { classifyClaudeFailure } from '../../src/providers/claude-code-cli/errors';
 import { outageFromFailure } from '../../src/engine/reviewWait';
 import { DEFAULT_SETTINGS, getSettings, migrateReviewerSplit, validateRoleConfigs } from '../../src/settings';
+import { createAgent, setChatAgent, updateAgent } from '../../src/agents/store';
 import { db, kvGet, kvSet } from '../../src/db';
 import { planSessions, createRun, setSessionDifficulty } from '../../src/director/store';
 import type { AppSettings } from '../../../shared/types';
@@ -223,6 +224,26 @@ console.log('--- difficulty tiers resolve live, per request');
   // a Director session row always wins over anything on its chat row
   db.prepare("UPDATE chats SET difficulty = 'very_hard' WHERE id = 'c-s1'").run();
   check('a project session takes its difficulty from the session row, never the chat row', resolveBuilderRole(cfgC, 'c-s1').difficulty === 'easy');
+  // a standalone chat's Builder Agent: chosen by the user, captured like a session's, replaceable
+  const spec = createAgent({ slug: 'unit-spec', name: 'Unit Specialist', systemPrompt: 'You are the unit specialist.', provider: 'codex', model: 'gpt-5.6-terra', effort: 'medium' });
+  db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
+  const a1 = setChatAgent('c-plain', spec.id);
+  const withAgent = resolveBuilderRole(cfgC, 'c-plain');
+  check('choosing an Agent makes the next resolution run as it (source agent, its provider/model/effort, its prompt)',
+    a1?.profileName === 'Unit Specialist' && withAgent.source === 'agent' && withAgent.provider === 'codex' && withAgent.model === 'gpt-5.6-terra' && withAgent.effort === 'medium' && withAgent.agentPrompt === 'You are the unit specialist.');
+  db.prepare("UPDATE chats SET difficulty = 'easy' WHERE id = 'c-plain'").run();
+  const both = resolveBuilderRole(cfgC, 'c-plain');
+  check('with a difficulty tier set, the tier decides the model and the Agent still supplies the prompt', both.source === 'difficulty' && both.model === 'gpt-5.6-sol' && both.agentPrompt === 'You are the unit specialist.');
+  updateAgent(spec.id, { model: 'gpt-6-astra' });
+  db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
+  check('editing the profile does not change the chat (the snapshot is frozen)', resolveBuilderRole(cfgC, 'c-plain').model === 'gpt-5.6-terra');
+  setChatAgent('c-plain', spec.id);
+  check('choosing it again captures the profile as it is now', resolveBuilderRole(cfgC, 'c-plain').model === 'gpt-6-astra');
+  setChatAgent('c-plain', null);
+  check('clearing the Agent returns to the role default', resolveBuilderRole(cfgC, 'c-plain').source === 'role');
+  let refused = '';
+  try { setChatAgent('c-plain', 'no-such-profile'); } catch (e) { refused = (e as Error).message; }
+  check('an unknown profile is refused', /Unknown Builder Agent/.test(refused));
   check('settings PUT refuses an unknown level', /Unknown difficulty/.test(validateRoleConfigs({ difficulty: { brutal: { builder: null } } } as any) ?? ''));
   kvSet('settings', { difficulty: { medium: { builder: { provider: 'codex', model: 'claude-opus-5', effort: 'high' }, reviewer: { provider: 'claude-code', model: 'claude-sonnet-5', effort: 'high' } } } });
   const read = getSettings();

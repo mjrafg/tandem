@@ -1,6 +1,6 @@
-import { ArrowUp, FileArchive, FileCode, FileText, Gauge, Image as ImageIcon, Paperclip, ShieldCheck, ShieldOff, Square, X } from 'lucide-react';
+import { ArrowUp, Bot, FileArchive, FileCode, FileText, Gauge, Image as ImageIcon, Paperclip, ShieldCheck, ShieldOff, Square, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { DIFFICULTIES, DIFFICULTY_LABEL, type Chat, type Difficulty } from '@shared/types';
+import { DIFFICULTIES, DIFFICULTY_LABEL, type AgentProfile, type Chat, type Difficulty } from '@shared/types';
 import { api } from '../api';
 import { fmtBytes } from '../lib/format';
 import { useStore } from '../store';
@@ -199,6 +199,7 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
               {reviewOn ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
               Reviewer {reviewOn ? 'On' : 'Off'}
             </button>
+            <AgentPicker chat={chat} />
             <DifficultyPicker chat={chat} />
             <span className="hidden px-1 text-[11px] text-dim sm:inline">
               {chat.running
@@ -276,6 +277,67 @@ function DifficultyPicker({ chat }: { chat: Chat }) {
         <option value="" className="bg-bg1 text-ink">Default (role / Agent)</option>
         {DIFFICULTIES.map((d) => (
           <option key={d} value={d} className="bg-bg1 text-ink">{DIFFICULTY_LABEL[d]}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/**
+ * The chat's Builder Agent, chosen here for a standalone chat. Choosing one
+ * captures that profile's prompt, provider, model and effort for this chat
+ * (the same snapshot a Director session runs with); "None" clears it. The
+ * Builder's identity should not change under a run, so the picker waits
+ * while the agent is working.
+ */
+function AgentPicker({ chat }: { chat: Chat }) {
+  const toast = useStore((s) => s.toast);
+  const [agents, setAgents] = useState<AgentProfile[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api.agents().then((list) => { if (alive) setAgents(list.filter((a) => a.enabled && !a.archivedAt)); }).catch(() => { if (alive) setAgents([]); });
+    return () => { alive = false; };
+  }, []);
+  const current = chat.agent ?? null;
+  const pick = async (next: string | null) => {
+    if ((current?.profileId ?? null) === next) return;
+    setBusy(true);
+    try {
+      await api.setChatAgent(chat.id, next);
+    } catch (e) {
+      toast((e as Error).message || 'Could not change the Builder Agent.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+  // the current Agent stays selectable even if it has since been disabled or archived
+  const options = agents ?? [];
+  const missing = current && !options.some((a) => a.id === current.profileId);
+  const disabled = busy || chat.running || agents === null;
+  return (
+    <label
+      className={`btn relative gap-1.5 rounded-lg px-2 py-1 text-[11.5px] font-medium transition-colors ${
+        current ? 'bg-builder/10 text-builder hover:bg-builder/[0.17]' : 'text-dim hover:bg-bg3 hover:text-mut'
+      } ${disabled ? 'opacity-60' : ''}`}
+      title={current
+        ? `Builder Agent ${current.profileName} — ${current.model} · ${current.effort}, captured when chosen (pick it again after editing the Agent to refresh). A difficulty tier, when set, still decides the model.`
+        : 'Builder Agent: none — the Builder runs with the role defaults. Pick an Agent to give this chat its instructions and model.'}
+    >
+      <Bot size={13} className="shrink-0" />
+      <span className="hidden sm:inline">Agent</span>
+      <span className="max-w-[140px] truncate">{current ? current.profileName : 'None'}</span>
+      <select
+        aria-label="Builder Agent"
+        className="absolute inset-0 cursor-pointer opacity-0 disabled:cursor-default"
+        value={current?.profileId ?? ''}
+        disabled={disabled}
+        onChange={(e) => void pick(e.target.value || null)}
+      >
+        <option value="" className="bg-bg1 text-ink">None (Builder role defaults)</option>
+        {missing && current && <option value={current.profileId} className="bg-bg1 text-ink">{current.profileName} (no longer selectable)</option>}
+        {options.map((a) => (
+          <option key={a.id} value={a.id} className="bg-bg1 text-ink">{a.name}{a.isDefault ? ' · default' : ''} — {a.model} · {a.effort}</option>
         ))}
       </select>
     </label>

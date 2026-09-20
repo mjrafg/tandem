@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import { config } from './config';
-import type { Difficulty, Chat, ChatEvent, EventKind, Project } from '../../shared/types';
+import type { ChatAgent, Difficulty, Chat, ChatEvent, EventKind, Project } from '../../shared/types';
 
 export const db = new Database(path.join(config.dataDir, 'tandem.db'));
 db.pragma('journal_mode = WAL');
@@ -163,8 +163,23 @@ export function rowToChat(r: any): Chat {
     gitState,
     ...(r.kind === 'project' ? { kind: 'project' as const, projectRunId: r.project_run_id ?? null } : {}),
     ...(r.kind === 'pd-session' ? { kind: 'pd-session' as const, session: sessionParent(r.id) } : {}),
-    ...(r.kind !== 'pd-session' && r.kind !== 'project' ? { difficulty: asDifficulty(r.difficulty) } : {}),
+    ...(r.kind !== 'pd-session' && r.kind !== 'project' ? { difficulty: asDifficulty(r.difficulty), agent: chatAgent(r.id) } : {}),
   };
+}
+
+/** the Agent snapshot a standalone chat carries, for display; the prompt stays server-side */
+function chatAgent(chatId: string): ChatAgent | null {
+  try {
+    const r = db.prepare('SELECT profile_id, profile_name, profile_slug, provider, model, effort, profile_updated_at, captured_at FROM chat_agent_snapshots WHERE chat_id = ?').get(chatId) as any;
+    if (!r) return null;
+    return {
+      profileId: r.profile_id, profileName: r.profile_name, profileSlug: r.profile_slug,
+      provider: r.provider, model: r.model, effort: r.effort,
+      profileUpdatedAt: r.profile_updated_at, capturedAt: r.captured_at,
+    };
+  } catch {
+    return null; // the table is created by the agents store
+  }
 }
 
 export function asDifficulty(v: unknown): Difficulty | null {

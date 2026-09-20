@@ -324,7 +324,16 @@ export interface Chat {
    * set by the Director, and this field is absent for them.
    */
   difficulty?: Difficulty | null;
+  /**
+   * A standalone chat's Builder Agent, as captured when the user chose it
+   * (the snapshot the Builder actually runs with); null = none, the Builder
+   * role defaults. Project sessions show theirs on the session instead.
+   */
+  agent?: ChatAgent | null;
 }
+
+/** the Agent snapshot as a chat presents it — everything but the prompt text */
+export type ChatAgent = Omit<AgentSnapshot, 'systemPrompt'>;
 
 export interface SessionParent {
   runId: string;

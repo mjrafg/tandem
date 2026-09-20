@@ -28,7 +28,7 @@ import { handleBrowserTool, releaseBrowsers } from './engine/browserHost';
 import { deletePendingReview } from './engine/reviewWait';
 import { deleteLedger } from './engine/reviewLedger';
 import { terminateProcGroup } from './engine/procGroups';
-import { deleteAgentSnapshot } from './agents/store';
+import { AgentError, deleteAgentSnapshot, setChatAgent } from './agents/store';
 import { applyWorkdirChange, isRunning, setGitWorkflow, startRun, stopRun } from './engine/workflow';
 import { expediteRunReviews } from './reviewRetrySweeper';
 import { broadcast, sseHandler } from './sse';
@@ -107,7 +107,7 @@ export function registerRoutes(app: FastifyInstance): void {
   app.patch('/api/chats/:id', async (req, reply) => {
     const chat = getChat((req.params as any).id);
     if (!chat) return reply.code(404).send({ error: 'Chat not found.' });
-    const { title, difficulty } = (req.body ?? {}) as { title?: string; difficulty?: unknown };
+    const { title, difficulty, agentProfileId } = (req.body ?? {}) as { title?: string; difficulty?: unknown; agentProfileId?: unknown };
     if (title?.trim()) setChatTitle(chat.id, title.trim().slice(0, 80));
     if (difficulty !== undefined) {
       // the Director owns a project session's difficulty (set_session_difficulty)
@@ -120,6 +120,26 @@ export function registerRoutes(app: FastifyInstance): void {
         addEvent(chat.id, 'status', { text: next
           ? `Difficulty set to ${DIFFICULTY_LABEL[next]} — the next request uses the ${DIFFICULTY_LABEL[next].toLowerCase()} tier's Builder and Builder Reviewer (Settings → Roles → Difficulty tiers; "inherit" keeps the role default).`
           : 'Difficulty cleared — the next request uses the role defaults.' });
+      }
+    }
+    if (agentProfileId !== undefined) {
+      // the Director picks a project session's Agent when it plans the session
+      if (chat.kind === 'pd-session' || chat.kind === 'project') return reply.code(409).send({ error: 'This chat belongs to a project — its Builder Agent is chosen by the Project Director.' });
+      if (agentProfileId !== null && typeof agentProfileId !== 'string') return reply.code(400).send({ error: 'agentProfileId must be a profile id or null.' });
+      // a run reads the snapshot on every Builder turn; swapping it under a live run would change the Builder mid-work
+      if (isRunning(chat.id)) return reply.code(409).send({ error: 'The agent is working — change the Builder Agent between requests.' });
+      if ((chat.agent?.profileId ?? null) !== agentProfileId) {
+        let snap;
+        try {
+          snap = setChatAgent(chat.id, agentProfileId);
+        } catch (err) {
+          if (err instanceof AgentError) return reply.code(400).send({ error: err.message });
+          throw err;
+        }
+        broadcastChat(chat.id);
+        addEvent(chat.id, 'status', { text: snap
+          ? `Builder Agent set to ${snap.profileName} (${snap.provider === 'codex' ? 'Codex' : 'Claude Code'} · ${snap.model} · ${snap.effort}) — the next request runs with its instructions and model; a difficulty tier, when set, still decides the model.`
+          : 'Builder Agent cleared — the next request uses the Builder role defaults.' });
       }
     }
     return getChat(chat.id);

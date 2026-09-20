@@ -19,6 +19,7 @@ export function agentCatalogText(): string {
     `ID: ${a.id}`,
     `Name: ${a.name}${a.id === def?.id ? ' (default)' : ''}`,
     `Description: ${a.description || '(no description)'}`,
+    ...(a.enforceModel ? [`Model: ${a.model} · ${a.effort} on ${a.provider} — enforced: this Agent keeps its model whatever difficulty tier the session has`] : []),
   ].join('\n'));
   return [
     'AVAILABLE BUILDER AGENTS',

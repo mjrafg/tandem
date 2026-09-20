@@ -69,11 +69,16 @@ CREATE TABLE IF NOT EXISTS chat_agent_snapshots (
 );
 `);
 
+// per-Agent: its model beats a difficulty tier (default off — tiers decide the model)
+try { db.exec('ALTER TABLE agent_profiles ADD COLUMN enforce_model INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE chat_agent_snapshots ADD COLUMN enforce_model INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+
 function rowToProfile(r: any): AgentProfile {
   return {
     id: r.id, slug: r.slug, name: r.name, description: r.description ?? '',
     systemPrompt: r.system_prompt, provider: r.provider as Provider,
     model: r.model, effort: r.effort as Effort,
+    enforceModel: !!r.enforce_model,
     enabled: !!r.enabled, isDefault: !!r.is_default,
     createdAt: r.created_at, updatedAt: r.updated_at,
     archivedAt: r.archived_at ?? null,
@@ -177,7 +182,7 @@ export function defaultAgent(): AgentProfile | null {
 
 export interface AgentInput {
   slug?: string; name?: string; description?: string; systemPrompt?: string;
-  provider?: unknown; model?: string; effort?: string; enabled?: boolean; isDefault?: boolean;
+  provider?: unknown; model?: string; effort?: string; enabled?: boolean; isDefault?: boolean; enforceModel?: boolean;
 }
 
 export function createAgent(input: AgentInput): AgentProfile {
@@ -192,15 +197,16 @@ export function createAgent(input: AgentInput): AgentProfile {
     provider: validateProvider(input.provider),
     model: validateModel(input.model ?? ''),
     effort: validateEffort(input.effort ?? ''),
+    enforceModel: input.enforceModel === true,
     enabled: input.enabled !== false,
   };
   validatePair(row.provider, row.model);
   const makeDefault = !!input.isDefault;
   if (makeDefault && !row.enabled) throw new AgentError('The default agent must be enabled.');
   db.transaction(() => {
-    db.prepare(`INSERT INTO agent_profiles (id, slug, name, description, system_prompt, provider, model, effort, enabled, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`)
-      .run(row.id, row.slug, row.name, row.description, row.systemPrompt, row.provider, row.model, row.effort, row.enabled ? 1 : 0, now, now);
+    db.prepare(`INSERT INTO agent_profiles (id, slug, name, description, system_prompt, provider, model, effort, enforce_model, enabled, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`)
+      .run(row.id, row.slug, row.name, row.description, row.systemPrompt, row.provider, row.model, row.effort, row.enforceModel ? 1 : 0, row.enabled ? 1 : 0, now, now);
     if (makeDefault || !db.prepare('SELECT id FROM agent_profiles WHERE is_default = 1').get()) promoteDefault(id);
   })();
   return getAgent(id)!;
@@ -218,6 +224,7 @@ export function updateAgent(id: string, input: AgentInput): AgentProfile {
     provider: input.provider !== undefined ? validateProvider(input.provider) : current.provider,
     model: input.model !== undefined ? validateModel(input.model) : current.model,
     effort: input.effort !== undefined ? validateEffort(input.effort) : current.effort,
+    enforceModel: input.enforceModel !== undefined ? !!input.enforceModel : current.enforceModel,
     enabled: input.enabled !== undefined ? !!input.enabled : current.enabled,
   };
   validatePair(next.provider, next.model);
@@ -227,8 +234,8 @@ export function updateAgent(id: string, input: AgentInput): AgentProfile {
   }
   if (wantsDefault && !next.enabled) throw new AgentError('The default agent must be enabled.');
   db.transaction(() => {
-    db.prepare(`UPDATE agent_profiles SET slug = ?, name = ?, description = ?, system_prompt = ?, provider = ?, model = ?, effort = ?, enabled = ?, updated_at = ? WHERE id = ?`)
-      .run(next.slug, next.name, next.description, next.systemPrompt, next.provider, next.model, next.effort, next.enabled ? 1 : 0, Date.now(), id);
+    db.prepare(`UPDATE agent_profiles SET slug = ?, name = ?, description = ?, system_prompt = ?, provider = ?, model = ?, effort = ?, enforce_model = ?, enabled = ?, updated_at = ? WHERE id = ?`)
+      .run(next.slug, next.name, next.description, next.systemPrompt, next.provider, next.model, next.effort, next.enforceModel ? 1 : 0, next.enabled ? 1 : 0, Date.now(), id);
     if (wantsDefault) promoteDefault(id);
   })();
   return getAgent(id)!;
@@ -314,9 +321,9 @@ export function captureAgentSnapshot(chatId: string, profile: AgentProfile): Age
   const existing = getAgentSnapshot(chatId);
   if (existing) return existing;
   const now = Date.now();
-  db.prepare(`INSERT INTO chat_agent_snapshots (chat_id, profile_id, profile_name, profile_slug, provider, model, effort, system_prompt, profile_updated_at, captured_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(chatId, profile.id, profile.name, profile.slug, profile.provider, profile.model, profile.effort, profile.systemPrompt, profile.updatedAt, now);
+  db.prepare(`INSERT INTO chat_agent_snapshots (chat_id, profile_id, profile_name, profile_slug, provider, model, effort, enforce_model, system_prompt, profile_updated_at, captured_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(chatId, profile.id, profile.name, profile.slug, profile.provider, profile.model, profile.effort, profile.enforceModel ? 1 : 0, profile.systemPrompt, profile.updatedAt, now);
   return getAgentSnapshot(chatId)!;
 }
 
@@ -325,7 +332,7 @@ export function getAgentSnapshot(chatId: string): AgentSnapshot | null {
   if (!r) return null;
   return {
     profileId: r.profile_id, profileName: r.profile_name, profileSlug: r.profile_slug,
-    provider: r.provider as Provider, model: r.model, effort: r.effort as Effort,
+    provider: r.provider as Provider, model: r.model, effort: r.effort as Effort, enforceModel: !!r.enforce_model,
     systemPrompt: r.system_prompt, profileUpdatedAt: r.profile_updated_at, capturedAt: r.captured_at,
   };
 }
@@ -362,7 +369,7 @@ export interface AgentsExport {
   exportedAt: number;
   agents: {
     slug: string; name: string; description: string; systemPrompt: string;
-    provider: Provider; model: string; effort: Effort; enabled: boolean; isDefault: boolean;
+    provider: Provider; model: string; effort: Effort; enforceModel?: boolean; enabled: boolean; isDefault: boolean;
   }[];
 }
 
@@ -379,7 +386,7 @@ export function exportAgents(includeArchived = false): AgentsExport {
     exportedAt: Date.now(),
     agents: listAgents({ includeArchived }).map((a) => ({
       slug: a.slug, name: a.name, description: a.description, systemPrompt: a.systemPrompt,
-      provider: a.provider, model: a.model, effort: a.effort, enabled: a.enabled, isDefault: a.isDefault,
+      provider: a.provider, model: a.model, effort: a.effort, enforceModel: a.enforceModel, enabled: a.enabled, isDefault: a.isDefault,
     })),
   };
 }
@@ -420,6 +427,7 @@ export function importAgents(data: unknown): AgentsImportResult {
         provider: entry.provider,
         model: entry.model,
         effort: entry.effort,
+        enforceModel: entry.enforceModel === true || entry.enforce_model === true,
         enabled: entry.enabled !== false,
       };
       const existing = db.prepare('SELECT id FROM agent_profiles WHERE slug = ? AND archived_at IS NULL').get(slug) as any;

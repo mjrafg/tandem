@@ -92,7 +92,9 @@ function coerce(
  * Precedence: the session's difficulty tier (when the Director has set a
  * difficulty and the admin configured that tier) → the session's Agent
  * snapshot (its specialist model, kept for sessions no tier covers) → the
- * Builder role default. The specialist PROMPT overlay always comes from the
+ * Builder role default. An Agent whose snapshot ENFORCES its model steps in
+ * front of the tier: the tier is then ignored for the model and the source is
+ * the Agent, while the difficulty stays on record. The specialist PROMPT overlay always comes from the
  * snapshot — that is the session's identity — while the model follows the
  * latest applicable configuration, so changing a tier in Settings or the
  * session's difficulty changes the very next request.
@@ -103,7 +105,7 @@ export function resolveBuilderRole(settings: AppSettings, chatId?: string): Reso
   const exec = chatId ? builderExecFor(chatId, settings) : null;
   const agent = exec?.agentName ? exec : null;
   const difficulty = sessionDifficulty(chatId);
-  const tier = tierFor(settings, difficulty, 'builder');
+  const tier = agent?.enforceModel ? null : tierFor(settings, difficulty, 'builder');
   const b = settings.roles.builder;
   const base = tier
     ? coerce('builder', tier.provider, tier.model, tier.effort, 'difficulty')

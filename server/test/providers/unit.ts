@@ -241,6 +241,19 @@ console.log('--- difficulty tiers resolve live, per request');
   check('choosing it again captures the profile as it is now', resolveBuilderRole(cfgC, 'c-plain').model === 'gpt-6-astra');
   setChatAgent('c-plain', null);
   check('clearing the Agent returns to the role default', resolveBuilderRole(cfgC, 'c-plain').source === 'role');
+  // an Agent that enforces its model steps in front of the tier
+  updateAgent(spec.id, { enforceModel: true });
+  setChatAgent('c-plain', spec.id);
+  db.prepare("UPDATE chats SET difficulty = 'easy' WHERE id = 'c-plain'").run();
+  const enforced = resolveBuilderRole(cfgC, 'c-plain');
+  check('with Enforce model on, the Agent keeps its model over the easy tier (source agent, difficulty still recorded)',
+    enforced.source === 'agent' && enforced.model === 'gpt-6-astra' && enforced.difficulty === 'easy' && enforced.agentPrompt === 'You are the unit specialist.');
+  updateAgent(spec.id, { enforceModel: false });
+  check('the snapshot froze the enforcement too — turning it off on the profile changes nothing until re-chosen', resolveBuilderRole(cfgC, 'c-plain').source === 'agent');
+  setChatAgent('c-plain', spec.id);
+  check('re-chosen with Enforce model off, the tier decides the model again', resolveBuilderRole(cfgC, 'c-plain').source === 'difficulty');
+  setChatAgent('c-plain', null);
+  db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
   let refused = '';
   try { setChatAgent('c-plain', 'no-such-profile'); } catch (e) { refused = (e as Error).message; }
   check('an unknown profile is refused', /Unknown Builder Agent/.test(refused));

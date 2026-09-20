@@ -24,6 +24,8 @@ export interface BuilderExec {
   agentPrompt?: string;
   /** display/observability only */
   agentName?: string;
+  /** the Agent's model beats a difficulty tier */
+  enforceModel?: boolean;
 }
 
 export function builderExecFor(chatId: string, settings: AppSettings): BuilderExec {
@@ -34,6 +36,6 @@ export function builderExecFor(chatId: string, settings: AppSettings): BuilderEx
   }
   return {
     provider: snap.provider, model: snap.model, effort: snap.effort,
-    agentPrompt: snap.systemPrompt, agentName: snap.profileName,
+    agentPrompt: snap.systemPrompt, agentName: snap.profileName, enforceModel: snap.enforceModel,
   };
 }

@@ -170,11 +170,11 @@ export function rowToChat(r: any): Chat {
 /** the Agent snapshot a standalone chat carries, for display; the prompt stays server-side */
 function chatAgent(chatId: string): ChatAgent | null {
   try {
-    const r = db.prepare('SELECT profile_id, profile_name, profile_slug, provider, model, effort, profile_updated_at, captured_at FROM chat_agent_snapshots WHERE chat_id = ?').get(chatId) as any;
+    const r = db.prepare('SELECT profile_id, profile_name, profile_slug, provider, model, effort, enforce_model, profile_updated_at, captured_at FROM chat_agent_snapshots WHERE chat_id = ?').get(chatId) as any;
     if (!r) return null;
     return {
       profileId: r.profile_id, profileName: r.profile_name, profileSlug: r.profile_slug,
-      provider: r.provider, model: r.model, effort: r.effort,
+      provider: r.provider, model: r.model, effort: r.effort, enforceModel: !!r.enforce_model,
       profileUpdatedAt: r.profile_updated_at, capturedAt: r.captured_at,
     };
   } catch {

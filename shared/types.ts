@@ -153,6 +153,12 @@ export interface AgentProfile {
   provider: Provider;      // the backend this specialist runs on
   model: string;
   effort: Effort;
+  /**
+   * When true the Agent's provider/model/effort are used even when a difficulty
+   * tier names another model; when false (default) a configured tier wins and
+   * the Agent contributes its instructions only.
+   */
+  enforceModel: boolean;
   enabled: boolean;
   isDefault: boolean;
   createdAt: number;
@@ -172,6 +178,8 @@ export interface AgentSnapshot {
   provider: Provider;
   model: string;
   effort: Effort;
+  /** captured with the rest: whether this Agent's model beats a difficulty tier */
+  enforceModel: boolean;
   systemPrompt: string;
   profileUpdatedAt: number;
   capturedAt: number;

@@ -1,4 +1,4 @@
-import { Archive, ChevronRight, Download, Plus, RotateCcw, Star, Upload } from 'lucide-react';
+import { Archive, ChevronRight, Download, Plus, RotateCcw, Star, Upload, Lock } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { AgentProfile } from '@shared/types';
@@ -128,6 +128,7 @@ export function AgentsPage() {
             agent={a}
             busy={busyId === a.id}
             onToggle={() => void act(a.id, () => api.updateAgent(a.id, { enabled: !a.enabled }), a.enabled ? `${a.name} disabled` : `${a.name} enabled`)}
+            onToggleEnforce={() => void act(a.id, () => api.updateAgent(a.id, { enforceModel: !a.enforceModel }), a.enforceModel ? `${a.name}: difficulty tiers may override its model` : `${a.name} always runs on its own model`)}
             onDefault={() => void act(a.id, () => api.setDefaultAgent(a.id), `${a.name} is now the default agent`)}
             onArchive={() => void act(a.id, () => api.archiveAgent(a.id), `${a.name} archived`)}
           />
@@ -154,8 +155,8 @@ export function AgentsPage() {
   );
 }
 
-function AgentRow({ agent, busy, onToggle, onDefault, onArchive }: {
-  agent: AgentProfile; busy: boolean; onToggle: () => void; onDefault: () => void; onArchive: () => void;
+function AgentRow({ agent, busy, onToggle, onToggleEnforce, onDefault, onArchive }: {
+  agent: AgentProfile; busy: boolean; onToggle: () => void; onToggleEnforce: () => void; onDefault: () => void; onArchive: () => void;
 }) {
   return (
     <div className={`card overflow-hidden ${agent.enabled ? '' : 'opacity-70'}`}>
@@ -168,12 +169,17 @@ function AgentRow({ agent, busy, onToggle, onDefault, onArchive }: {
               <Star size={10} /> Default
             </span>
           )}
+          {agent.enforceModel && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-bg3 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-mut" title="Always runs on its own model — difficulty tiers do not override it">
+              <Lock size={10} /> Model enforced
+            </span>
+          )}
           {!agent.enabled && <span className="shrink-0 rounded bg-bg3 px-1.5 py-0.5 text-[10.5px] uppercase tracking-wide text-dim">Disabled</span>}
           <ChevronRight size={15} className="ml-auto shrink-0 text-dim" />
         </div>
         <p className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-dim">{agent.description || 'No description.'}</p>
         <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[11.5px] text-dim">
-          <span>Claude Code CLI</span>
+          <span>{agent.provider === 'codex' ? 'Codex CLI' : 'Claude Code CLI'}</span>
           <span className="mono text-mut">{agent.model}</span>
           <span className="mono text-mut">{agent.effort}</span>
         </div>
@@ -190,9 +196,20 @@ function AgentRow({ agent, busy, onToggle, onDefault, onArchive }: {
             <Archive size={13} /> Archive
           </button>
         )}
-        <span className="ml-auto flex items-center gap-2 pr-1">
-          <span className="text-[11.5px] text-dim">{agent.enabled ? 'Enabled' : 'Disabled'}</span>
-          <Toggle checked={agent.enabled} onChange={onToggle} label={`${agent.name} enabled`} />
+        <span className="ml-auto flex flex-wrap items-center justify-end gap-x-4 gap-y-1 pr-1">
+          <span
+            className="flex items-center gap-2"
+            title={agent.enforceModel
+              ? 'On: this agent always runs on its own provider, model and effort — difficulty tiers do not override it'
+              : 'Off: a configured difficulty tier decides the model; this agent contributes its instructions only'}
+          >
+            <span className="text-[11.5px] text-dim">Enforce model</span>
+            <Toggle checked={agent.enforceModel} onChange={onToggleEnforce} label={`${agent.name} enforces its model`} />
+          </span>
+          <span className="flex items-center gap-2">
+            <span className="text-[11.5px] text-dim">{agent.enabled ? 'Enabled' : 'Disabled'}</span>
+            <Toggle checked={agent.enabled} onChange={onToggle} label={`${agent.name} enabled`} />
+          </span>
         </span>
       </div>
     </div>

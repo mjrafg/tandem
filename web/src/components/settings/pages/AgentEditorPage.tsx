@@ -10,7 +10,7 @@ import { Field, SelectBox, Spinner, Toggle } from '../../ui';
 
 const BLANK = {
   name: '', slug: '', description: '', systemPrompt: '',
-  provider: 'claude-code' as Provider, model: 'claude-sonnet-5', effort: 'high' as Effort, enabled: true,
+  provider: 'claude-code' as Provider, model: 'claude-sonnet-5', effort: 'high' as Effort, enforceModel: false, enabled: true,
 };
 
 /**
@@ -52,7 +52,7 @@ export function AgentEditorPage() {
         if (!useStore.getState().agentDrafts[agentId!]) {
           setDraftLocal({
             name: found.name, slug: found.slug, description: found.description,
-            systemPrompt: found.systemPrompt, provider: found.provider, model: found.model, effort: found.effort, enabled: found.enabled,
+            systemPrompt: found.systemPrompt, provider: found.provider, model: found.model, effort: found.effort, enforceModel: found.enforceModel, enabled: found.enabled,
           });
         }
       })
@@ -81,7 +81,7 @@ export function AgentEditorPage() {
   const dirty = agent
     ? agent.name !== draft.name || agent.slug !== slug || agent.description !== draft.description
       || agent.systemPrompt !== draft.systemPrompt || agent.provider !== draft.provider || agent.model !== draft.model
-      || agent.effort !== draft.effort || agent.enabled !== draft.enabled
+      || agent.effort !== draft.effort || agent.enabled !== draft.enabled || agent.enforceModel !== draft.enforceModel
     : !!(draft.name || draft.description || draft.systemPrompt);
 
   async function save() {
@@ -192,6 +192,13 @@ export function AgentEditorPage() {
             <Field label="Reasoning effort">
               <SelectBox ariaLabel="Agent reasoning effort" value={draft.effort} onChange={(v) => set({ effort: v as Effort })} options={EFFORTS.map((e) => ({ value: e, label: e[0].toUpperCase() + e.slice(1) }))} />
             </Field>
+          </div>
+          <div className="mt-3 flex items-start gap-2.5 border-t border-linesoft pt-3">
+            <Toggle checked={draft.enforceModel} onChange={(v) => set({ enforceModel: v })} label="Enforce this agent's model" />
+            <span className="text-[12.5px] leading-relaxed text-mut">
+              Enforce model — this agent always runs on the provider, model and effort above. Off: a configured difficulty tier
+              decides the model and the agent contributes its instructions only.
+            </span>
           </div>
           <div className="mt-3 flex items-center gap-2.5 border-t border-linesoft pt-3">
             <Toggle checked={draft.enabled} onChange={(v) => set({ enabled: v })} label="Agent enabled" />

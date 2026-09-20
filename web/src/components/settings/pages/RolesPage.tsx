@@ -343,7 +343,8 @@ function DifficultyTiersCard({ draft, providers, set }: {
         The Director judges each session&apos;s difficulty (and can change it while it runs). Each tier names the
         Builder and Builder Reviewer that handle it — cheap models for easy work, strong ones for hard work. Resolved on
         every request, so a change here reaches a running session on its next call. &ldquo;Inherit&rdquo; keeps the
-        role default (or the session&apos;s Builder Agent).
+        role default (or the session&apos;s Builder Agent). An Agent with &ldquo;Enforce model&rdquo; on keeps its own
+        model whatever the tier says.
       </p>
       <div className="space-y-3">
         {DIFFICULTIES.map((level) => {

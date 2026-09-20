@@ -138,7 +138,7 @@ export function registerRoutes(app: FastifyInstance): void {
         }
         broadcastChat(chat.id);
         addEvent(chat.id, 'status', { text: snap
-          ? `Builder Agent set to ${snap.profileName} (${snap.provider === 'codex' ? 'Codex' : 'Claude Code'} · ${snap.model} · ${snap.effort}) — the next request runs with its instructions and model; a difficulty tier, when set, still decides the model.`
+          ? `Builder Agent set to ${snap.profileName} (${snap.provider === 'codex' ? 'Codex' : 'Claude Code'} · ${snap.model} · ${snap.effort}) — the next request runs with its instructions and model${snap.enforceModel ? '; its model is enforced, so a difficulty tier does not override it' : '; a difficulty tier, when set, still decides the model'}.`
           : 'Builder Agent cleared — the next request uses the Builder role defaults.' });
       }
     }

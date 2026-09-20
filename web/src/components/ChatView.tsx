@@ -127,8 +127,9 @@ export function ChatView() {
             {chat.session ? <span className="text-mut">{chat.session.runTitle}</span> : 'a project'} and is driven by its Project Director — talk to it from the Project Chat.
           </span>
           {chat.session && (
-            <Link to={`/c/${chat.session.projectChatId}`} className="inline-flex items-center gap-1 text-accent hover:underline">
-              <ArrowLeft size={12} /> Back to {chat.session.runTitle}
+            <Link to={`/c/${chat.session.projectChatId}`} className="text-accent hover:underline">
+              {/* inline, so a long project name wraps with its arrow instead of leaving it on a line of its own */}
+              <ArrowLeft size={12} className="mr-1 inline-block align-[-1px]" />Back to {chat.session.runTitle}
             </Link>
           )}
         </div>

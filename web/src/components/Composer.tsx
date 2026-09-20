@@ -165,8 +165,8 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
           }}
         />
 
-        <div className="flex items-center justify-between px-3 pb-2.5 pt-1">
-          <div className="flex items-center gap-1">
+        <div className="flex items-end justify-between gap-2 px-3 pb-2.5 pt-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             <button
               className="btn-ghost -ml-0.5 px-1.5 py-1.5"
               title="Attach files (ZIP archives open as projects)"
@@ -199,8 +199,13 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
               {reviewOn ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
               Reviewer {reviewOn ? 'On' : 'Off'}
             </button>
-            <AgentPicker chat={chat} />
-            <DifficultyPicker chat={chat} />
+            {/* a Project Chat's Builder is the Director's business; only a standalone chat picks its own */}
+            {(!chat.kind || chat.kind === 'chat') && (
+              <>
+                <AgentPicker chat={chat} />
+                <DifficultyPicker chat={chat} />
+              </>
+            )}
             <span className="hidden px-1 text-[11px] text-dim sm:inline">
               {chat.running
                 ? 'Run in progress'
@@ -265,7 +270,7 @@ function DifficultyPicker({ chat }: { chat: Chat }) {
         : 'Difficulty: none — the next request uses the role defaults. Pick a tier to route it to that tier\'s models.'}
     >
       <Gauge size={13} className="shrink-0" />
-      <span className="hidden sm:inline">Difficulty</span>
+      <span className="text-dim">Difficulty</span>
       <span>{value ? DIFFICULTY_LABEL[value as Difficulty] : 'Default'}</span>
       <select
         aria-label="Difficulty"
@@ -325,7 +330,7 @@ function AgentPicker({ chat }: { chat: Chat }) {
         : 'Builder Agent: none — the Builder runs with the role defaults. Pick an Agent to give this chat its instructions and model.'}
     >
       <Bot size={13} className="shrink-0" />
-      <span className="hidden sm:inline">Agent</span>
+      <span className="text-dim">Agent</span>
       <span className="max-w-[140px] truncate">{current ? current.profileName : 'None'}</span>
       <select
         aria-label="Builder Agent"

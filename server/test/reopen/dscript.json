@@ -1,0 +1,13 @@
+[
+  { "reply": "Planned M1 and started S1.",
+    "tools": [
+      { "name": "project_set_plan", "args": { "title": "Reopen Demo", "summary": "One milestone, then the project is finished.",
+        "milestones": [ { "key": "M1", "name": "First feature", "goal": "Create a.txt", "acceptance": "a.txt exists" } ] } },
+      { "name": "plan_milestone_sessions", "args": { "milestone": "M1", "reasoning": "one mechanical session",
+        "sessions": [
+          { "key": "S1", "name": "Build a", "purpose": "create a.txt", "review_required": false,
+            "prompt": "RECIPE_BUILD Implement the feature: create a.txt with the letter a. CANONICAL_TASK_MARKER_7731" } ] } },
+      { "name": "start_sessions", "args": { "keys": ["S1"] } } ] },
+  { "reply": "Standing by." }, { "reply": "Standing by." }, { "reply": "Standing by." },
+  { "reply": "Standing by." }, { "reply": "Standing by." }, { "reply": "Standing by." }
+]

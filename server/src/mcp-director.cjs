@@ -205,6 +205,17 @@ const TOOLS = [
     },
   },
   {
+    name: 'reopen_project',
+    description: 'Take a COMPLETED or FAILED project up again, so new work continues in the SAME project instead of starting over. Everything it already did is kept: the plan, the completed milestones, every session, every decision and the whole activity history. Use it as soon as the user reports a bug, asks for a change, or wants a new feature in a project you already finished — that is the normal way such work arrives. Afterwards the project is RUNNING again: add the new work as NEW milestones (project_set_plan with the existing milestones plus the new ones), run them as usual, and complete the project again when they are done. Do not use it to redo work that is already completed, and do not reopen merely to answer a question — you can answer from the existing state without changing anything.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'What new work is needed and why, in the user\'s terms — recorded as a project decision and shown to them.' },
+      },
+      required: ['reason'],
+    },
+  },
+  {
     name: 'project_need_user',
     description: 'Pause orchestration because a genuine decision belongs to the user (ambiguous requirements, a trade-off only they can make). Ask the question in your chat reply; their next message resumes you.',
     inputSchema: {

@@ -1731,9 +1731,11 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
   const run = runForChat(chatId);
   if (!run) return { ok: false, error: 'This chat is not a Project Director chat.' };
   const runId = run.id;
-  // a terminal run is immutable: answer questions from state, change nothing
-  if (['COMPLETED', 'FAILED'].includes(run.state) && op !== 'get_state') {
-    return { ok: false, error: `This project run is ${run.state} and can no longer be changed. Answer the user from the existing state; for new work, ask them to start a new project run in the same directory.` };
+  // A finished run is immutable, with one exception: it can be taken up again.
+  // That is what keeps a delivered project's plan, decisions and history usable
+  // when a bug turns up or the user wants more, instead of starting over.
+  if (['COMPLETED', 'FAILED'].includes(run.state) && !['get_state', 'reopen_project'].includes(op)) {
+    return { ok: false, error: `This project run is ${run.state}, so nothing can change while it stays that way. If the user only wants to know something, answer from the existing state. If they want NEW work on this project — a bug, a change, a feature — call reopen_project: the plan, milestones, sessions and decisions are all kept and you continue from them.` };
   }
   // a paused project is frozen: nothing starts, integrates, delivers, or
   // completes until the user presses Resume (which wakes you in RESUMING)
@@ -2099,6 +2101,41 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         await cleanupRunWorkspaces(runId, rootPath);
         setRunState(runId, 'COMPLETED', `Project completed: ${String(args.summary ?? '').slice(0, 300)}`);
         return { ok: true, text: 'Project marked complete. Summarize the delivered result for the user.' };
+      }
+
+      case 'reopen_project': {
+        if (!['COMPLETED', 'FAILED'].includes(run.state)) {
+          return { ok: false, error: `This project is ${run.state} — it is already open, so there is nothing to reopen. Plan the new work as new milestones.` };
+        }
+        const reason = String(args.reason ?? '').trim();
+        if (!reason) return { ok: false, error: 'Say why the project is being reopened — it is recorded as a project decision and shown to the user.' };
+        const was = run.state;
+        const raw = getRunRaw(runId);
+        const rootPath = getProject(run.projectId)!.rootPath;
+        // The finished run's integration branch was delivered and, normally,
+        // deleted by the session that delivered it. Keeping the stale name would
+        // point the next integration at a ref that no longer exists, so it is
+        // cleared and the next integration forks a fresh one from the delivered
+        // HEAD — which is exactly what new work should build on.
+        let branchNote = '';
+        if (raw.integration_branch) {
+          const exists = await git(rootPath, ['rev-parse', '--verify', `refs/heads/${raw.integration_branch}`]);
+          if (!exists.ok) {
+            patchRun(runId, { integration_branch: null, base_branch: null });
+            branchNote = ` The previous integration branch ${raw.integration_branch} was delivered and no longer exists, so the next integration starts a fresh one from the current HEAD.`;
+          }
+        }
+        setRunState(runId, 'RUNNING', `Project reopened (it was ${was}): ${reason.slice(0, 300)}`);
+        resetStallStreak(runId);
+        addEvent(run.chatId, 'status', {
+          text: `The Project Director reopened this project — it was ${was}. Everything it already did is kept: the plan, the completed milestones, every session and every decision. The new work is added as new milestones. Reason: ${reason.slice(0, 300)}`,
+        });
+        const done = run.milestones.filter((m) => m.status === 'completed').map((m) => m.key);
+        return {
+          ok: true,
+          text: `Project reopened and RUNNING again${done.length ? `; ${done.join(', ')} stay completed and are not to be redone` : ''}.${branchNote} `
+            + 'Plan the new work as NEW milestones with fresh keys, and call project_set_plan with the WHOLE plan: the existing milestones exactly as they are, plus the new ones. A completed milestone cannot be dropped or rewired, so leave those entries alone. Then carry on as normal: plan its sessions, run them, integrate, deliver, and complete the project again when the new work is done.',
+        };
       }
 
       case 'need_user': {

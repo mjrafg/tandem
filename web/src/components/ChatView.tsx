@@ -149,29 +149,36 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer }: {
 }) {
   const usage = useStore((s) => s.usage[chat.id]);
   const [copied, setCopied] = useState(false);
+  const parent = chat.kind === 'pd-session' ? chat.session ?? null : null;
+  // where this session sits in the plan: milestone, key, name
+  const place = parent && (
+    <span className="inline-flex min-w-0 items-center gap-1 text-[12.5px] text-mut">
+      {parent.milestoneKey && <span className="mono shrink-0 text-dim">{parent.milestoneKey}</span>}
+      <span className="mono shrink-0 text-dim">{parent.key}</span>
+      <span className="truncate">{parent.name}</span>
+    </span>
+  );
   return (
-    <header className="flex h-[50px] shrink-0 items-center justify-between gap-2 border-b border-linesoft px-2 sm:gap-3 sm:px-4">
-      <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-2.5">
+    // One row from `sm` up. On a phone a project-owned session takes two: the
+    // parent project and the way back get the first row to themselves, and the
+    // session's place in the plan sits under it beside the git chip — the chip
+    // is one element moved with flex order, so git status is fetched once.
+    <header className="flex shrink-0 flex-wrap items-center gap-x-2 border-b border-linesoft px-2 sm:h-[50px] sm:flex-nowrap sm:gap-x-3 sm:px-4">
+      <div className="flex h-[50px] min-w-0 flex-1 items-center gap-2 sm:gap-2.5">
         <MenuButton />
-        {chat.kind === 'pd-session' && chat.session ? (
-          // a project-owned session: the parent project first, the way back
-          // beside it, then where this session sits in the plan
-          <span className="inline-flex min-w-0 shrink items-center gap-1.5 text-[13.5px]">
+        {parent ? (
+          <span className="inline-flex min-w-0 flex-1 items-center gap-1.5 text-[13.5px] sm:flex-initial">
             <Link
-              to={`/c/${chat.session.projectChatId}`}
-              className="inline-flex min-w-0 items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-2 py-[3px] text-[12.5px] font-medium text-accent hover:bg-accent/20"
-              title={`Back to the project: ${chat.session.runTitle}`}
+              to={`/c/${parent.projectChatId}`}
+              className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-2 py-[3px] text-[12.5px] font-medium text-accent hover:bg-accent/20"
+              title={`Back to the project: ${parent.runTitle}`}
             >
               <ArrowLeft size={13} className="shrink-0" />
               <Boxes size={13} className="shrink-0" />
-              <span className="truncate">{chat.session.runTitle}</span>
+              <span className="truncate">{parent.runTitle}</span>
             </Link>
             <span className="hidden text-dim sm:inline">›</span>
-            <span className="hidden min-w-0 items-center gap-1 truncate text-[12.5px] text-mut sm:inline-flex">
-              {chat.session.milestoneKey && <span className="mono text-dim">{chat.session.milestoneKey}</span>}
-              <span className="mono text-dim">{chat.session.key}</span>
-              <span className="truncate">{chat.session.name}</span>
-            </span>
+            <span className="hidden min-w-0 sm:inline-flex">{place}</span>
           </span>
         ) : (
           <span className="inline-flex min-w-0 max-w-[40vw] shrink items-center gap-1.5 text-[13.5px] font-medium sm:max-w-[45vw] sm:shrink-0">
@@ -193,9 +200,19 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer }: {
             ? <Check size={11} className="shrink-0 text-ok" />
             : <Copy size={11} className="shrink-0 text-dim opacity-0 transition-opacity group-hover:opacity-100" />}
         </button>
-        <GitChip projectId={project.id} gitState={chat.gitState} />
+        {!parent && <GitChip projectId={project.id} gitState={chat.gitState} />}
       </div>
-      <div className="flex shrink-0 items-center gap-1.5">
+      {parent && (
+        <>
+          {/* forces the wrap on a phone; nothing from sm up */}
+          <span className="order-1 basis-full sm:hidden" aria-hidden />
+          <div className="order-1 -mt-1.5 flex min-w-0 flex-1 items-center pb-2 sm:hidden">{place}</div>
+          <div className="order-1 -mt-1.5 flex min-w-0 shrink items-center pb-2 sm:order-none sm:mt-0 sm:pb-0">
+            <GitChip projectId={project.id} gitState={chat.gitState} />
+          </div>
+        </>
+      )}
+      <div className="flex h-[50px] shrink-0 items-center gap-1.5 sm:order-2">
         <ContextMeter usage={usage} onCompact={onCompact} />
         <ProjectMemoryMenu projectId={project.id} />
         <ExportMenu chatId={chat.id} />

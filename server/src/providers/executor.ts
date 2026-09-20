@@ -43,6 +43,8 @@ export async function executeRole(req: RoleExecutionRequest): Promise<ProviderTu
     ...(session ? { session } : {}),
     ...(req.emitActivity !== undefined ? { emitActivity: req.emitActivity } : {}),
     ...(req.nameSession ? { nameSession: true } : {}),
+    ...(req.difficulty ? { difficulty: req.difficulty } : {}),
+    ...(req.modelSource ? { modelSource: req.modelSource } : {}),
   });
 }
 

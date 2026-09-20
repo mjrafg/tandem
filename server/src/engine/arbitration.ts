@@ -18,6 +18,7 @@ import type {
   ArbitrationDecision, ArbitrationItem, ArbitrationPayload, Finding, FindingDisposition, FindingResponse, ReviewFindingRecord,
 } from '../../../shared/types';
 import { getPrompt, renderPrompt } from '../prompts';
+import { getSettings } from '../settings';
 import { executeRole } from '../providers/executor';
 import { resolveDirectorRoleConfig } from '../providers/resolve';
 import type { ClosedFinding } from './reviewLedger';
@@ -194,7 +195,7 @@ export interface ArbitrationInput {
  * `unresolved`, open and blocking.
  */
 export async function arbitrate(h: RunHandle, input: ArbitrationInput): Promise<ArbitrationPayload> {
-  const director = resolveDirectorRoleConfig(h.settings);
+  const director = resolveDirectorRoleConfig(getSettings()); // live, like every other request
   const prompt = [
     renderPrompt('director.arbitration_request', {
       original_request: input.originalRequest,
@@ -229,6 +230,7 @@ export async function arbitrate(h: RunHandle, input: ArbitrationInput): Promise<
       userPrompt: prompt,
       cwd: h.project.rootPath,
       emitActivity: false,
+      modelSource: 'role',
       timeoutMs: ARBITRATION_TIMEOUT,
     });
   } finally {

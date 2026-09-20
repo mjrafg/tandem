@@ -33,6 +33,33 @@ export type Effort = 'low' | 'medium' | 'high';
 export const EFFORTS: Effort[] = ['low', 'medium', 'high'];
 
 /**
+ * How hard a session's work is, as the Director judges it — and re-judges it:
+ * difficulty is a live property of the session, never frozen at creation.
+ * Each level maps (Settings → Roles → Difficulty tiers) to the Builder and
+ * Builder Reviewer configuration that should handle it, so trivial work runs
+ * on cheap models and hard work on strong ones. Resolved at EVERY request, so
+ * a settings change or a difficulty change takes effect on the next call.
+ */
+export type Difficulty = 'easy' | 'medium' | 'hard' | 'very_hard';
+export const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard', 'very_hard'];
+export const DIFFICULTY_LABEL: Record<Difficulty, string> = { easy: 'Easy', medium: 'Medium', hard: 'Hard', very_hard: 'Very hard' };
+
+/** one role's configuration for one difficulty tier */
+export interface TierConfig {
+  provider: Provider;
+  model: string;
+  effort: Effort;
+}
+/** null = this tier inherits the role's default (or the session's Agent profile) */
+export interface DifficultyTier {
+  builder: TierConfig | null;
+  reviewer: TierConfig | null;
+}
+
+/** which configuration decided the model a request ran on */
+export type ModelSource = 'difficulty' | 'agent' | 'role';
+
+/**
  * How an adapter reaches its backend. Both shipped providers are `cli`; the
  * field exists so a future HTTP/API provider does not have to pretend to be a
  * process, and so nothing outside a provider module tests for one.
@@ -206,6 +233,17 @@ export interface AppSettings {
   finalRepairInstructions: string;
   sharedInstructions: string;
   context: ContextConfig;
+  /** per-difficulty Builder / Builder Reviewer configuration; a null tier inherits */
+  difficulty: Record<Difficulty, DifficultyTier>;
+  /** the autonomy watchdog: how long an active project may sit with nothing running before the Director is woken */
+  orchestration: OrchestrationConfig;
+}
+
+export interface OrchestrationConfig {
+  /** minutes an active project may have NO agent running and NO scheduled retry before the Director is woken */
+  stallAfterMinutes: number;
+  /** consecutive stall wakes that produce no progress before the project is paused and the user asked */
+  stallMaxWakes: number;
 }
 
 /** Admin-visible metadata for an Observability API key — never the secret. */
@@ -274,6 +312,23 @@ export interface Chat {
   kind?: 'chat' | 'project' | 'pd-session';
   /** for kind='project': the run this chat directs */
   projectRunId?: string | null;
+  /**
+   * for kind='pd-session': the project this session belongs to — its run, the
+   * Project Chat to return to, and the session's place in the plan. Present
+   * only for project-owned sessions, so a standalone chat never shows a parent.
+   */
+  session?: SessionParent | null;
+}
+
+export interface SessionParent {
+  runId: string;
+  runTitle: string;
+  /** the Project Chat (the Director's conversation) — where to go back to */
+  projectChatId: string;
+  key: string;
+  name: string;
+  milestoneKey: string | null;
+  milestoneName: string | null;
 }
 
 // ---------------------------------------------------------------- events
@@ -367,6 +422,10 @@ export interface AiCallPayload {
   provider: Provider;
   model: string;
   effort: Effort;
+  /** the session's difficulty at the moment of this request, when it has one */
+  difficulty?: Difficulty;
+  /** which configuration picked this model: the difficulty tier, the session's Agent profile, or the role default */
+  modelSource?: ModelSource;
   status: StepStatus;
   request: { prompt: string; system?: string };
   response?: { text: string; usage?: AiUsage };
@@ -531,7 +590,7 @@ export interface ArbitrationPayload {
  * final Reviewer's own report — the record, not the last thing anyone said.
  */
 export interface SessionFinalState {
-  verdict: 'pass' | 'findings' | 'resolved' | 'unreviewed';
+  verdict: 'pass' | 'findings' | 'resolved' | 'waived' | 'unreviewed';
   /** the round that produced the final verdict, and who reviewed */
   round: number | null;
   reviewer: 'builder_reviewer' | null;
@@ -952,6 +1011,16 @@ export interface PdSession {
   status: PdSessionStatus;
   /** Builder Agent profile the Director selected (stable id; null = default) */
   agentProfileId?: string | null;
+  /** the Director's current judgment of the work's difficulty — changeable at any time */
+  difficulty?: Difficulty | null;
+  /**
+   * The Director's current decision on whether this session needs an
+   * independent review — separate from difficulty (easy work can be
+   * sensitive; hard work can be self-evident), changeable while the work is
+   * in progress, and read by the workflow at the moment the review decision
+   * is made. Default true.
+   */
+  reviewRequired?: boolean;
   /** the immutable Agent configuration this session actually executed with */
   agent?: AgentSnapshot | null;
   dependsOn: string[];     // session keys within the run
@@ -962,8 +1031,9 @@ export interface PdSession {
   /** why a paused session stopped: the user's own stop, a project-wide pause, a Tandem restart, or a provider limit */
   stopReason?: 'user_stop' | 'project_pause' | 'restart' | 'provider_outage' | null;
   resultSummary: string | null;
-  /** `resolved` = findings were raised and every one was closed by Director arbitration as non-blocking */
-  reviewVerdict: 'pass' | 'findings' | 'resolved' | null;
+  /** `resolved` = findings were raised and every one was closed by Director arbitration as non-blocking;
+   *  `waived` = the Director decided this session needs no independent review */
+  reviewVerdict: 'pass' | 'findings' | 'resolved' | 'waived' | null;
   /**
    * The authoritative final state of a completed session, built from the
    * durable record (final verdict, what the Reviewer verified, what stands

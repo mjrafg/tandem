@@ -10,7 +10,7 @@
 import { getChat } from './db';
 import { duePendingReviews, deletePendingReview, expediteReview, getPendingReview } from './engine/reviewWait';
 import { isRunning, startReviewRetry } from './engine/workflow';
-import { deliverPendingWake, queueObservation, retrySessionReview } from './director/engine';
+import { deliverPendingWake, queueObservation, retrySessionReview, sweepStalls } from './director/engine';
 import { deletePendingWake, duePendingWakes, expediteWake } from './director/pendingWake';
 import { addActivity, getRunRaw, listRuns, patchSession, sessionForChat, sessionsByStatus } from './director/store';
 
@@ -93,6 +93,8 @@ function sweep(): void {
   }
   sweepProviderWakes();
   reconcileOrphans();
+  // last: a stall wake it records is delivered by sweepProviderWakes on the NEXT tick
+  try { sweepStalls(); } catch (err) { console.error('[tandem] stall watchdog failed:', err); }
 }
 
 /**
@@ -114,7 +116,9 @@ function sweepProviderWakes(): void {
     // fresh row with the new reset time rather than colliding with this one
     deletePendingWake(wake.runId);
     wakeInFlight.add(wake.runId);
-    addActivity(wake.runId, 'state', `${wake.reason} lifted — picking the project back up`);
+    addActivity(wake.runId, 'state', wake.reason === 'Progress check' ? 'Progress check delivered — the Director is woken'
+      : wake.reason === 'Director failure' ? 'Director failure — retrying the failed Director turn now'
+        : `${wake.reason} lifted — picking the project back up`);
     try { deliverPendingWake(wake.runId, wake.message, wake.reason); } finally { wakeInFlight.delete(wake.runId); }
   }
 }

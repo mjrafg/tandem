@@ -1,4 +1,5 @@
-import type { AppSettings, Provider } from '../../shared/types';
+import type { AppSettings, Difficulty, Provider } from '../../shared/types';
+import { DIFFICULTIES } from '../../shared/types';
 import { kvGet, kvSet } from './db';
 import { providerOfModel } from './providers/catalog';
 import { canonicalProvider } from './providers/ids';
@@ -44,6 +45,23 @@ export const DEFAULT_SETTINGS: AppSettings = {
     compactMaxTokens: 200_000,
     autoCompact: true,
     preserveRecentTokens: 12_000,
+  },
+  // Difficulty tiers start empty: every tier inherits the role default (or the
+  // session's Agent profile), which is exactly what ran before tiers existed.
+  // The admin fills in the tiers worth differentiating.
+  difficulty: {
+    easy: { builder: null, reviewer: null },
+    medium: { builder: null, reviewer: null },
+    hard: { builder: null, reviewer: null },
+    very_hard: { builder: null, reviewer: null },
+  },
+  orchestration: {
+    // an active project with nothing running and nothing scheduled for this
+    // long is a stall: the Director is woken with the facts
+    stallAfterMinutes: 10,
+    // this many consecutive wakes with no progress → pause and ask the user,
+    // rather than spending a Director turn every backoff forever
+    stallMaxWakes: 5,
   },
 };
 
@@ -150,6 +168,23 @@ function normalizeProviders(s: AppSettings): void {
     const owner = providerOfModel(d.model ?? '');
     if (owner && owner !== d.provider) d.model = '';
   }
+  // a tier is either a complete, coherent configuration or nothing at all —
+  // never half a tier that would resolve to "Codex, running claude-opus-5"
+  for (const level of DIFFICULTIES) {
+    const tier = (s.difficulty as any)[level] ?? (s.difficulty[level] = { builder: null, reviewer: null });
+    for (const slot of ['builder', 'reviewer'] as const) {
+      const t = tier[slot];
+      if (!t || typeof t !== 'object') { tier[slot] = null; continue; }
+      const provider = canonicalProvider(t.provider);
+      const model = typeof t.model === 'string' ? t.model.trim() : '';
+      const owner = model ? providerOfModel(model) : null;
+      if (!provider || !model || (owner && owner !== provider) || !['low', 'medium', 'high'].includes(t.effort)) { tier[slot] = null; continue; }
+      tier[slot] = { provider, model, effort: t.effort };
+    }
+  }
+  const o = s.orchestration;
+  o.stallAfterMinutes = clamp(o.stallAfterMinutes, 2, 24 * 60);
+  o.stallMaxWakes = clamp(o.stallMaxWakes, 1, 50);
 }
 
 /**
@@ -167,6 +202,23 @@ export function validateRoleConfigs(patch: Partial<AppSettings>): string | null 
     const model = typeof r.model === 'string' ? r.model.trim() : '';
     const owner = model ? providerOfModel(model) : null;
     if (owner && owner !== provider) return `"${model}" is not a model the ${role}'s provider (${provider}) can run.`;
+  }
+  // difficulty tiers: a configured slot must be a complete, coherent pair
+  const tiers = (patch as any).difficulty as Record<string, any> | undefined;
+  if (tiers && typeof tiers === 'object') {
+    for (const level of Object.keys(tiers)) {
+      if (!DIFFICULTIES.includes(level as Difficulty)) return `Unknown difficulty level "${level}".`;
+      for (const slot of ['builder', 'reviewer'] as const) {
+        const t = tiers[level]?.[slot];
+        if (t == null) continue;
+        const p = canonicalProvider(t.provider);
+        if (!p) return `Unknown AI provider "${String(t.provider)}" for the ${level} ${slot} tier.`;
+        const model = typeof t.model === 'string' ? t.model.trim() : '';
+        if (!model) return `The ${level} ${slot} tier needs a model (or clear it to inherit).`;
+        const owner = providerOfModel(model);
+        if (owner && owner !== p) return `"${model}" is not a model the ${level} ${slot} tier's provider (${p}) can run.`;
+      }
+    }
   }
   return null;
 }

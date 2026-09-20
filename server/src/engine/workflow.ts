@@ -28,7 +28,8 @@ export { setGitWorkflow } from './gitFlow';
 const BUILDER_TIMEOUT = 30 * 60_000;
 const REVIEW_TIMEOUT = 15 * 60_000;
 /** the review-loop cap — enforced by the orchestration below, not by prompts */
-import { MAX_REVIEW_ROUNDS, deriveLegacyLedger, getLedger, openTask, recordClosedFindings, recordRepair, recordResolution, recordReview, revisionOf, type ReviewLedger } from './reviewLedger';
+import { MAX_REVIEW_ROUNDS, deriveLegacyLedger, getLedger, openTask, recordClosedFindings, recordRepair, recordResolution, recordReview, recordWaiver, revisionOf, type ReviewLedger } from './reviewLedger';
+import { sessionReviewRequired } from '../director/store';
 
 /** wording for the changed-files note comes from the prompt registry */
 interface ReviewDelta { files: string[]; note: string }
@@ -136,7 +137,10 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   const builderTimeout = Math.min(runOpts.timeoutMs ?? BUILDER_TIMEOUT, 90 * 60_000);
   // the chat's immutable Agent snapshot decides model/effort/specialist prompt;
   // chats without one keep the Builder role settings exactly as before
-  const builderCfg = resolveBuilderRole(h.settings, h.chat.id);
+  // resolved from the LIVE settings at this request: a difficulty tier changed
+  // in Settings, or the session's difficulty changed by the Director, applies
+  // to the very next call — never a selection frozen when the run started
+  const builderCfg = resolveBuilderRole(getSettings(), h.chat.id);
   const startDir = h.project.rootPath;
   const before = captureWorktree(startDir);
   // the stored session is continued only by the provider that created it; a
@@ -151,6 +155,8 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     provider: builderCfg.provider,
     model: builderCfg.model,
     effort: builderCfg.effort,
+    difficulty: builderCfg.difficulty,
+    modelSource: builderCfg.source,
     systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
     userPrompt: builderMessage(h, userText, resume),
     cwd: startDir,
@@ -175,6 +181,15 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
   if (!runOpts.review) {
     // an orchestration choice, recorded honestly (not a failure or unavailability)
     if (delta) h.status('Reviewer skipped by user for this request.');
+    return true;
+  }
+  // A Director session follows the Director's CURRENT decision, read now —
+  // not the one it was launched with. Review is intentional: the Director
+  // decides per session whether independent review is worth its cost, and
+  // may change its mind while the Builder works.
+  if (sessionReviewRequired(h.chat.id) === false) {
+    recordWaiver(h.chat.id);
+    h.status('Independent review waived by the Project Director for this session — the result is delivered on the Builder\'s account alone, and the record says so.');
     return true;
   }
   if (h.settings.roles.builder_reviewer.enabled === false) return true;
@@ -249,26 +264,31 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
   /** the continuation/recovery instruction this run was started with, if any */
   steering?: string;
 }): Promise<PhaseOutcome> {
-  // repairs run on the SAME snapshot the first turn used — an admin editing the
-  // Agent template mid-session never changes what this session executes
-  const builderCfg = resolveBuilderRole(h.settings, h.chat.id);
   const taskSeq = getLedger(h.chat.id)?.taskSeq ?? 0;
   let subject2 = opts.subject;
   let repairContext: RepairContext | undefined = opts.replayRepair;
   let scope: VerifyScope | undefined = opts.replayScope;
 
-  const builderTurn = (message: string) => executeRole({
-    handle: h,
-    role: 'builder',
-    provider: builderCfg.provider,
-    model: builderCfg.model,
-    effort: builderCfg.effort,
-    systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
-    userPrompt: message,
-    cwd: h.project.rootPath,
-    session: storedSessionRef(h.chat.id),
-    timeoutMs: opts.builderTimeout,
-  });
+  // Every Builder turn resolves its model afresh from the live settings and the
+  // session's CURRENT difficulty: the specialist prompt overlay is the session's
+  // identity and stays; the model follows the latest applicable configuration
+  const builderTurn = (message: string) => {
+    const builderCfg = resolveBuilderRole(getSettings(), h.chat.id);
+    return executeRole({
+      handle: h,
+      role: 'builder',
+      provider: builderCfg.provider,
+      model: builderCfg.model,
+      effort: builderCfg.effort,
+      difficulty: builderCfg.difficulty,
+      modelSource: builderCfg.source,
+      systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
+      userPrompt: message,
+      cwd: h.project.rootPath,
+      session: storedSessionRef(h.chat.id),
+      timeoutMs: opts.builderTimeout,
+    });
+  };
   const closedList = () => closedFindingRecords(h.chat.id, taskSeq).map((c) => ({ id: c.id, title: c.title, severity: c.severity, decision: c.state as 'builder_upheld' | 'non_blocking' | 'deferred', reason: c.arbitrationReason ?? '', round: c.round }));
   const describe = (f: ReviewFindingRecord) => `${f.id} [${f.severity}] ${f.title}`;
   const findingOf = (f: ReviewFindingRecord): Finding => ({ id: f.id, severity: f.severity, title: f.title, detail: f.detail, ...(f.file ? { file: f.file } : {}), ...(f.line ? { line: f.line } : {}), ...(f.evidence ? { evidence: f.evidence } : {}), ...(f.category ? { category: f.category } : {}), ...(f.recommendation ? { recommendation: f.recommendation } : {}) });
@@ -610,12 +630,17 @@ export function startReviewRetry(chatId: string): Promise<void> | null {
     addEvent(chatId, 'run', { phase: 'started', review: true }, { runId: ctx.runId });
     const h = new RunHandle(ctx, chat, project, []);
     try {
-      // an admin who turned the Reviewer OFF dissolved the review requirement:
-      // finish the run the way a reviewer-off run finishes — loudly unreviewed
-      if (h.settings.roles.builder_reviewer.enabled === false) {
+      // an admin who turned the Reviewer OFF — or a Director who waived this
+      // session's review while it waited — dissolved the review requirement:
+      // finish the run the way a reviewer-off run finishes, saying which
+      const waived = sessionReviewRequired(chatId) === false;
+      if (h.settings.roles.builder_reviewer.enabled === false || waived) {
         deletePendingReview(chatId);
+        if (waived) recordWaiver(chatId);
         h.gitFlow = (await adoptRepo(h)) ?? undefined;
-        h.status('The Builder Reviewer was disabled in Settings while this review was waiting — the pending review was dropped and the result remains unreviewed.');
+        h.status(waived
+          ? 'The Project Director waived this session\'s review while it was waiting — the pending review was dropped; the result is delivered on the Builder\'s account alone.'
+          : 'The Builder Reviewer was disabled in Settings while this review was waiting — the pending review was dropped and the result remains unreviewed.');
         if (!ctx.stopped) await finishGitRun(h, pending.userText);
         addEvent(chatId, 'run', { phase: ctx.stopped ? 'stopped' : 'finished' }, { runId: ctx.runId });
         return;
@@ -742,7 +767,7 @@ type ReviewResult =
 
 async function review(h: RunHandle, originalRequest: string, subject: ReviewSubject, round: number, steering?: string, repair?: RepairContext, scope?: VerifyScope): Promise<ReviewResult> {
   h.status(round === 1 ? 'Reviewer is checking the result…' : 'Reviewer is verifying the repaired findings…');
-  const cfg = resolveBuilderReviewerRole(h.settings);
+  const cfg = resolveBuilderReviewerRole(getSettings(), h.chat.id); // live: settings and difficulty as they stand now
   const evidence = subject.kind === 'changes'
     ? renderPrompt('reviewer.changed_section', {
       changed_files_note: subject.note,
@@ -791,6 +816,8 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
       provider: cfg.provider,
       model: cfg.model,
       effort: cfg.effort,
+      difficulty: cfg.difficulty,
+      modelSource: cfg.source,
       systemPrompt: reviewerSystemText(h.settings),
       userPrompt: prompt,
       cwd: h.project.rootPath,

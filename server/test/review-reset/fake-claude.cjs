@@ -99,7 +99,14 @@ async function runDirector() {
   let script = [];
   try { script = JSON.parse(fs.readFileSync(scriptFile, 'utf8')); } catch {}
   // a refused turn does not advance the script: the engine re-says it later
-  if (String(countCall('director')) === String(process.env.FAKE_DIRECTOR_FAIL_ON_TURN || '')) refuse();
+  const dn = countCall('director');
+  if (String(dn) === String(process.env.FAKE_DIRECTOR_FAIL_ON_TURN || '')) refuse();
+  // FAKE_DIRECTOR_CRASH_ON_TURN: the Nth Director turn dies with a generic, NON-outage
+  // error (a crash, a refused model) — the case that used to end a project silently
+  if (String(dn) === String(process.env.FAKE_DIRECTOR_CRASH_ON_TURN || '')) {
+    process.stderr.write('fatal: the CLI crashed before producing a result\n');
+    process.exit(3);
+  }
   const stateFile = path.join(process.env.FAKE_STATE_DIR || '/tmp', `director-step-${process.env.TANDEM_CHAT_ID}`);
   let step = 0;
   try { step = Number(fs.readFileSync(stateFile, 'utf8')) || 0; } catch {}

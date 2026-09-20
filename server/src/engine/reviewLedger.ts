@@ -38,8 +38,8 @@ export interface ReviewLedger {
   originalRequest: string;
   reviewsConsumed: number;
   repairsConsumed: number;
-  /** `resolved` = the Director closed every remaining finding as non-blocking */
-  lastVerdict: 'pass' | 'findings' | 'resolved' | null;
+  /** `resolved` = the Director closed every remaining finding as non-blocking; `waived` = the Director decided no review was needed */
+  lastVerdict: 'pass' | 'findings' | 'resolved' | 'waived' | null;
   finalRepairDone: boolean;
   /** identity of the revision the last verdict was about */
   reviewedRevision: string | null;
@@ -149,6 +149,16 @@ export function recordClosedFindings(chatId: string, items: ClosedFinding[]): vo
  */
 export function recordResolution(chatId: string): void {
   db.prepare("UPDATE review_ledger SET last_verdict = 'resolved', updated_at = ? WHERE chat_id = ?").run(Date.now(), chatId);
+}
+
+/**
+ * The Director decided this task needs no independent review. Recorded as the
+ * standing verdict so every reader (the Director's outcome, integration, the
+ * snapshot) sees a deliberate decision rather than a missing review. Spends
+ * no round: a later decision to review after all starts at round 1.
+ */
+export function recordWaiver(chatId: string): void {
+  db.prepare("UPDATE review_ledger SET last_verdict = 'waived', updated_at = ? WHERE chat_id = ?").run(Date.now(), chatId);
 }
 
 export function recordRepair(chatId: string, final: boolean): void {

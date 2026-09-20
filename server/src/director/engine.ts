@@ -12,7 +12,8 @@ import { findOrCreateProject } from '../projectRoutes';
 import { executeRole, providerLabel, providerShortLabel } from '../providers/executor';
 import { listFindings } from '../engine/findings';
 import { getLedger as getReviewLedger } from '../engine/reviewLedger';
-import type { SessionFinalState } from '../../../shared/types';
+import type { Difficulty, SessionFinalState } from '../../../shared/types';
+import { DIFFICULTIES } from '../../../shared/types';
 import { resolveBuilderRole, resolveDirectorReviewerRole, resolveDirectorRoleConfig } from '../providers/resolve';
 import { rememberSession, storedSessionRef } from '../providers/sessions';
 import { RunHandle, type RunCtx, isRunning, registerCtx, releaseCtx, repoBusyBy, stopRun } from '../engine/run';
@@ -20,7 +21,7 @@ import { computeUsage, shouldAutoCompact } from '../context';
 import { performNativeCompaction } from '../engine/providerContext';
 import { releaseBrowsers } from '../engine/browserHost';
 import { parseVerdict, startReviewRetry, startRun } from '../engine/workflow';
-import { type ProviderOutage, classifyProviderOutage, fmtRetryAt, getPendingReview, outageFromFailure } from '../engine/reviewWait';
+import { type ProviderOutage, classifyProviderOutage, fmtRetryAt, getPendingReview, outageFromFailure, upsertPendingReview } from '../engine/reviewWait';
 import { expediteWake, getPendingWake, providerWaitActive, upsertPendingWake } from './pendingWake';
 import { terminateProcGroup } from '../engine/procGroups';
 import { agentCatalogText } from '../agents/catalog';
@@ -31,7 +32,8 @@ import {
   getRun, getRunRaw, getSession, listRuns, milestoneByKey, milestoneDepsOpen, openMilestones,
   patchMilestone, patchRun, patchSession, planDocument, planSessions, resetAutoResumeStreak,
   runForChat, sessionTitlePrefix, sessionsByStatus, setPlan, setRunState, stateSnapshot,
-  type MilestoneInput, type SessionInput,
+  type MilestoneInput, type SessionInput, bumpStallStreak, resetStallStreak, setSessionDifficulty, stallState, listActivity, effectiveTierText,
+  setSessionReviewRequired,
 } from './store';
 
 /**
@@ -112,6 +114,78 @@ export function queueObservation(runId: string, text: string): void {
 }
 
 /**
+ * The autonomy watchdog: an active project must not be able to sit forever
+ * with unfinished work, nothing running, and nothing scheduled to run.
+ *
+ * Every other recovery path here reacts to a specific event — a provider
+ * limit, a restart, a lost review retry. This one reacts to the ABSENCE of
+ * events: a Director turn that failed in a way nothing retried, a Director
+ * that answered without starting the work it had planned, a wake that was
+ * lost in a crash. Called by the sweeper on every tick.
+ *
+ * A stall is: run RUNNING/RESUMING/PLANNING; no session running or awaiting
+ * a scheduled review; no pending wake; no Director turn in flight; unfinished
+ * work exists (an open milestone or a non-terminal session; a PLANNING run
+ * counts only once the user has actually briefed it); and the last thing the
+ * project did was more than stallAfterMinutes ago. The Director is then
+ * woken with the facts, through the same persisted wake the outage path uses
+ * — so the wake survives a restart. Wakes back off (10, 20, 40 min…); after
+ * stallMaxWakes consecutive wakes with no progress the project is paused with
+ * the reason stated, so a Director that cannot get going never burns turns
+ * indefinitely and the user is told plainly.
+ */
+export function sweepStalls(now = Date.now()): void {
+  const o = getSettings().orchestration;
+  // TANDEM_STALL_AFTER_MS: test override — the harness cannot wait ten minutes
+  const stallAfter = Number(process.env.TANDEM_STALL_AFTER_MS) > 0 ? Number(process.env.TANDEM_STALL_AFTER_MS) : o.stallAfterMinutes * 60_000;
+  for (const run of listRuns()) {
+    if (!['RUNNING', 'RESUMING', 'PLANNING'].includes(run.state)) continue;
+    if (turnState(run.id).busy || isRunning(run.chatId)) continue;
+    if (getPendingWake(run.id)) continue; // something is already scheduled to say
+    const sessions = run.milestones.flatMap((m) => m.sessions);
+    if (sessions.some((s) => s.status === 'running')) continue;
+    if (sessions.some((s) => s.status === 'awaiting_review' && s.chatId && getPendingReview(s.chatId))) continue;
+    // unfinished work: an open milestone, or a session that is not finished
+    const openMilestones = run.milestones.filter((m) => m.status !== 'completed');
+    const unfinished = sessions.filter((s) => !['completed', 'abandoned'].includes(s.status));
+    if (run.state === 'PLANNING' && run.milestones.length === 0) {
+      // No plan yet: there is no work to stall. A first planning turn that
+      // failed is retried by the Director-failure wake; a brief nobody followed
+      // up is the user's to pick up, not something to spend Director turns on
+      // (a weeks-old abandoned brief must not be woken by a deploy).
+      continue;
+    } else if (openMilestones.length === 0 && unfinished.length === 0) {
+      continue; // all milestones done: delivery/completion is the Director's call, prodded once below only if it stays silent
+    }
+    // when did the project last do anything?
+    const lastActivity = listActivity(run.id, 1)[0]?.ts ?? 0;
+    const lastTurn = (db.prepare("SELECT MAX(ts) AS t FROM events WHERE chat_id = ? AND kind = 'ai_call'").get(run.chatId) as any)?.t ?? 0;
+    const { streak, lastWakeAt } = stallState(run.id);
+    const quietSince = Math.max(lastActivity, lastTurn, lastWakeAt);
+    // exponential backoff on the quiet window: 1×, 2×, 4×… stallAfter
+    const wait = stallAfter * 2 ** Math.min(streak, 6);
+    if (now - quietSince < wait) continue;
+
+    if (streak >= o.stallMaxWakes) {
+      setRunState(run.id, 'PAUSED', `The project stalled: ${streak} automatic Director wakes produced no progress (nothing running, nothing scheduled, ${unfinished.length} session${unfinished.length === 1 ? '' : 's'} unfinished). Paused so it does not spend Director turns indefinitely — inspect the project chat and press Resume, or give the Director new instructions.`);
+      refreshLiveBlock(run.id);
+      continue;
+    }
+    const n = bumpStallStreak(run.id, now);
+    const minutes = Math.round((now - quietSince) / 60_000);
+    addActivity(run.id, 'state', `Progress check ${n}/${o.stallMaxWakes}: nothing has been running for ${minutes} min and nothing is scheduled — waking the Director`);
+    const facts = [
+      `Run state ${run.state}; last activity ${minutes} minutes ago.`,
+      openMilestones.length ? `Open milestones: ${openMilestones.map((m) => `${m.key} [${m.status}]`).join(', ')}.` : 'Every milestone is completed.',
+      unfinished.length ? `Unfinished sessions: ${unfinished.map((s) => `${s.key} [${s.status}]`).join(', ')}.` : 'No session is unfinished.',
+      n > 1 ? `This is wake ${n} of ${o.stallMaxWakes}: the previous ${n - 1} produced no progress. After ${o.stallMaxWakes} the project is paused for the user.` : '',
+    ].filter(Boolean).join(' ');
+    // through the persisted wake, so a restart between now and delivery loses nothing
+    upsertPendingWake({ runId: run.id, message: renderPrompt('director.stall_observation', { facts }), reason: 'Progress check', detail: facts, retryAt: now });
+  }
+}
+
+/**
  * Serialize Director turns per run: concurrent triggers queue up and are
  * delivered together in the next turn.
  */
@@ -129,18 +203,20 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
       isObservation: kind === 'observation',
     };
     while (next) {
-      const outage = await runDirectorTurn(runId, next.text);
-      if (outage) {
-        // The provider refused. Everything undelivered — this turn's text plus
-        // whatever queued behind it — is persisted and said again once the
-        // limit lifts. Dropping it is what left the project with sessions in
-        // needs_attention and no Director able to decide anything.
+      const turn = await runDirectorTurn(runId, next.text);
+      if (turn.kind === 'outage' || turn.kind === 'failed') {
+        // The turn did not happen. Everything undelivered — this turn's text
+        // plus whatever queued behind it — is persisted and said again: once
+        // the limit lifts for an outage, after a short backoff for any other
+        // failure (a timeout, a crash, a refused model). Dropping it is what
+        // left projects with nothing running and nobody due to wake the
+        // Director — a temporary Director failure silently ended the project.
         const queued = t.queued.splice(0);
         const pending = queued.length > 0
           ? `${next.text}\n\n${renderPrompt('director.observation', { observations: queued.map((q) => q.text).join('\n') })}`
           : next.text;
-        const wake = upsertPendingWake({ runId, message: pending, reason: outage.reason, detail: outage.detail, retryAt: outage.retryAt, transient: outage.transient });
-        addActivity(runId, 'state', `${outage.reason} — work is preserved; the Director picks this up again at ${fmtRetryAt(wake.retryAt)}`);
+        const wake = wakeForTurn(runId, turn, pending)!;
+        addActivity(runId, 'state', `${wake.reason} — work is preserved; the Director picks this up again at ${fmtRetryAt(wake.retryAt)}`);
         broadcastRun(runId);
         break;
       }
@@ -175,6 +251,11 @@ async function pumpDirector(runId: string, message: string, kind: 'user' | 'obse
       addActivity(runId, 'state', `Director turn failed — ${detail.slice(0, 200)}`);
       const chatId = getRunRaw(runId)?.chat_id;
       if (chatId) addEvent(chatId, 'error', { message: 'Director turn failed', detail, source: 'director', retryable: true });
+      // a thrown turn is still a turn that did not happen: keep what was being
+      // said and let the sweeper deliver it again after a backoff
+      const rest = t.queued.splice(0).map((q) => q.text);
+      const wake = upsertPendingWake({ runId, message: [message, ...rest].join('\n\n'), reason: 'Director failure', detail, retryAt: Date.now(), transient: true });
+      addActivity(runId, 'state', `Director failure — the turn is retried at ${fmtRetryAt(wake.retryAt)}`);
     } catch { /* reporting must never be the thing that throws */ }
   } finally {
     t.busy = false;
@@ -223,13 +304,40 @@ async function directorAutoCompact(runId: string): Promise<void> {
  * caller's signal to persist what it was trying to say and wait, rather than
  * dropping it and leaving the project with no decision-maker.
  */
-async function runDirectorTurn(runId: string, message: string): Promise<(ProviderOutage & { detail: string }) | null> {
+type TurnResult = { kind: 'ok' } | { kind: 'skipped' } | { kind: 'outage'; outage: ProviderOutage & { detail: string } } | { kind: 'failed'; detail: string };
+
+/**
+ * A turn that did not happen must leave a persisted wake behind, whatever
+ * the cause: an outage waits for the stated reset, any other failure retries
+ * after a short backoff. Returns the wake, or null when the turn happened.
+ */
+function wakeForTurn(runId: string, turn: TurnResult, message: string) {
+  if (turn.kind === 'outage') return upsertPendingWake({ runId, message, reason: turn.outage.reason, detail: turn.outage.detail, retryAt: turn.outage.retryAt, transient: turn.outage.transient });
+  if (turn.kind === 'failed') return upsertPendingWake({ runId, message, reason: 'Director failure', detail: turn.detail, retryAt: Date.now() + directorRetryDelay(runId) });
+  return null;
+}
+
+/**
+ * A Director turn that failed for a reason that is not an outage (a timeout,
+ * a crash, a refused model) is retried soon and then progressively later:
+ * 1, 2, 5, 10, 20 minutes. Soon, because most such failures are one-offs and
+ * a project should not sit for five minutes over a blip; later, because a
+ * failure that repeats is not fixed by hammering it.
+ */
+function directorRetryDelay(runId: string): number {
+  const attempts = (getPendingWake(runId)?.attempts ?? 0) + 1;
+  const ladder = [60_000, 120_000, 300_000, 600_000, 1_200_000];
+  const override = Number(process.env.TANDEM_DIRECTOR_RETRY_MS);
+  return override > 0 ? override : ladder[Math.min(attempts, ladder.length) - 1];
+}
+
+async function runDirectorTurn(runId: string, message: string): Promise<TurnResult> {
   const run = getRun(runId);
-  if (!run) return null;
+  if (!run) return { kind: 'skipped' };
   const chat = getChat(run.chatId);
   const project = getProject(chat?.projectId ?? '');
-  if (!chat || !project) return null;
-  if (isRunning(chat.id)) return null; // a turn is already live (belt and braces)
+  if (!chat || !project) return { kind: 'skipped' };
+  if (isRunning(chat.id)) return { kind: 'skipped' }; // a turn is already live (belt and braces)
 
   const settings = getSettings();
   // no rootPath in the ctx: Director turns may run while sessions hold the
@@ -256,27 +364,32 @@ async function runDirectorTurn(runId: string, message: string): Promise<(Provide
       userPrompt: `${state}\n\n${message}`,
       cwd: project.rootPath,
       session: storedSessionRef(chat.id),
+      modelSource: 'role',
       timeoutMs: DIRECTOR_TIMEOUT,
     });
     rememberSession(chat.id, result.session);
+    if (result.status === 'stopped') return { kind: 'skipped' };
     if (result.status === 'failed') {
       // a temporary provider limit is not a Director failure: the caller keeps
-      // what it was saying and re-says it once the limit lifts
+      // what it was saying and re-says it once the limit lifts. Any OTHER
+      // failure (a timeout, a crash, a refused model) is reported as a failure
+      // — and the caller still keeps what it was saying, because a turn that
+      // never happened must be retried, not forgotten
       const outage = outageFromFailure(result.failure, providerShortLabel(director.provider));
-      const detail = result.failure?.message;
+      const detail = result.failure?.message ?? 'the Director call failed';
       addEvent(chat.id, 'error', {
         message: outage ? `Director paused — ${outage.reason}` : 'Director call failed',
-        detail: outage ? `${detail}\nRetrying automatically at ${fmtRetryAt(outage.retryAt)}.` : detail,
+        detail: outage ? `${detail}\nRetrying automatically at ${fmtRetryAt(outage.retryAt)}.` : `${detail}\nThe turn is retried automatically.`,
         source: 'director',
         retryable: true,
       });
-      return outage ? { ...outage, detail: detail ?? '' } : null;
+      return outage ? { kind: 'outage', outage: { ...outage, detail } } : { kind: 'failed', detail };
     }
   } finally {
     releaseCtx(ctx);
     setChatRunning(chat.id, false);
   }
-  return null;
+  return { kind: 'ok' };
 }
 
 // ---------------------------------------------------------------- review plumbing
@@ -316,6 +429,7 @@ async function reviewArtifact(runId: string, prompt: string, round: number): Pro
       userPrompt: `${prompt}\n\n${getPrompt('reviewer.output_format')}`,
       cwd: project.rootPath,
       emitActivity: false,
+      modelSource: 'role',
       timeoutMs: REVIEW_TIMEOUT,
     });
     if (result.status !== 'completed') {
@@ -382,15 +496,15 @@ async function processAfterTurn(runId: string): Promise<void> {
     patchRun(runId, { plan_review_round: round + 1 });
     const key = round === 1 ? 'director.plan_findings_message' : 'director.plan_final_message';
     const findingsMessage = renderPrompt(key, { findings: review.findingsText });
-    const planOutage = await runDirectorTurn(runId, findingsMessage);
-    if (planOutage) {
+    const planTurn = await runDirectorTurn(runId, findingsMessage);
+    if (planTurn.kind === 'outage' || planTurn.kind === 'failed') {
       // The Director never saw these findings. Give the round BACK — recursing
       // now would re-review a plan that was never revised, walk the counter to
       // the policy cap and accept a plan the reviewer rejected twice, with two
       // real review rounds spent on a provider fault.
       patchRun(runId, { plan_review_round: round });
-      const wake = upsertPendingWake({ runId, message: findingsMessage, reason: planOutage.reason, detail: planOutage.detail, retryAt: planOutage.retryAt, transient: planOutage.transient });
-      addActivity(runId, 'state', `${planOutage.reason} — plan review round ${round} is re-offered at ${fmtRetryAt(wake.retryAt)}`);
+      const wake = wakeForTurn(runId, planTurn, findingsMessage)!;
+      addActivity(runId, 'state', `${wake.reason} — plan review round ${round} is re-offered at ${fmtRetryAt(wake.retryAt)}`);
       return;
     }
     await processAfterTurn(runId); // the resubmission bumped state; continue the loop
@@ -433,14 +547,14 @@ async function processAfterTurn(runId: string): Promise<void> {
     patchRun(runId, { pending_recovery: JSON.stringify(pending) });
     const key = round === 1 ? 'director.recovery_findings_message' : 'director.recovery_final_message';
     const recoveryMessage = renderPrompt(key, { findings: review.findingsText });
-    const recoveryOutage = await runDirectorTurn(runId, recoveryMessage);
-    if (recoveryOutage) {
+    const recoveryTurn = await runDirectorTurn(runId, recoveryMessage);
+    if (recoveryTurn.kind === 'outage' || recoveryTurn.kind === 'failed') {
       // same reasoning as the plan loop, and worse if left: the cap path calls
       // applyRecovery, which restarts a session directly
       pending.round = round;
       patchRun(runId, { pending_recovery: JSON.stringify(pending) });
-      const wake = upsertPendingWake({ runId, message: recoveryMessage, reason: recoveryOutage.reason, detail: recoveryOutage.detail, retryAt: recoveryOutage.retryAt, transient: recoveryOutage.transient });
-      addActivity(runId, 'state', `${recoveryOutage.reason} — the recovery decision for ${pending.sessionKey} is re-offered at ${fmtRetryAt(wake.retryAt)}`);
+      const wake = wakeForTurn(runId, recoveryTurn, recoveryMessage)!;
+      addActivity(runId, 'state', `${wake.reason} — the recovery decision for ${pending.sessionKey} is re-offered at ${fmtRetryAt(wake.retryAt)}`);
       return;
     }
     await processAfterTurn(runId);
@@ -653,9 +767,10 @@ async function alreadyIntegrated(
 
   // `resolved` = the Director closed every remaining finding as non-blocking;
   // that is the Director's own approval, recorded per finding in the evidence
-  const unapproved = completed.filter((s) => s.reviewVerdict !== 'pass' && s.reviewVerdict !== 'resolved');
+  // `waived` = the Director decided no review was needed; that decision is recorded and stands
+  const unapproved = completed.filter((s) => s.reviewVerdict !== 'pass' && s.reviewVerdict !== 'resolved' && s.reviewVerdict !== 'waived');
   if (unapproved.length > 0) {
-    return { ok: false, reason: `${unapproved.map((s) => `${s.key} (${s.reviewVerdict ?? 'no verdict recorded'})`).join(', ')} carries neither a Reviewer PASS nor a Director resolution` };
+    return { ok: false, reason: `${unapproved.map((s) => `${s.key} (${s.reviewVerdict ?? 'no verdict recorded'})`).join(', ')} carries neither a Reviewer PASS nor a Director resolution or waiver` };
   }
 
   for (const s of completed) {
@@ -810,6 +925,7 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   // a later restart unlaunchable once that agent is archived. What it actually
   // ran with lives in the immutable snapshot.
   patchSession(runId, key, { chatId, cwd, status: 'running', startedAt: Date.now(), stopReason: null });
+  resetStallStreak(runId); // work is running: the watchdog's count starts fresh
   // identity only — the full prompt stays in the snapshot, never in the feed
   addActivity(runId, 'session', `${key} ${session.name} started · agent: ${snapshot.profileName} (${snapshot.model} · ${snapshot.effort})`, `chat ${chatId}`);
   refreshLiveBlock(runId);
@@ -948,6 +1064,7 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
     reviewWaitReason: status === 'awaiting_review' ? pending!.reason : null,
     reviewRetryAt: status === 'awaiting_review' ? pending!.retryAt : null,
   });
+  if (status === 'completed') resetStallStreak(runId);
   addActivity(runId, 'session',
     status === 'completed' ? `${key} completed${outcome.reviewVerdict ? ` · reviewer: ${outcome.reviewVerdict}` : ' · NOT reviewed'}`
       : status === 'awaiting_review' ? `${key} implementation complete — waiting for Reviewer (${pending!.reason}); retry at ${fmtRetryAt(pending!.retryAt)}`
@@ -1024,7 +1141,7 @@ async function monitorSession(runId: string, key: string, chatId: string, baseli
       }
     }
     const ready = readySessions(runId);
-    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict === 'pass' ? ' Final verdict: PASS.' : outcome.reviewVerdict === 'resolved' ? ' Final verdict: RESOLVED — the Reviewer raised findings, the Builder answered them, and you (as arbiter) closed every remaining one as non-blocking; the result carries your approval.' : outcome.reviewVerdict === 'findings' ? ' Final verdict: FINDINGS — blocking findings stand OPEN (the Director judged them blocking, or they could not be decided); decide whether they need a follow-up session.' : ' NOTE: no reviewer verdict was recorded, so this result carries NO reviewer approval — treat it as unverified when deciding what depends on it.'}\n${outcome.summary.slice(0, 2_200) || '(no summary)'}${ready.length ? `\nSessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
+    queueObservation(runId, `Session ${key} COMPLETED.${outcome.reviewVerdict === 'pass' ? ' Final verdict: PASS.' : outcome.reviewVerdict === 'waived' ? ' Review WAIVED by your decision — no independent review ran; the result stands on the Builder\'s account.' : outcome.reviewVerdict === 'resolved' ? ' Final verdict: RESOLVED — the Reviewer raised findings, the Builder answered them, and you (as arbiter) closed every remaining one as non-blocking; the result carries your approval.' : outcome.reviewVerdict === 'findings' ? ' Final verdict: FINDINGS — blocking findings stand OPEN (the Director judged them blocking, or they could not be decided); decide whether they need a follow-up session.' : ' NOTE: no reviewer verdict was recorded, so this result carries NO reviewer approval — treat it as unverified when deciding what depends on it.'}\n${outcome.summary.slice(0, 2_200) || '(no summary)'}${ready.length ? `\nSessions whose dependencies are now satisfied: ${ready.join(', ')}.` : ''}`);
   } else if (status === 'paused') {
     // a deliberate user stop is NOT a failure: no needs_attention, no forced
     // recovery review. Whether the PROJECT continues depends on the canonical
@@ -1058,7 +1175,7 @@ interface Outcome {
    */
   summary: string;
   finalState: SessionFinalState | null;
-  reviewVerdict: 'pass' | 'findings' | 'resolved' | null;
+  reviewVerdict: 'pass' | 'findings' | 'resolved' | 'waived' | null;
   errorText: string;
 }
 
@@ -1082,7 +1199,7 @@ export function sessionFinalState(chatId: string, rows: { kind: string; p: any }
 
   const ledger = getReviewLedger(chatId);
   const registry = ledger ? listFindings(chatId, ledger.taskSeq) : [];
-  const verdict: SessionFinalState['verdict'] = !last ? 'unreviewed'
+  const verdict: SessionFinalState['verdict'] = !last ? (ledger?.lastVerdict === 'waived' ? 'waived' : 'unreviewed')
     : ledger?.lastVerdict === 'resolved' ? 'resolved'
       : last.verdict === 'pass' ? 'pass'
         : finalArb ? (finalArb.items?.some((a: any) => a.blocking) ? 'findings' : 'resolved') : 'findings';
@@ -1112,7 +1229,9 @@ export function composeOutcomeSummary(f: SessionFinalState | null, fallback: str
   const who = f.reviewer === 'builder_reviewer' ? 'Builder Reviewer' : 'Reviewer';
   const head = f.verdict === 'unreviewed'
     ? 'FINAL STATE: NOT REVIEWED — no verdict was recorded; this result carries no reviewer approval.'
-    : `FINAL STATE: ${f.verdict.toUpperCase()} — ${who}, round ${f.round}.`;
+    : f.verdict === 'waived'
+      ? 'FINAL STATE: REVIEW WAIVED — you decided this session needs no independent review; the result stands on the Builder\'s account. Require one with set_session_review if that has changed.'
+      : `FINAL STATE: ${f.verdict.toUpperCase()} — ${who}, round ${f.round}.`;
   const parts = [head];
   if (f.verified.length) parts.push(`Verified by the ${who} (already done — do not commission again): ${f.verified.map((v) => `${v.id} "${v.title}"${v.evidence ? ` — ${v.evidence}` : ''}`).join('; ')}.`);
   if (f.closed.length) parts.push(`Closed by the Director without a change: ${f.closed.map((c) => `${c.id} "${c.title}" (${c.state.replace(/_/g, ' ')})`).join('; ')}.`);
@@ -1161,6 +1280,8 @@ function readOutcome(chatId: string, sinceSeq: number): Outcome {
   // outcome. The outcome is composed from the record, with that hand-off last
   // and labelled; a run that recorded no verdict and no hand-off keeps the
   // error text as its summary, exactly as before.
+  // a Director-waived review is a decision, not a missing verdict
+  if (!reviewVerdict && getReviewLedger(chatId)?.lastVerdict === 'waived') reviewVerdict = 'waived';
   const finalState = sessionFinalState(chatId, parsed);
   return { phase, failed, timedOut, summary: composeOutcomeSummary(finalState, summary || errorText), finalState, reviewVerdict, errorText };
 }
@@ -1658,8 +1779,15 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
           dependsOn: Array.isArray(s.depends_on) ? s.depends_on.map(String) : [],
           isolated: !!s.isolated,
           agentProfileId: s.agent_profile_id ? String(s.agent_profile_id) : null,
+          difficulty: (DIFFICULTIES as string[]).includes(String(s.difficulty ?? '')) ? (String(s.difficulty) as Difficulty) : 'medium',
+          reviewRequired: s.review_required === false || s.review_required === 'false' ? false : true,
         }));
         if (sessions.length === 0) return { ok: false, error: 'Provide at least one session.' };
+        for (const [i, raw] of ((args.sessions ?? []) as any[]).entries()) {
+          if (raw.difficulty !== undefined && !(DIFFICULTIES as string[]).includes(String(raw.difficulty))) {
+            return { ok: false, error: `Session ${sessions[i]?.key ?? i + 1}: unknown difficulty "${raw.difficulty}" — use easy, medium, hard or very_hard.` };
+          }
+        }
         if (sessions.some((s) => !s.prompt.trim())) return { ok: false, error: 'Every session needs a full self-contained prompt.' };
         // an explicitly chosen agent is validated NOW, so a bad id is a planning
         // error the Director can fix — never a silent substitution at launch
@@ -1677,8 +1805,58 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         }
         const ms = planSessions(runId, msKeyArg, sessions);
         patchMilestone(runId, ms.key, { status: 'running' });
-        addActivity(runId, 'decision', `${ms.key} planned into ${ms.sessions.length} sessions`, String(args.reasoning ?? '').slice(0, 1_500));
+        resetStallStreak(runId); // a plan is progress
+        addActivity(runId, 'decision', `${ms.key} planned into ${ms.sessions.length} sessions (${sessions.map((x) => `${x.key}: ${(x.difficulty ?? 'medium').replace('_', ' ')}${x.reviewRequired === false ? ', review waived' : ''}`).join(', ')})`, String(args.reasoning ?? '').slice(0, 1_500));
         return { ok: true, text: `Milestone ${ms.key} now has ${ms.sessions.length} sessions. Start the ready ones with start_sessions.` };
+      }
+
+      case 'set_session_difficulty': {
+        const key = String(args.key ?? '').trim();
+        const difficulty = String(args.difficulty ?? '').trim() as Difficulty;
+        if (!(DIFFICULTIES as string[]).includes(difficulty)) return { ok: false, error: `Unknown difficulty "${args.difficulty}" — use easy, medium, hard or very_hard.` };
+        const session = getSession(runId, key);
+        if (!session) return { ok: false, error: `Unknown session: ${key}` };
+        if (['completed', 'abandoned'].includes(session.status)) return { ok: false, error: `Session ${key} is ${session.status}; its difficulty no longer affects anything.` };
+        const prev = setSessionDifficulty(runId, key, difficulty);
+        const eff = effectiveTierText(difficulty);
+        addActivity(runId, 'decision', `${key} difficulty ${prev ? `${prev.replace('_', ' ')} → ` : ''}${difficulty.replace('_', ' ')}${eff ? ` — ${eff}` : ''}`, String(args.reasoning ?? '').slice(0, 1_000));
+        // the session hears it too: its next request already resolves through the new tier
+        if (session.chatId) {
+          addEvent(session.chatId, 'status', { text: `The Project Director reassessed this session's difficulty: ${prev ? `${prev.replace('_', ' ')} → ` : ''}${difficulty.replace('_', ' ')}. From the next request the Builder and the Builder Reviewer run on the configuration for that tier (${eff.replace(/^difficulty [a-z ]+ /, '') || 'role defaults'}).${args.reasoning ? ` Reason: ${String(args.reasoning).slice(0, 300)}` : ''}` });
+        }
+        return { ok: true, text: `Session ${key} is now ${difficulty.replace('_', ' ')}${session.status === 'running' ? ' — it takes effect on the session\'s next model request; the request in flight finishes on the model it started with' : ''}. ${eff}.` };
+      }
+
+      case 'set_session_review': {
+        const key = String(args.key ?? '').trim();
+        if (typeof args.review_required !== 'boolean') return { ok: false, error: 'review_required must be true or false.' };
+        const required: boolean = args.review_required;
+        const session = getSession(runId, key);
+        if (!session) return { ok: false, error: `Unknown session: ${key}` };
+        if (session.status === 'abandoned') return { ok: false, error: `Session ${key} is abandoned.` };
+        const reason = String(args.reasoning ?? '').slice(0, 1_000);
+        // a COMPLETED session whose review was waived can still be reviewed after
+        // all: it goes back to awaiting_review and the sweeper runs round 1 on the
+        // result as it stands — the same path an outage retry takes
+        if (session.status === 'completed') {
+          if (!required) return { ok: false, error: `Session ${key} is already completed${session.reviewVerdict === 'waived' ? ' with its review waived' : ` with verdict ${session.reviewVerdict ?? 'none'}`}; nothing to waive.` };
+          if (session.reviewVerdict && session.reviewVerdict !== 'waived') return { ok: false, error: `Session ${key} was already reviewed (verdict ${session.reviewVerdict}).` };
+          if (!session.chatId) return { ok: false, error: `Session ${key} has no chat to review.` };
+          setSessionReviewRequired(runId, key, true);
+          upsertPendingReview({ chatId: session.chatId, round: 1, userText: session.prompt, subject: { kind: 'changes', files: [], note: getPrompt('reviewer.note_git') }, reason: 'Review requested by the Director after completion', detail: reason, retryAt: Date.now() });
+          patchSession(runId, key, { status: 'awaiting_review', reviewWaitReason: 'Review requested by the Director', reviewRetryAt: Date.now() });
+          addActivity(runId, 'decision', `${key}: independent review now REQUIRED (it had completed with its review waived) — the review runs next`, reason);
+          addEvent(session.chatId, 'status', { text: `The Project Director now requires an independent review of this session\'s result${reason ? ` — ${reason}` : ''}. It runs shortly.` });
+          return { ok: true, text: `Session ${key} is awaiting its review; you are woken with the verdict.` };
+        }
+        const prev = setSessionReviewRequired(runId, key, required);
+        addActivity(runId, 'decision', `${key}: independent review ${required ? 'REQUIRED' : 'WAIVED'}${prev !== null && prev !== required ? ` (was ${prev ? 'required' : 'waived'})` : ''}`, reason);
+        if (session.chatId) {
+          addEvent(session.chatId, 'status', { text: required
+            ? `The Project Director decided this session needs an independent review${reason ? ` — ${reason}` : ''}. The Builder Reviewer runs when the Builder hands off.`
+            : `The Project Director waived the independent review for this session${reason ? ` — ${reason}` : ''}. The result is delivered on the Builder\'s account when it hands off, unless the Director requires a review again before then.` });
+        }
+        return { ok: true, text: `Session ${key}: review ${required ? 'required' : 'waived'}. ${session.status === 'running' ? 'The decision is read when the Builder hands off, so it applies to this run.' : ''}` };
       }
 
       case 'start_sessions': {

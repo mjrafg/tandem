@@ -13,7 +13,7 @@
  * is reached.
  */
 import type {
-  AiRole, AiUsage, Effort, Provider, ProviderDescriptor, ProviderHealth, ProviderSessionRef,
+  AiRole, AiUsage, Difficulty, Effort, ModelSource, Provider, ProviderDescriptor, ProviderHealth, ProviderSessionRef,
 } from '../../../shared/types';
 import type { RunHandle } from '../engine/run';
 
@@ -91,6 +91,9 @@ export interface ProviderTurnRequest {
   emitActivity?: boolean;
   /** first Builder turn of a Director session: ask the model to name it */
   nameSession?: boolean;
+  /** observability: the session's difficulty and which configuration picked the model */
+  difficulty?: Difficulty;
+  modelSource?: ModelSource;
 }
 
 export interface ProviderTurnResult {

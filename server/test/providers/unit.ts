@@ -16,7 +16,8 @@ import { classifyCodexFailure } from '../../src/providers/codex-cli/errors';
 import { classifyClaudeFailure } from '../../src/providers/claude-code-cli/errors';
 import { outageFromFailure } from '../../src/engine/reviewWait';
 import { DEFAULT_SETTINGS, getSettings, migrateReviewerSplit, validateRoleConfigs } from '../../src/settings';
-import { kvGet, kvSet } from '../../src/db';
+import { db, kvGet, kvSet } from '../../src/db';
+import { planSessions, createRun, setSessionDifficulty } from '../../src/director/store';
 import type { AppSettings } from '../../../shared/types';
 
 let bad = 0;
@@ -175,6 +176,46 @@ check('REPAIR_FAILED reopens the SAME finding and raises nothing new', r2b.verdi
 const r2c = parseVerdict('FINDINGS\nRESOLVED F-001 — ok\n1. [minor] Unused import — b.ts:3\n   dead code\n   Evidence: b.ts line 3\n   Category: preference\n   Recommendation: remove it', known);
 check('a genuinely new round-2 finding parses with evidence and category', r2c.items.length === 1 && r2c.items[0].category === 'preference' && r2c.items[0].evidence === 'b.ts line 3' && r2c.verified[0] === 'F-001');
 check('round 1 output still parses as before', parseVerdict('FINDINGS\n1. [major] Broken — a.ts:1\n   detail').items[0].title === 'Broken' && parseVerdict('PASS').verdict === 'pass');
+
+console.log('--- difficulty tiers resolve live, per request');
+{
+  const tiers = (over: Partial<AppSettings['difficulty']>): AppSettings['difficulty'] => ({
+    easy: { builder: null, reviewer: null }, medium: { builder: null, reviewer: null }, hard: { builder: null, reviewer: null }, very_hard: { builder: null, reviewer: null }, ...over,
+  });
+  const base = settings({});
+  // an ordinary chat (no session) has no difficulty: role defaults, as before
+  const plain = resolveBuilderRole({ ...base, difficulty: tiers({ hard: { builder: { provider: 'claude-code', model: 'claude-opus-5', effort: 'high' }, reviewer: null } }) }, undefined);
+  check('a chat without a session resolves the role default (source role, no difficulty)', plain.source === 'role' && plain.difficulty === undefined && plain.model === DEFAULT_SETTINGS.roles.builder.model);
+  // a Director session with a difficulty
+  db.prepare("INSERT OR IGNORE INTO projects (id, name, root_path, source, created_at, last_opened_at) VALUES ('p1','p','/tmp/p1','directory',0,0)").run();
+  db.prepare("INSERT OR IGNORE INTO chats (id, project_id, title, created_at, updated_at, running, kind) VALUES ('c-proj','p1','project',0,0,0,'project')").run();
+  const run = createRun('p1', 'c-proj', 'difficulty test');
+  db.prepare("INSERT INTO pd_milestones (id, run_id, key, name, goal, acceptance, status, order_idx, depends_on) VALUES ('m1', ?, 'M1', 'M', 'g', 'a', 'planned', 0, '[]')").run(run.id);
+  planSessions(run.id, 'M1', [{ key: 'S1', name: 's', purpose: 'p', prompt: 'x', dependsOn: [], isolated: false, difficulty: 'hard' }]);
+  db.prepare("INSERT INTO chats (id, project_id, title, created_at, updated_at, running, kind) VALUES ('c-s1','p1','s',0,0,0,'pd-session')").run();
+  db.prepare("UPDATE pd_sessions SET chat_id = 'c-s1' WHERE run_id = ? AND key = 'S1'").run(run.id);
+  const cfgA = { ...base, difficulty: tiers({ hard: { builder: { provider: 'claude-code', model: 'claude-sonnet-5', effort: 'medium' }, reviewer: { provider: 'codex', model: 'gpt-5.6-terra', effort: 'low' } } }) };
+  const b1 = resolveBuilderRole(cfgA, 'c-s1'), r1 = resolveBuilderReviewerRole(cfgA, 'c-s1');
+  check('a hard session resolves the hard tier for the Builder (source difficulty)', b1.source === 'difficulty' && b1.difficulty === 'hard' && b1.model === 'claude-sonnet-5' && b1.effort === 'medium');
+  check('…and the hard tier for the Builder Reviewer, independently', r1.source === 'difficulty' && r1.provider === 'codex' && r1.model === 'gpt-5.6-terra' && r1.effort === 'low');
+  // the admin changes the tier: the next resolution follows, nothing is frozen
+  const cfgB = { ...base, difficulty: tiers({ hard: { builder: { provider: 'claude-code', model: 'claude-haiku-4-5', effort: 'low' }, reviewer: null } }) };
+  const b2 = resolveBuilderRole(cfgB, 'c-s1'), r2 = resolveBuilderReviewerRole(cfgB, 'c-s1');
+  check('changing the hard tier changes the NEXT Builder resolution', b2.model === 'claude-haiku-4-5' && b2.source === 'difficulty');
+  check('clearing the reviewer tier falls back to the role default', r2.source === 'role' && r2.model === DEFAULT_SETTINGS.roles.builder_reviewer.model && r2.difficulty === 'hard');
+  // the Director changes the difficulty: the next resolution follows the new tier
+  const prev = setSessionDifficulty(run.id, 'S1', 'easy');
+  const cfgC = { ...base, difficulty: tiers({ easy: { builder: { provider: 'codex', model: 'gpt-5.6-sol', effort: 'low' }, reviewer: null }, hard: { builder: { provider: 'claude-code', model: 'claude-opus-5', effort: 'high' }, reviewer: null } }) };
+  const b3 = resolveBuilderRole(cfgC, 'c-s1');
+  check('set_session_difficulty returns the previous level and the next resolution uses the new tier', prev === 'hard' && b3.difficulty === 'easy' && b3.provider === 'codex' && b3.model === 'gpt-5.6-sol');
+  // a tier with a model from the other backend is refused by validation and neutralized on read
+  check('settings PUT refuses a cross-provider tier', /not a model/.test(validateRoleConfigs({ difficulty: { hard: { builder: { provider: 'codex', model: 'claude-opus-5', effort: 'high' } } } } as any) ?? ''));
+  check('settings PUT refuses an unknown level', /Unknown difficulty/.test(validateRoleConfigs({ difficulty: { brutal: { builder: null } } } as any) ?? ''));
+  kvSet('settings', { difficulty: { medium: { builder: { provider: 'codex', model: 'claude-opus-5', effort: 'high' }, reviewer: { provider: 'claude-code', model: 'claude-sonnet-5', effort: 'high' } } } });
+  const read = getSettings();
+  check('an incoherent stored tier reads back as inherit; a coherent one stays', read.difficulty.medium.builder === null && read.difficulty.medium.reviewer?.model === 'claude-sonnet-5');
+  kvSet('settings', {});
+}
 
 console.log(bad ? `\n${bad} FAILED` : '\nALL PROVIDER UNIT CHECKS PASSED');
 process.exit(bad ? 1 : 0);

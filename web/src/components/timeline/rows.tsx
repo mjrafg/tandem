@@ -209,6 +209,11 @@ export function AiCallRow({ ev }: { ev: ChatEvent }) {
         <span className="inline-flex items-center gap-2">
           <span>Asked {providerName(p.provider)} · {role.label}</span>
           <span className={`inline-block h-[6px] w-[6px] rounded-full ${role.dot}`} />
+          {p.difficulty && (
+            <span className="rounded-full border border-line px-1.5 py-[1px] text-[10px] uppercase tracking-wide text-dim" title={`difficulty ${p.difficulty} — model chosen by the ${p.modelSource === 'difficulty' ? 'difficulty tier' : p.modelSource === 'agent' ? 'Builder Agent profile' : 'role default'}`}>
+              {p.difficulty.replace('_', ' ')}{p.modelSource === 'difficulty' ? ' tier' : ''}
+            </span>
+          )}
           {p.status === 'failed' && <span className="text-err">failed</span>}
           {p.status === 'stopped' && <span className="text-dim">stopped</span>}
         </span>

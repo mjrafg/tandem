@@ -49,6 +49,8 @@ async function runTurn(req: ProviderTurnRequest): Promise<ProviderTurnResult> {
     policy: req.policy,
     emitActivity: req.emitActivity,
     nameSession: req.nameSession,
+    difficulty: req.difficulty,
+    modelSource: req.modelSource,
     timeoutMs: req.timeoutMs,
   });
   return {

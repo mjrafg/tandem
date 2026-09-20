@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { AiRole, AiUsage, Effort } from '../../../../shared/types';
+import type { AiRole, AiUsage, Difficulty, Effort, ModelSource } from '../../../../shared/types';
 import type { RoleExecutionPolicy } from '../types';
 import { roleFamily } from '../policies';
 import { config, internalBase, shotsDir } from '../../config';
@@ -138,6 +138,9 @@ export async function runCodexTurn(h: RunHandle, opts: {
   policy: RoleExecutionPolicy;
   emitActivity?: boolean;
   nameSession?: boolean;
+  /** observability only — recorded on the ai_call */
+  difficulty?: Difficulty;
+  modelSource?: ModelSource;
   timeoutMs: number;
 }): Promise<CodexResult> {
   const emitActivity = opts.emitActivity !== false;
@@ -229,6 +232,8 @@ export async function runCodexTurn(h: RunHandle, opts: {
     provider: 'codex',
     model: opts.model,
     effort: opts.effort,
+    ...(opts.difficulty ? { difficulty: opts.difficulty } : {}),
+    ...(opts.modelSource ? { modelSource: opts.modelSource } : {}),
     status: 'running',
     request: { prompt: fullPrompt },
     cli: { command: cliShown, cwd: opts.cwd, exitCode: null },

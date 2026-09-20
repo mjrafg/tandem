@@ -1,8 +1,8 @@
 import { Eye } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { AppSettings, ConfigurableRole, Effort, Provider, ProviderDescriptor, RoleConfig } from '@shared/types';
-import { EFFORTS } from '@shared/types';
+import type { AppSettings, ConfigurableRole, Difficulty, Effort, Provider, ProviderDescriptor, RoleConfig, TierConfig } from '@shared/types';
+import { DIFFICULTIES, DIFFICULTY_LABEL, EFFORTS } from '@shared/types';
 import { api } from '../../../api';
 import { Field, Modal, SelectBox, Spinner, Toggle } from '../../ui';
 import { PageHeader } from '../SettingsLayout';
@@ -83,6 +83,9 @@ export function RolesPage() {
           onChange={(patch) => set((d) => Object.assign(d.roles.director_reviewer, patch))}
           onPreview={() => setPromptRole('director_reviewer')}
         />
+
+        <DifficultyTiersCard draft={draft} providers={providers} set={set} />
+        <WatchdogCard draft={draft} set={set} />
 
         <div className="card px-4 py-3.5">
           <div className="mb-1.5 text-[13.5px] font-semibold">Final repair</div>
@@ -304,5 +307,123 @@ export function PromptPreviewModal({ role, onClose }: { role: string | null; onC
         </>
       )}
     </Modal>
+  );
+}
+
+
+// ---------------------------------------------------------------- difficulty tiers
+
+const DIFFICULTY_HINT: Record<Difficulty, string> = {
+  easy: 'trivial, mechanical changes',
+  medium: 'ordinary feature work',
+  hard: 'architecture, tricky debugging, cross-cutting or risky changes',
+  very_hard: 'research-grade or high-risk work',
+};
+
+/**
+ * Which Builder and Builder Reviewer handle each difficulty. The Director sets
+ * a session's difficulty when it plans it and may change it at any time; every
+ * request resolves through these tiers live, so a change here reaches a
+ * running session on its next call. A tier left to "inherit" runs exactly as
+ * before tiers existed: the role default, or the session's Agent profile.
+ */
+function DifficultyTiersCard({ draft, providers, set }: {
+  draft: AppSettings;
+  providers: ProviderDescriptor[];
+  set: (fn: (d: AppSettings) => void) => void;
+}) {
+  const roleDefault = (slot: 'builder' | 'reviewer'): TierConfig => {
+    const r = slot === 'builder' ? draft.roles.builder : draft.roles.builder_reviewer;
+    return { provider: r.provider, model: r.model, effort: r.effort };
+  };
+  return (
+    <div className="card px-4 py-3.5">
+      <div className="mb-1 text-[13.5px] font-semibold">Difficulty tiers</div>
+      <p className="mb-3 text-[12px] leading-relaxed text-dim">
+        The Director judges each session&apos;s difficulty (and can change it while it runs). Each tier names the
+        Builder and Builder Reviewer that handle it — cheap models for easy work, strong ones for hard work. Resolved on
+        every request, so a change here reaches a running session on its next call. &ldquo;Inherit&rdquo; keeps the
+        role default (or the session&apos;s Builder Agent).
+      </p>
+      <div className="space-y-3">
+        {DIFFICULTIES.map((level) => {
+          const tier = draft.difficulty?.[level] ?? { builder: null, reviewer: null };
+          return (
+            <div key={level} className="rounded-lg border border-linesoft px-3 py-2.5">
+              <div className="mb-2 flex items-baseline gap-2">
+                <span className="text-[13px] font-semibold">{DIFFICULTY_LABEL[level]}</span>
+                <span className="text-[11.5px] text-dim">{DIFFICULTY_HINT[level]}</span>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {(['builder', 'reviewer'] as const).map((slot) => {
+                  const cfg = tier[slot];
+                  const label = slot === 'builder' ? 'Builder' : 'Builder Reviewer';
+                  return (
+                    <div key={slot} className="rounded-md bg-bg0/40 px-2.5 py-2">
+                      <div className="mb-1.5 flex items-center justify-between">
+                        <span className="text-[12px] font-medium">{label}</span>
+                        <label className="flex items-center gap-1.5 text-[11.5px] text-dim">
+                          <input
+                            type="checkbox"
+                            checked={cfg === null}
+                            onChange={(e) => set((d) => {
+                              if (!d.difficulty) d.difficulty = { easy: { builder: null, reviewer: null }, medium: { builder: null, reviewer: null }, hard: { builder: null, reviewer: null }, very_hard: { builder: null, reviewer: null } };
+                              d.difficulty[level][slot] = e.target.checked ? null : roleDefault(slot);
+                            })}
+                          />
+                          inherit
+                        </label>
+                      </div>
+                      {cfg ? (
+                        <ProviderModelEffort
+                          role={slot === 'builder' ? 'builder' : 'builder_reviewer'}
+                          label={`${DIFFICULTY_LABEL[level]} ${label}`}
+                          providers={providers}
+                          provider={cfg.provider}
+                          model={cfg.model}
+                          effort={cfg.effort}
+                          onChange={(patch) => set((d) => { Object.assign(d.difficulty[level][slot] as TierConfig, patch); })}
+                        />
+                      ) : (
+                        <div className="text-[12px] text-dim">
+                          inherits — {slot === 'builder' ? 'the session\'s Builder Agent, else ' : ''}{roleDefault(slot).provider} / {roleDefault(slot).model} / {roleDefault(slot).effort}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- autonomy watchdog
+
+function WatchdogCard({ draft, set }: { draft: AppSettings; set: (fn: (d: AppSettings) => void) => void }) {
+  const o = draft.orchestration ?? { stallAfterMinutes: 10, stallMaxWakes: 5 };
+  const num = (v: string, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(Number(v) || lo)));
+  return (
+    <div className="card px-4 py-3.5">
+      <div className="mb-1 text-[13.5px] font-semibold">Autonomy watchdog</div>
+      <p className="mb-3 text-[12px] leading-relaxed text-dim">
+        An active project with unfinished work, nothing running and nothing scheduled is a stall — a Director turn
+        that failed, or one that ended without starting work. The watchdog wakes the Director with the facts, backing
+        off each time; after the limit it pauses the project and says why instead of spending turns forever.
+      </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label="Wake the Director after" hint="minutes with nothing running and nothing scheduled (doubles on each repeat)">
+          <input className="input mono text-[12.5px]" type="number" min={2} max={1440} value={o.stallAfterMinutes}
+            onChange={(e) => set((d) => { d.orchestration = { ...(d.orchestration ?? o), stallAfterMinutes: num(e.target.value, 2, 1440) }; })} />
+        </Field>
+        <Field label="Give up after" hint="consecutive wakes with no progress → pause the project and ask you">
+          <input className="input mono text-[12.5px]" type="number" min={1} max={50} value={o.stallMaxWakes}
+            onChange={(e) => set((d) => { d.orchestration = { ...(d.orchestration ?? o), stallMaxWakes: num(e.target.value, 1, 50) }; })} />
+        </Field>
+      </div>
+    </div>
   );
 }

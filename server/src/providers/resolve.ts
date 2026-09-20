@@ -7,8 +7,9 @@
  * that is exactly what made "change the Builder to Codex" quietly move the
  * orchestrator too.
  */
-import type { AppSettings, Effort, Provider } from '../../../shared/types';
+import type { AppSettings, Difficulty, Effort, ModelSource, Provider } from '../../../shared/types';
 import { builderExecFor } from '../agents/exec';
+import { db } from '../db';
 import { providerOfModel } from './catalog';
 import { canonicalProvider, providerRegistry } from './registry';
 
@@ -18,6 +19,34 @@ export interface ResolvedRole {
   effort: Effort;
   /** the specialist overlay from a session's Agent snapshot, when it has one */
   agentPrompt?: string;
+  /** the session's difficulty at resolution time, when it has one */
+  difficulty?: Difficulty;
+  /** which configuration decided the model */
+  source: ModelSource;
+}
+
+/**
+ * The CURRENT difficulty of the session a chat belongs to, or null for a chat
+ * that is not a Director session (ordinary chats have no difficulty and run on
+ * the role defaults). Read at every resolution, never cached: the Director may
+ * change it while the session is running, and the next request must follow.
+ */
+export function sessionDifficulty(chatId: string | undefined): Difficulty | null {
+  if (!chatId) return null;
+  try {
+    const r = db.prepare('SELECT difficulty FROM pd_sessions WHERE chat_id = ? ORDER BY started_at DESC LIMIT 1').get(chatId) as { difficulty?: string } | undefined;
+    const d = r?.difficulty;
+    return d === 'easy' || d === 'medium' || d === 'hard' || d === 'very_hard' ? d : null;
+  } catch {
+    return null; // the table is created by the Director store; before it exists there are no sessions
+  }
+}
+
+/** the configured tier for a role at a difficulty, or null when the tier inherits */
+function tierFor(settings: AppSettings, difficulty: Difficulty | null, slot: 'builder' | 'reviewer') {
+  if (!difficulty) return null;
+  const t = settings.difficulty?.[difficulty]?.[slot];
+  return t && t.model ? t : null;
 }
 
 /** The provider Tandem used before roles could choose one. */
@@ -43,30 +72,56 @@ function coerce(
   provider: unknown,
   model: unknown,
   effort: Effort,
+  source: ModelSource = 'role',
 ): ResolvedRole {
   const resolved = canonicalProvider(provider) ?? LEGACY_PROVIDER[role];
   const p = providerRegistry.has(resolved) ? resolved : LEGACY_PROVIDER[role];
   const wanted = typeof model === 'string' ? model.trim() : '';
   const belongsTo = providerOfModel(wanted);
   const m = wanted && (belongsTo === null || belongsTo === p) ? wanted : fallbackModel(p);
-  return { provider: p, model: m, effort };
+  return { provider: p, model: m, effort, source };
 }
 
+/**
+ * The Builder for a chat, resolved for THIS request.
+ *
+ * Precedence: the session's difficulty tier (when the Director has set a
+ * difficulty and the admin configured that tier) → the session's Agent
+ * snapshot (its specialist model, kept for sessions no tier covers) → the
+ * Builder role default. The specialist PROMPT overlay always comes from the
+ * snapshot — that is the session's identity — while the model follows the
+ * latest applicable configuration, so changing a tier in Settings or the
+ * session's difficulty changes the very next request.
+ */
 export function resolveBuilderRole(settings: AppSettings, chatId?: string): ResolvedRole {
-  // a Director session runs on its immutable Agent snapshot — the profile row
-  // may change mid-session, what the session executes with may not
   const agent = chatId ? builderExecFor(chatId, settings) : null;
+  const difficulty = sessionDifficulty(chatId);
+  const tier = tierFor(settings, difficulty, 'builder');
   const b = settings.roles.builder;
+  const base = tier
+    ? coerce('builder', tier.provider, tier.model, tier.effort, 'difficulty')
+    : agent
+      ? coerce('builder', agent.provider ?? b.provider, agent.model ?? b.model, agent.effort ?? b.effort, 'agent')
+      : coerce('builder', b.provider, b.model, b.effort, 'role');
   return {
-    ...coerce('builder', agent?.provider ?? b.provider, agent?.model ?? b.model, agent?.effort ?? b.effort),
+    ...base,
     ...(agent?.agentPrompt ? { agentPrompt: agent.agentPrompt } : {}),
+    ...(difficulty ? { difficulty } : {}),
   };
 }
 
-/** The Builder Reviewer: reviews session output, runs the two-round loop. */
-export function resolveBuilderReviewerRole(settings: AppSettings): ResolvedRole {
+/**
+ * The Builder Reviewer: reviews session output, runs the two-round loop.
+ * Follows the session's difficulty tier when one is configured, else the role.
+ */
+export function resolveBuilderReviewerRole(settings: AppSettings, chatId?: string): ResolvedRole {
+  const difficulty = sessionDifficulty(chatId);
+  const tier = tierFor(settings, difficulty, 'reviewer');
   const r = settings.roles.builder_reviewer;
-  return coerce('builder_reviewer', r.provider, r.model, r.effort);
+  const base = tier
+    ? coerce('builder_reviewer', tier.provider, tier.model, tier.effort, 'difficulty')
+    : coerce('builder_reviewer', r.provider, r.model, r.effort, 'role');
+  return { ...base, ...(difficulty ? { difficulty } : {}) };
 }
 
 /**
@@ -83,7 +138,7 @@ export function resolveDirectorReviewerRole(settings: AppSettings): { ok: true; 
   if (!r) return { ok: false, error: 'No Director Reviewer is configured (Settings → Roles → Director Reviewer).' };
   const v = validateProviderModel(r.provider, r.model);
   if (!v.ok) return { ok: false, error: `Director Reviewer configuration problem: ${v.error}` };
-  return { ok: true, role: { provider: v.provider, model: v.model, effort: r.effort } };
+  return { ok: true, role: { provider: v.provider, model: v.model, effort: r.effort, source: 'role' } };
 }
 
 /**

@@ -190,6 +190,16 @@ function SessionLine({ session: s }: { session: PdSession }) {
         <span className="min-w-0 truncate text-[12px] text-mut">{s.name}</span>
         {s.status === 'running' && s.startedAt && <span className="ml-auto shrink-0 text-[10.5px] text-dim">{fmtDuration(Date.now() - s.startedAt)}</span>}
       </div>
+      {s.difficulty && (
+        <span className="ml-1 rounded-full border border-line px-1.5 py-[1px] text-[10px] uppercase tracking-wide text-dim" title="difficulty — set by the Director, changeable at any time">
+          {s.difficulty.replace('_', ' ')}
+        </span>
+      )}
+      {s.reviewRequired === false && (
+        <span className="ml-1 rounded-full border border-warn/40 px-1.5 py-[1px] text-[10px] uppercase tracking-wide text-warn" title="the Director decided this session needs no independent review">
+          review waived
+        </span>
+      )}
       {s.agent && (
         <div className="mt-0.5 pl-[18px] text-[11px] text-dim">
           {s.agent.profileName} <span className="text-dim/70">· {s.agent.model} · {s.agent.effort}</span>

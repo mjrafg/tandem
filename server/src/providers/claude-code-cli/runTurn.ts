@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AiRole, AiUsage, ChangedFile, ChatEvent, Effort } from '../../../../shared/types';
+import type { AiRole, AiUsage, ChangedFile, ChatEvent, Difficulty, Effort, ModelSource } from '../../../../shared/types';
 import type { RoleExecutionPolicy } from '../types';
 import { roleFamily } from '../policies';
 import { config, internalBase, shotsDir } from '../../config';
@@ -97,6 +97,9 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   policy: RoleExecutionPolicy;
   emitActivity?: boolean;
   nameSession?: boolean;
+  /** observability only — recorded on the ai_call */
+  difficulty?: Difficulty;
+  modelSource?: ModelSource;
   timeoutMs: number;
 }): Promise<ClaudeTurnResult> {
   const emitActivity = opts.emitActivity !== false;
@@ -206,6 +209,8 @@ export async function runClaudeTurn(h: RunHandle, opts: {
     provider: 'claude-code',
     model: opts.model,
     effort: opts.effort,
+    ...(opts.difficulty ? { difficulty: opts.difficulty } : {}),
+    ...(opts.modelSource ? { modelSource: opts.modelSource } : {}),
     status: 'running',
     request: { prompt: `[system additions]\n${systemAppendix}\n\n[message]\n${opts.message}`, system: undefined },
     cli: { command: cliShown, cwd: opts.cwd, exitCode: null },

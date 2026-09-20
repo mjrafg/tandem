@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
-  PdActivity, PdMilestone, PdSession, PdSessionStatus, ProjectRun, ProjectRunState,
+  Difficulty, PdActivity, PdMilestone, PdSession, PdSessionStatus, ProjectRun, ProjectRunState,
 } from '../../../shared/types';
 import { db } from '../db';
 import { broadcast } from '../sse';
@@ -8,6 +8,7 @@ import { getAgentSnapshot } from '../agents/store';
 import { signalRunState } from '../observability/signals';
 import { getPendingWake } from './pendingWake';
 import { MAX_REVIEW_ROUNDS, getLedger } from '../engine/reviewLedger';
+import { getSettings } from '../settings';
 
 /**
  * Persistence for the Project Director. Everything here is project-level
@@ -85,6 +86,13 @@ try { db.exec('ALTER TABLE pd_sessions ADD COLUMN agent_profile_id TEXT'); } cat
 // final verdict, what the Reviewer verified, what stands open — composed from
 // the record at completion, never from the Builder's last message
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN final_state TEXT'); } catch { /* exists */ }
+// the Director's current judgment of the work's difficulty — live, changeable
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN difficulty TEXT'); } catch { /* exists */ }
+// the Director's current decision on whether the session needs an independent review (1/0; NULL = required)
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_required INTEGER'); } catch { /* exists */ }
+// the autonomy watchdog: consecutive stall wakes that produced no progress
+try { db.exec('ALTER TABLE project_runs ADD COLUMN stall_streak INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE project_runs ADD COLUMN stall_wake_at INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
 // auto-resume after a restart: how many boots in a row relaunched this run, and
 // when the last one was. Only ever read to detect a restart LOOP.
 try { db.exec('ALTER TABLE project_runs ADD COLUMN auto_resume_streak INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
@@ -107,6 +115,8 @@ function rowToSession(r: any): PdSession {
     resultSummary: r.result_summary ?? null,
     reviewVerdict: (r.review_verdict as PdSession['reviewVerdict']) ?? null,
     finalState: (() => { try { return r.final_state ? JSON.parse(r.final_state) : null; } catch { return null; } })(),
+    difficulty: (['easy', 'medium', 'hard', 'very_hard'].includes(r.difficulty) ? r.difficulty : null) as PdSession['difficulty'],
+    reviewRequired: r.review_required == null ? true : !!r.review_required,
     reviewWait: r.review_wait_reason && r.review_retry_at
       ? { reason: r.review_wait_reason, retryAt: r.review_retry_at }
       : null,
@@ -246,6 +256,10 @@ export interface SessionInput {
   key: string; name: string; purpose: string; prompt: string; dependsOn: string[]; isolated: boolean;
   /** stable Builder Agent profile id chosen by the Director (never a slug) */
   agentProfileId?: string | null;
+  /** the Director's judgment of the work's difficulty (default medium) */
+  difficulty?: Difficulty | null;
+  /** the Director's decision on independent review (default required) */
+  reviewRequired?: boolean;
 }
 
 /** Define (or extend) the session plan for one milestone. Existing sessions are kept by key. */
@@ -265,12 +279,12 @@ export function planSessions(runId: string, milestoneKey: string, sessions: Sess
       if (old.status !== 'planned' && old.status !== 'abandoned') {
         throw new Error(`Session ${s.key} is ${old.status} and its definition can no longer be replaced — use recover_session instead.`);
       }
-      db.prepare('UPDATE pd_sessions SET name = ?, purpose = ?, prompt = ?, depends_on = ?, status = ?, agent_profile_id = ? WHERE id = ?')
-        .run(s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), 'planned', s.agentProfileId ?? null, old.id);
+      db.prepare('UPDATE pd_sessions SET name = ?, purpose = ?, prompt = ?, depends_on = ?, status = ?, agent_profile_id = ?, difficulty = ?, review_required = ? WHERE id = ?')
+        .run(s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), 'planned', s.agentProfileId ?? null, s.difficulty ?? 'medium', s.reviewRequired === false ? 0 : 1, old.id);
     } else {
-      db.prepare(`INSERT INTO pd_sessions (id, run_id, milestone_id, key, name, purpose, prompt, status, depends_on, branch, agent_profile_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?)`)
-        .run(randomUUID(), runId, ms.id, s.key, s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), s.isolated ? `pd/${s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : null, s.agentProfileId ?? null);
+      db.prepare(`INSERT INTO pd_sessions (id, run_id, milestone_id, key, name, purpose, prompt, status, depends_on, branch, agent_profile_id, difficulty, review_required)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)`)
+        .run(randomUUID(), runId, ms.id, s.key, s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), s.isolated ? `pd/${s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : null, s.agentProfileId ?? null, s.difficulty ?? 'medium', s.reviewRequired === false ? 0 : 1);
     }
   }
   broadcastRun(runId);
@@ -410,6 +424,67 @@ export function resetAutoResumeStreak(runId: string): void {
   db.prepare('UPDATE project_runs SET auto_resume_streak = 0, auto_resume_at = 0 WHERE id = ?').run(runId);
 }
 
+/**
+ * The Director re-judged a session's difficulty. Live: the session's next
+ * request resolves its model from the new tier (providers/resolve reads this
+ * row every time). Returns the previous value for the record.
+ */
+export function setSessionDifficulty(runId: string, key: string, difficulty: Difficulty): Difficulty | null {
+  const prev = db.prepare('SELECT difficulty FROM pd_sessions WHERE run_id = ? AND key = ?').get(runId, key) as { difficulty?: string } | undefined;
+  db.prepare('UPDATE pd_sessions SET difficulty = ? WHERE run_id = ? AND key = ?').run(difficulty, runId, key);
+  broadcastRun(runId);
+  const p = prev?.difficulty;
+  return p === 'easy' || p === 'medium' || p === 'hard' || p === 'very_hard' ? p : null;
+}
+
+/**
+ * The Director's current review decision for the session a chat belongs to:
+ * true/false for a Director session, null for any other chat (which keeps the
+ * per-message Reviewer toggle). Read by the workflow at the moment it decides
+ * whether to review — never cached, so a decision changed mid-session counts.
+ */
+export function sessionReviewRequired(chatId: string): boolean | null {
+  const r = db.prepare('SELECT review_required FROM pd_sessions WHERE chat_id = ? ORDER BY started_at DESC LIMIT 1').get(chatId) as { review_required?: number | null } | undefined;
+  if (!r) return null;
+  return r.review_required == null ? true : !!r.review_required;
+}
+
+export function setSessionReviewRequired(runId: string, key: string, required: boolean): boolean | null {
+  const prev = db.prepare('SELECT review_required FROM pd_sessions WHERE run_id = ? AND key = ?').get(runId, key) as { review_required?: number | null } | undefined;
+  db.prepare('UPDATE pd_sessions SET review_required = ? WHERE run_id = ? AND key = ?').run(required ? 1 : 0, runId, key);
+  broadcastRun(runId);
+  return prev ? (prev.review_required == null ? true : !!prev.review_required) : null;
+}
+
+/**
+ * The autonomy watchdog's memory: how many consecutive stall wakes produced
+ * no progress, and when the last one fired (for the backoff). Persisted so a
+ * restart neither forgets a stalled project nor forgets how often it was
+ * already prodded.
+ */
+export function stallState(runId: string): { streak: number; lastWakeAt: number } {
+  const r = db.prepare('SELECT stall_streak AS n, stall_wake_at AS at FROM project_runs WHERE id = ?').get(runId) as any;
+  return { streak: r?.n ?? 0, lastWakeAt: r?.at ?? 0 };
+}
+export function bumpStallStreak(runId: string, now: number): number {
+  const { streak } = stallState(runId);
+  db.prepare('UPDATE project_runs SET stall_streak = ?, stall_wake_at = ? WHERE id = ?').run(streak + 1, now, runId);
+  return streak + 1;
+}
+/** progress happened (a session started or finished, a plan landed): the stall counter starts fresh */
+export function resetStallStreak(runId: string): void {
+  db.prepare('UPDATE project_runs SET stall_streak = 0, stall_wake_at = 0 WHERE id = ? AND (stall_streak <> 0 OR stall_wake_at <> 0)').run(runId);
+}
+
+/** the effective Builder/Reviewer models for a difficulty, as the tiers stand right now */
+export function effectiveTierText(difficulty: Difficulty | null | undefined): string {
+  if (!difficulty) return '';
+  const tier = getSettings().difficulty?.[difficulty];
+  const b = tier?.builder ? `${tier.builder.model}·${tier.builder.effort}` : 'role default';
+  const r = tier?.reviewer ? `${tier.reviewer.model}·${tier.reviewer.effort}` : 'role default';
+  return `difficulty ${difficulty.replace('_', ' ')} (builder ${b}, reviewer ${r})`;
+}
+
 // ---------------------------------------------------------------- snapshots
 
 /** Truncate for the state VIEW — always visibly marked, never silent. */
@@ -480,6 +555,8 @@ export function stateSnapshot(runId: string): string {
       const dep = s.dependsOn.length ? ` deps:[${s.dependsOn.join(',')}]` : '';
       const extras = [
         s.branch ? `branch ${s.branch}` : 'shared dir',
+        effectiveTierText(s.difficulty),
+        s.reviewRequired === false ? 'review WAIVED by you (no independent review runs unless you require it)' : '',
         // what it ran with (snapshot), or what it will run with (selection)
         s.agent ? `agent ${s.agent.profileName} (${s.agent.model} · ${s.agent.effort})`
           : s.agentProfileId ? `agent ${s.agentProfileId}` : '',

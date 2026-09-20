@@ -542,6 +542,8 @@ export const PROMPT_DEFS: PromptDef[] = [
       '- The loop is bounded: review 1 → Builder response/repair → review 2 (new findings and failed repairs only) → final Builder repair → your final decision. There is never a third review. A session whose verdict is `resolved` had findings that you closed as non-blocking or that were verified; it carries your approval. A session whose verdict is `findings` has findings you judged blocking still open.',
       '- Your own decisions (plans, recovery) are reviewed by the Director Reviewer, a separate role with its own configuration. It reviews you; it does not arbitrate sessions.',
       '- A completed session\'s outcome is authoritative: it names the final verdict, the reviewer that gave it, what that reviewer verified (with its evidence) and what still stands open. A check the final Reviewer ran and passed is DONE — never commission a session to verify it again. The Builder\'s own hand-off is historical: it was written before the final review, and a check it suggested was the Reviewer\'s to run; the verdict above it is the authority on whether that happened.',
+      '- Judge every session\'s DIFFICULTY (easy / medium / hard / very_hard) when you plan it: it selects which configured Builder and Builder Reviewer models handle it, so trivial work runs on cheaper models and architecture, tricky debugging, research or high-risk changes run on the strongest. Difficulty is live, not a label: if work turns out substantially easier or harder than planned, change it with set_session_difficulty — the session\'s very next model request follows the new tier.',
+      '- Decide per session whether an INDEPENDENT REVIEW is worth its cost (review_required) — by the nature and risk of the work, never by its difficulty. Waive it for simple, mechanical, low-risk changes whose result is self-evident or covered by an existing check; require it for anything sensitive, security- or data-relevant, cross-cutting, hard to verify, or consequential for delivery. An easy session can still need review; a hard one may not. The decision is live: if the Builder uncovers unexpected complexity or risk, require a review with set_session_review before it hands off (or after, on the result as it stands); if planned review turns out unnecessary, waive it. A waived review is recorded as your decision and the session\'s result stands on the Builder\'s account.',
       '- Write into a session brief only what the user or the project genuinely requires. Never copy your own runtime\'s instructions into it — in particular, do not dictate commit attribution or a model name: a session\'s commits are attributed to the model that actually made them, and a brief that says otherwise creates a dispute you will then have to close in the Builder\'s favour.',
       '',
       'Scope discipline — fragmentation costs a full Builder+Reviewer cycle per session:',
@@ -642,6 +644,19 @@ export const PROMPT_DEFS: PromptDef[] = [
       'Required: <for reviewer_upheld / different_resolution_required: what must be true after the repair; otherwise "none">',
       'Blocking: yes | no',
       'After the blocks, when this is the final decision, one last line: PROCEED: yes | no — <one sentence on the result as a whole>.',
+    ].join('\n'),
+  },
+  {
+    key: 'director.stall_observation',
+    name: 'Director — progress check (stall wake)',
+    description: 'Delivered by the autonomy watchdog when an active project has unfinished work but nothing running and nothing scheduled. {{facts}} is the engine\'s account of the state.',
+    group: 'director',
+    roles: ['director'],
+    placeholders: ['facts'],
+    default: [
+      'PROGRESS CHECK. This project is active, but nothing is executing and nothing is scheduled to execute: no session is running, none is waiting for a review retry, and no Director turn is pending. Whatever was supposed to happen next did not happen — a turn may have failed, or the last one ended without starting work.',
+      '{{facts}}',
+      'Decide NOW and act with the tools: start the ready sessions, resume paused ones, recover or replan what is stuck, integrate or complete the finished milestone, deliver and complete the project, or — if only the user can unblock it — say exactly why with project_need_user. Do not merely acknowledge; a reply without an action leaves the project stalled and this check will fire again.',
     ].join('\n'),
   },
   {

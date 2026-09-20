@@ -1,4 +1,5 @@
 import { Boxes, ChevronRight, Pause, Play, RotateCw, X } from 'lucide-react';
+import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { PdActivity, PdMilestone, PdSession, ProjectRunState } from '@shared/types';
@@ -191,7 +192,7 @@ function SessionLine({ session: s }: { session: PdSession }) {
         {s.status === 'running' && s.startedAt && <span className="ml-auto shrink-0 text-[10.5px] text-dim">{fmtDuration(Date.now() - s.startedAt)}</span>}
       </div>
       {s.difficulty && (
-        <span className="ml-1 rounded-full border border-line px-1.5 py-[1px] text-[10px] uppercase tracking-wide text-dim" title="difficulty — set by the Director, changeable at any time">
+        <span className="ml-1 rounded-full border border-line px-1.5 py-[1px] text-[10px] uppercase tracking-wide text-dim" title={DIFFICULTY_ROUTING_ENABLED ? 'difficulty — set by the Director, changeable at any time' : 'difficulty recorded when this session was planned; difficulty routing is archived and no longer selects a model'}>
           {s.difficulty.replace('_', ' ')}
         </span>
       )}

@@ -3,6 +3,7 @@ import {
   GitBranch, GitCommitHorizontal, GitMerge, Globe, Keyboard, ListTree, MousePointerClick, MoveVertical,
   Boxes, OctagonX, Plug, Scan, Search as SearchIcon, Sparkles, SquareTerminal, Terminal,
 } from 'lucide-react';
+import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { Link } from 'react-router-dom';
 import { useState } from 'react';
 import type {
@@ -210,7 +211,7 @@ export function AiCallRow({ ev }: { ev: ChatEvent }) {
           <span>Asked {providerName(p.provider)} · {role.label}</span>
           <span className={`inline-block h-[6px] w-[6px] rounded-full ${role.dot}`} />
           {p.difficulty && (
-            <span className="rounded-full border border-line px-1.5 py-[1px] text-[10px] uppercase tracking-wide text-dim" title={`difficulty ${p.difficulty} — model chosen by the ${p.modelSource === 'difficulty' ? 'difficulty tier' : p.modelSource === 'agent' ? 'Builder Agent profile' : 'role default'}`}>
+            <span className="rounded-full border border-line px-1.5 py-[1px] text-[10px] uppercase tracking-wide text-dim" title={`difficulty ${p.difficulty} — model chosen by the ${p.modelSource === 'difficulty' ? 'difficulty tier' : p.modelSource === 'agent' ? 'Builder Agent profile' : 'role default'}${DIFFICULTY_ROUTING_ENABLED ? '' : '. Difficulty routing is archived; this is what this call actually ran with'}`}>
               {p.difficulty.replace('_', ' ')}{p.modelSource === 'difficulty' ? ' tier' : ''}
             </span>
           )}

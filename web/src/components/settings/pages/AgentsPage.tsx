@@ -1,4 +1,5 @@
 import { Archive, ChevronRight, Download, Plus, RotateCcw, Star, Upload, Lock } from 'lucide-react';
+import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { AgentProfile } from '@shared/types';
@@ -128,7 +129,7 @@ export function AgentsPage() {
             agent={a}
             busy={busyId === a.id}
             onToggle={() => void act(a.id, () => api.updateAgent(a.id, { enabled: !a.enabled }), a.enabled ? `${a.name} disabled` : `${a.name} enabled`)}
-            onToggleEnforce={() => void act(a.id, () => api.updateAgent(a.id, { enforceModel: !a.enforceModel }), a.enforceModel ? `${a.name}: difficulty tiers may override its model` : `${a.name} always runs on its own model`)}
+            onToggleEnforce={() => void act(a.id, () => api.updateAgent(a.id, { enforceModel: !a.enforceModel }), a.enforceModel ? `${a.name} no longer pins its own model` : `${a.name} always runs on its own model`)}
             onDefault={() => void act(a.id, () => api.setDefaultAgent(a.id), `${a.name} is now the default agent`)}
             onArchive={() => void act(a.id, () => api.archiveAgent(a.id), `${a.name} archived`)}
           />
@@ -170,7 +171,7 @@ function AgentRow({ agent, busy, onToggle, onToggleEnforce, onDefault, onArchive
             </span>
           )}
           {agent.enforceModel && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-bg3 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-mut" title="Always runs on its own model — difficulty tiers do not override it">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-bg3 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-mut" title={DIFFICULTY_ROUTING_ENABLED ? 'Always runs on its own model — difficulty tiers do not override it' : 'Pinned to its own model. Nothing overrides it today; difficulty tiers, which could, are archived'}>
               <Lock size={10} /> Model enforced
             </span>
           )}
@@ -200,8 +201,10 @@ function AgentRow({ agent, busy, onToggle, onToggleEnforce, onDefault, onArchive
           <span
             className="flex items-center gap-2"
             title={agent.enforceModel
-              ? 'On: this agent always runs on its own provider, model and effort — difficulty tiers do not override it'
-              : 'Off: a configured difficulty tier decides the model; this agent contributes its instructions only'}
+              ? `On: this agent always runs on its own provider, model and effort${DIFFICULTY_ROUTING_ENABLED ? ' — difficulty tiers do not override it' : ''}`
+              : (DIFFICULTY_ROUTING_ENABLED
+                ? 'Off: a configured difficulty tier decides the model; this agent contributes its instructions only'
+                : 'Off. Difficulty tiers, the only thing that overrode an agent\'s model, are archived, so this changes nothing today')}
           >
             <span className="text-[11.5px] text-dim">Enforce model</span>
             <Toggle checked={agent.enforceModel} onChange={onToggleEnforce} label={`${agent.name} enforces its model`} />

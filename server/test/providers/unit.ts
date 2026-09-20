@@ -15,6 +15,7 @@ import { providerOfModel } from '../../src/providers/catalog';
 import { classifyCodexFailure } from '../../src/providers/codex-cli/errors';
 import { classifyClaudeFailure } from '../../src/providers/claude-code-cli/errors';
 import { outageFromFailure } from '../../src/engine/reviewWait';
+import { DIFFICULTY_ROUTING_ENABLED } from '../../../shared/features';
 import { DEFAULT_SETTINGS, getSettings, migrateReviewerSplit, validateRoleConfigs } from '../../src/settings';
 import { createAgent, setChatAgent, updateAgent } from '../../src/agents/store';
 import { db, kvGet, kvSet } from '../../src/db';
@@ -178,7 +179,7 @@ const r2c = parseVerdict('FINDINGS\nRESOLVED F-001 — ok\n1. [minor] Unused imp
 check('a genuinely new round-2 finding parses with evidence and category', r2c.items.length === 1 && r2c.items[0].category === 'preference' && r2c.items[0].evidence === 'b.ts line 3' && r2c.verified[0] === 'F-001');
 check('round 1 output still parses as before', parseVerdict('FINDINGS\n1. [major] Broken — a.ts:1\n   detail').items[0].title === 'Broken' && parseVerdict('PASS').verdict === 'pass');
 
-console.log('--- difficulty tiers resolve live, per request');
+console.log(`--- difficulty tiers (${DIFFICULTY_ROUTING_ENABLED ? 'ACTIVE' : 'ARCHIVED'})`);
 {
   const tiers = (over: Partial<AppSettings['difficulty']>): AppSettings['difficulty'] => ({
     easy: { builder: null, reviewer: null }, medium: { builder: null, reviewer: null }, hard: { builder: null, reviewer: null }, very_hard: { builder: null, reviewer: null }, ...over,
@@ -197,33 +198,45 @@ console.log('--- difficulty tiers resolve live, per request');
   db.prepare("UPDATE pd_sessions SET chat_id = 'c-s1' WHERE run_id = ? AND key = 'S1'").run(run.id);
   const cfgA = { ...base, difficulty: tiers({ hard: { builder: { provider: 'claude-code', model: 'claude-sonnet-5', effort: 'medium' }, reviewer: { provider: 'codex', model: 'gpt-5.6-terra', effort: 'low' } } }) };
   const b1 = resolveBuilderRole(cfgA, 'c-s1'), r1 = resolveBuilderReviewerRole(cfgA, 'c-s1');
-  check('a hard session resolves the hard tier for the Builder (source difficulty)', b1.source === 'difficulty' && b1.difficulty === 'hard' && b1.model === 'claude-sonnet-5' && b1.effort === 'medium');
-  check('…and the hard tier for the Builder Reviewer, independently', r1.source === 'difficulty' && r1.provider === 'codex' && r1.model === 'gpt-5.6-terra' && r1.effort === 'low');
+  if (DIFFICULTY_ROUTING_ENABLED) {
+    check('a hard session resolves the hard tier for the Builder (source difficulty)', b1.source === 'difficulty' && b1.difficulty === 'hard' && b1.model === 'claude-sonnet-5' && b1.effort === 'medium');
+    check('…and the hard tier for the Builder Reviewer, independently', r1.source === 'difficulty' && r1.provider === 'codex' && r1.model === 'gpt-5.6-terra' && r1.effort === 'low');
+  } else {
+    check('ARCHIVED: a stored hard difficulty selects no tier for the Builder', b1.source === 'role' && b1.difficulty === undefined && b1.model === DEFAULT_SETTINGS.roles.builder.model);
+    check('ARCHIVED: …and none for the Builder Reviewer either', r1.source === 'role' && r1.difficulty === undefined && r1.model === DEFAULT_SETTINGS.roles.builder_reviewer.model);
+  }
   // the admin changes the tier: the next resolution follows, nothing is frozen
   const cfgB = { ...base, difficulty: tiers({ hard: { builder: { provider: 'claude-code', model: 'claude-haiku-4-5', effort: 'low' }, reviewer: null } }) };
   const b2 = resolveBuilderRole(cfgB, 'c-s1'), r2 = resolveBuilderReviewerRole(cfgB, 'c-s1');
-  check('changing the hard tier changes the NEXT Builder resolution', b2.model === 'claude-haiku-4-5' && b2.source === 'difficulty');
-  check('clearing the reviewer tier falls back to the role default', r2.source === 'role' && r2.model === DEFAULT_SETTINGS.roles.builder_reviewer.model && r2.difficulty === 'hard');
+  check(DIFFICULTY_ROUTING_ENABLED ? 'changing the hard tier changes the NEXT Builder resolution' : 'ARCHIVED: changing a tier changes nothing',
+    DIFFICULTY_ROUTING_ENABLED ? (b2.model === 'claude-haiku-4-5' && b2.source === 'difficulty') : (b2.source === 'role' && b2.model === DEFAULT_SETTINGS.roles.builder.model));
+  check('the reviewer falls back to the role default', r2.source === 'role' && r2.model === DEFAULT_SETTINGS.roles.builder_reviewer.model && r2.difficulty === (DIFFICULTY_ROUTING_ENABLED ? 'hard' : undefined));
   // the Director changes the difficulty: the next resolution follows the new tier
   const prev = setSessionDifficulty(run.id, 'S1', 'easy');
   const cfgC = { ...base, difficulty: tiers({ easy: { builder: { provider: 'codex', model: 'gpt-5.6-sol', effort: 'low' }, reviewer: null }, hard: { builder: { provider: 'claude-code', model: 'claude-opus-5', effort: 'high' }, reviewer: null } }) };
   const b3 = resolveBuilderRole(cfgC, 'c-s1');
-  check('set_session_difficulty returns the previous level and the next resolution uses the new tier', prev === 'hard' && b3.difficulty === 'easy' && b3.provider === 'codex' && b3.model === 'gpt-5.6-sol');
+  check(DIFFICULTY_ROUTING_ENABLED ? 'setSessionDifficulty returns the previous level' : 'ARCHIVED: a newly planned session records no difficulty at all',
+    prev === (DIFFICULTY_ROUTING_ENABLED ? 'hard' : null));
+  check(DIFFICULTY_ROUTING_ENABLED ? 'the next resolution uses the new tier' : 'ARCHIVED: the new level still routes nothing',
+    DIFFICULTY_ROUTING_ENABLED ? (b3.difficulty === 'easy' && b3.provider === 'codex' && b3.model === 'gpt-5.6-sol') : (b3.source === 'role' && b3.difficulty === undefined));
   // a tier with a model from the other backend is refused by validation and neutralized on read
   check('settings PUT refuses a cross-provider tier', /not a model/.test(validateRoleConfigs({ difficulty: { hard: { builder: { provider: 'codex', model: 'claude-opus-5', effort: 'high' } } } } as any) ?? ''));
   // a standalone chat: the user's own difficulty on the chat row, same tiers, same live resolution
   db.prepare("INSERT INTO chats (id, project_id, title, created_at, updated_at, running, kind, difficulty) VALUES ('c-plain','p1','plain',0,0,0,'chat','easy')").run();
   const p1 = resolveBuilderRole(cfgC, 'c-plain');
-  check('a standalone chat with difficulty easy resolves the easy tier (source difficulty)', p1.source === 'difficulty' && p1.difficulty === 'easy' && p1.model === 'gpt-5.6-sol');
+  check(DIFFICULTY_ROUTING_ENABLED ? 'a standalone chat with difficulty easy resolves the easy tier' : 'ARCHIVED: a standalone chat\'s stored difficulty routes nothing',
+    DIFFICULTY_ROUTING_ENABLED ? (p1.source === 'difficulty' && p1.difficulty === 'easy' && p1.model === 'gpt-5.6-sol') : (p1.source === 'role' && p1.difficulty === undefined));
   db.prepare("UPDATE chats SET difficulty = 'hard' WHERE id = 'c-plain'").run();
   const p2 = resolveBuilderRole(cfgC, 'c-plain');
-  check('changing the chat difficulty changes the NEXT resolution', p2.difficulty === 'hard' && p2.model === 'claude-opus-5');
+  check(DIFFICULTY_ROUTING_ENABLED ? 'changing the chat difficulty changes the NEXT resolution' : 'ARCHIVED: changing it still routes nothing',
+    DIFFICULTY_ROUTING_ENABLED ? (p2.difficulty === 'hard' && p2.model === 'claude-opus-5') : (p2.source === 'role' && p2.model === DEFAULT_SETTINGS.roles.builder.model));
   db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
   const p3 = resolveBuilderRole(cfgC, 'c-plain');
   check('clearing it returns to the role default', p3.source === 'role' && p3.difficulty === undefined);
   // a Director session row always wins over anything on its chat row
   db.prepare("UPDATE chats SET difficulty = 'very_hard' WHERE id = 'c-s1'").run();
-  check('a project session takes its difficulty from the session row, never the chat row', resolveBuilderRole(cfgC, 'c-s1').difficulty === 'easy');
+  check(DIFFICULTY_ROUTING_ENABLED ? 'a project session takes its difficulty from the session row, never the chat row' : 'ARCHIVED: a project session reports no difficulty whatever either row holds',
+    resolveBuilderRole(cfgC, 'c-s1').difficulty === (DIFFICULTY_ROUTING_ENABLED ? 'easy' : undefined));
   // a standalone chat's Builder Agent: chosen by the user, captured like a session's, replaceable
   const spec = createAgent({ slug: 'unit-spec', name: 'Unit Specialist', systemPrompt: 'You are the unit specialist.', provider: 'codex', model: 'gpt-5.6-terra', effort: 'medium' });
   db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
@@ -233,7 +246,10 @@ console.log('--- difficulty tiers resolve live, per request');
     a1?.profileName === 'Unit Specialist' && withAgent.source === 'agent' && withAgent.provider === 'codex' && withAgent.model === 'gpt-5.6-terra' && withAgent.effort === 'medium' && withAgent.agentPrompt === 'You are the unit specialist.');
   db.prepare("UPDATE chats SET difficulty = 'easy' WHERE id = 'c-plain'").run();
   const both = resolveBuilderRole(cfgC, 'c-plain');
-  check('with a difficulty tier set, the tier decides the model and the Agent still supplies the prompt', both.source === 'difficulty' && both.model === 'gpt-5.6-sol' && both.agentPrompt === 'You are the unit specialist.');
+  check(DIFFICULTY_ROUTING_ENABLED ? 'with a difficulty tier set, the tier decides the model and the Agent still supplies the prompt' : 'ARCHIVED: the Agent decides the model, with no tier to override it',
+    DIFFICULTY_ROUTING_ENABLED
+      ? (both.source === 'difficulty' && both.model === 'gpt-5.6-sol' && both.agentPrompt === 'You are the unit specialist.')
+      : (both.source === 'agent' && both.model === 'gpt-5.6-terra' && both.agentPrompt === 'You are the unit specialist.'));
   updateAgent(spec.id, { model: 'gpt-6-astra' });
   db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
   check('editing the profile does not change the chat (the snapshot is frozen)', resolveBuilderRole(cfgC, 'c-plain').model === 'gpt-5.6-terra');
@@ -246,12 +262,13 @@ console.log('--- difficulty tiers resolve live, per request');
   setChatAgent('c-plain', spec.id);
   db.prepare("UPDATE chats SET difficulty = 'easy' WHERE id = 'c-plain'").run();
   const enforced = resolveBuilderRole(cfgC, 'c-plain');
-  check('with Enforce model on, the Agent keeps its model over the easy tier (source agent, difficulty still recorded)',
-    enforced.source === 'agent' && enforced.model === 'gpt-6-astra' && enforced.difficulty === 'easy' && enforced.agentPrompt === 'You are the unit specialist.');
+  check('with Enforce model on, the Agent keeps its model (source agent)',
+    enforced.source === 'agent' && enforced.model === 'gpt-6-astra' && enforced.difficulty === (DIFFICULTY_ROUTING_ENABLED ? 'easy' : undefined) && enforced.agentPrompt === 'You are the unit specialist.');
   updateAgent(spec.id, { enforceModel: false });
   check('the snapshot froze the enforcement too — turning it off on the profile changes nothing until re-chosen', resolveBuilderRole(cfgC, 'c-plain').source === 'agent');
   setChatAgent('c-plain', spec.id);
-  check('re-chosen with Enforce model off, the tier decides the model again', resolveBuilderRole(cfgC, 'c-plain').source === 'difficulty');
+  check(DIFFICULTY_ROUTING_ENABLED ? 're-chosen with Enforce model off, the tier decides the model again' : 'ARCHIVED: re-chosen with Enforce model off, the Agent still decides',
+    resolveBuilderRole(cfgC, 'c-plain').source === (DIFFICULTY_ROUTING_ENABLED ? 'difficulty' : 'agent'));
   setChatAgent('c-plain', null);
   db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
   let refused = '';

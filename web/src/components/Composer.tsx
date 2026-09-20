@@ -1,5 +1,6 @@
 import { ArrowUp, Bot, FileArchive, FileCode, FileText, Gauge, Image as ImageIcon, Paperclip, ShieldCheck, ShieldOff, Square, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { DIFFICULTIES, DIFFICULTY_LABEL, type AgentProfile, type Chat, type Difficulty } from '@shared/types';
 import { api } from '../api';
 import { fmtBytes } from '../lib/format';
@@ -203,7 +204,7 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
             {(!chat.kind || chat.kind === 'chat') && (
               <>
                 <AgentPicker chat={chat} />
-                <DifficultyPicker chat={chat} />
+                {DIFFICULTY_ROUTING_ENABLED && <DifficultyPicker chat={chat} />}
               </>
             )}
             <span className="hidden px-1 text-[11px] text-dim sm:inline">
@@ -326,7 +327,7 @@ function AgentPicker({ chat }: { chat: Chat }) {
         current ? 'bg-builder/10 text-builder hover:bg-builder/[0.17]' : 'text-dim hover:bg-bg3 hover:text-mut'
       } ${disabled ? 'opacity-60' : ''}`}
       title={current
-        ? `Builder Agent ${current.profileName} — ${current.model} · ${current.effort}, captured when chosen (pick it again after editing the Agent to refresh). ${current.enforceModel ? 'Its model is enforced: a difficulty tier does not override it.' : 'A difficulty tier, when set, still decides the model.'}`
+        ? `Builder Agent ${current.profileName} — ${current.model} · ${current.effort}, captured when chosen (pick it again after editing the Agent to refresh).${DIFFICULTY_ROUTING_ENABLED ? (current.enforceModel ? ' Its model is enforced: a difficulty tier does not override it.' : ' A difficulty tier, when set, still decides the model.') : ''}`
         : 'Builder Agent: none — the Builder runs with the role defaults. Pick an Agent to give this chat its instructions and model.'}
     >
       <Bot size={13} className="shrink-0" />

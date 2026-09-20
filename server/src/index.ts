@@ -6,6 +6,7 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { authHook, ensureUser, setPassword } from './auth';
 import { config } from './config';
+import { DIFFICULTY_ROUTING_ENABLED } from '../../shared/features';
 import { registerRoutes } from './routes';
 import { registerProjectRoutes } from './projectRoutes';
 import { registerIntegrationRoutes } from './integrationRoutes';
@@ -118,7 +119,11 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  const app = Fastify({
+  // Publish the archived-feature decision to every tool subprocess we spawn, so
+// the Director's MCP server advertises exactly the tools that actually work.
+process.env.TANDEM_DIFFICULTY_ROUTING = DIFFICULTY_ROUTING_ENABLED ? '1' : '0';
+
+const app = Fastify({
     logger: { level: config.production ? 'warn' : 'info' },
     bodyLimit: 2 * 1024 * 1024,
   });

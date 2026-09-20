@@ -75,7 +75,7 @@ if (scenario==='STANDBY') {
   check('the woken Director started S1 and it completed', s1?.status==='completed');
   check('progress reset the stall streak', run.stall_streak===0);
   check('the run is still RUNNING (not paused) and no wake is left behind', run.state==='RUNNING' && wakes.length===0);
-  check('the session carried its planned difficulty', s1?.difficulty==='easy');
+  check('the session carries no difficulty, which is archived (shared/features.ts)', s1?.difficulty===null);
 }
 if (scenario==='CRASH') {
   check('the first Director call failed (non-outage)', dirCalls[0]?.p.status==='failed');

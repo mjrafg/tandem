@@ -13,6 +13,10 @@ const readline = require('node:readline');
 const BASE = (process.env.TANDEM_INTERNAL_URL || '').replace(/\/workdir$/, '');
 const CHAT_ID = process.env.TANDEM_CHAT_ID;
 const TOKEN = process.env.TANDEM_INTERNAL_TOKEN;
+// Difficulty-based model routing is archived unless Tandem says otherwise; the
+// app publishes its decision into our environment at boot. While it is off the
+// Director is never shown the concept, so it cannot spend a decision on it.
+const DIFFICULTY_ROUTING = process.env.TANDEM_DIFFICULTY_ROUTING === '1';
 
 const TOOLS = [
   {
@@ -58,8 +62,10 @@ const TOOLS = [
       'Each session becomes a normal Tandem chat with its own Builder and independent Reviewer. Write each prompt as a full self-contained contract (goal, context, constraints, definition of done) — the session knows nothing about this conversation.',
       'Set isolated=true for sessions that should run in parallel with siblings touching the same repository (each gets its own git worktree and branch); leave it false for sequential work in the shared project directory.',
       'Choose a Builder Agent for each session with agent_profile_id, using an ID from the AVAILABLE BUILDER AGENTS catalog in your instructions.',
-      'Judge each session\'s difficulty (easy / medium / hard / very_hard): it selects the configured model tier, so trivial work runs on cheaper models and hard work on stronger ones. You can change it later.',
-      'Decide per session whether an independent review is worth its cost (review_required, default true) — by the nature and risk of the work, independently of difficulty. You can change that later too.',
+      ...(DIFFICULTY_ROUTING
+        ? ['Judge each session\'s difficulty (easy / medium / hard / very_hard): it selects the configured model tier, so trivial work runs on cheaper models and hard work on stronger ones. You can change it later.']
+        : []),
+      `Decide per session whether an independent review is worth its cost (review_required, default true) — by the nature and risk of the work${DIFFICULTY_ROUTING ? ', independently of difficulty' : ''}. You can change that later too.`,
     ].join(' '),
     inputSchema: {
       type: 'object',
@@ -78,17 +84,19 @@ const TOOLS = [
               depends_on: { type: 'array', items: { type: 'string' }, description: 'Session keys that must complete first.' },
               isolated: { type: 'boolean', description: 'true = own worktree/branch for safe parallel work.' },
               agent_profile_id: { type: 'string', description: 'ID of the Builder Agent profile from the AVAILABLE BUILDER AGENTS catalog. Omit to use the default agent.' },
-              review_required: { type: 'boolean', description: 'Whether this session needs an INDEPENDENT review (default true). Decide by the nature of the work, not its difficulty: waive it for simple, mechanical, low-risk changes whose result is self-evident; require it for anything sensitive, security-relevant, data-affecting, cross-cutting, hard to verify, or consequential. Changeable later with set_session_review.' },
-              difficulty: { type: 'string', enum: ['easy', 'medium', 'hard', 'very_hard'], description: 'Your judgment of how hard this work is. Decides which configured Builder/Reviewer models handle it (Settings → Difficulty tiers): easy = trivial, mechanical changes; medium = ordinary feature work; hard = architecture, tricky debugging, cross-cutting or risky changes; very_hard = research-grade or high-risk work needing the strongest models. Changeable later with set_session_difficulty. Default medium.' },
+              review_required: { type: 'boolean', description: 'Whether this session needs an INDEPENDENT review (default true). Decide by the nature of the work: waive it for simple, mechanical, low-risk changes whose result is self-evident; require it for anything sensitive, security-relevant, data-affecting, cross-cutting, hard to verify, or consequential. Changeable later with set_session_review.' },
+              ...(DIFFICULTY_ROUTING
+                ? { difficulty: { type: 'string', enum: ['easy', 'medium', 'hard', 'very_hard'], description: 'Your judgment of how hard this work is. Decides which configured Builder/Reviewer models handle it (Settings → Difficulty tiers): easy = trivial, mechanical changes; medium = ordinary feature work; hard = architecture, tricky debugging, cross-cutting or risky changes; very_hard = research-grade or high-risk work needing the strongest models. Changeable later with set_session_difficulty. Default medium.' } }
+                : {}),
             },
-            required: ['key', 'name', 'purpose', 'prompt', 'difficulty'],
+            required: ['key', 'name', 'purpose', 'prompt', ...(DIFFICULTY_ROUTING ? ['difficulty'] : [])],
           },
         },
       },
       required: ['milestone', 'sessions', 'reasoning'],
     },
   },
-  {
+  ...(DIFFICULTY_ROUTING ? [{
     name: 'set_session_difficulty',
     description: 'Reassess an existing session\'s difficulty (easy / medium / hard / very_hard) — before it starts or while it runs. Difficulty is live: the session\'s NEXT model request (Builder or Builder Reviewer) resolves through the new tier\'s configured models; a request already in flight finishes on the model it started with. Use it when the work turns out substantially easier or harder than planned, or when a cheaper/stronger model is warranted for what remains.',
     inputSchema: {
@@ -100,7 +108,7 @@ const TOOLS = [
       },
       required: ['key', 'difficulty', 'reasoning'],
     },
-  },
+  }] : []),
   {
     name: 'set_session_review',
     description: 'Change whether a session needs an independent review — before it starts, while it runs (the decision is read when the Builder hands off), or even after it completed with the review waived (a review then runs on the result as it stands). Waive it when the work turns out simple and low-risk; require it when the Builder uncovers complexity, risk or sensitivity you did not expect.',

@@ -2,6 +2,7 @@ import { Eye } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AppSettings, ConfigurableRole, Difficulty, Effort, Provider, ProviderDescriptor, RoleConfig, TierConfig } from '@shared/types';
+import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { DIFFICULTIES, DIFFICULTY_LABEL, EFFORTS } from '@shared/types';
 import { api } from '../../../api';
 import { Field, Modal, SelectBox, Spinner, Toggle } from '../../ui';
@@ -84,7 +85,9 @@ export function RolesPage() {
           onPreview={() => setPromptRole('director_reviewer')}
         />
 
-        <DifficultyTiersCard draft={draft} providers={providers} set={set} />
+        {/* archived: difficulty routing is inactive, so its configuration is not
+            part of the normal workflow — see shared/features.ts */}
+        {DIFFICULTY_ROUTING_ENABLED && <DifficultyTiersCard draft={draft} providers={providers} set={set} />}
         <WatchdogCard draft={draft} set={set} />
 
         <div className="card px-4 py-3.5">

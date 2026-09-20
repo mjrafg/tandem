@@ -8,6 +8,7 @@ import { getAgentSnapshot } from '../agents/store';
 import { signalRunState } from '../observability/signals';
 import { getPendingWake } from './pendingWake';
 import { MAX_REVIEW_ROUNDS, getLedger } from '../engine/reviewLedger';
+import { DIFFICULTY_ROUTING_ENABLED } from '../../../shared/features';
 import { getSettings } from '../settings';
 
 /**
@@ -262,6 +263,16 @@ export interface SessionInput {
   reviewRequired?: boolean;
 }
 
+/**
+ * The difficulty a newly planned session records. While difficulty routing is
+ * archived this is null rather than an invented 'medium': the Director never
+ * judged it, so claiming a level would put a decision nobody made on the record.
+ */
+function plannedDifficulty(s: SessionInput): Difficulty | null {
+  if (!DIFFICULTY_ROUTING_ENABLED) return null;
+  return s.difficulty ?? 'medium';
+}
+
 /** Define (or extend) the session plan for one milestone. Existing sessions are kept by key. */
 export function planSessions(runId: string, milestoneKey: string, sessions: SessionInput[]): PdMilestone {
   const ms = db.prepare('SELECT * FROM pd_milestones WHERE run_id = ? AND key = ?').get(runId, milestoneKey) as any;
@@ -280,11 +291,11 @@ export function planSessions(runId: string, milestoneKey: string, sessions: Sess
         throw new Error(`Session ${s.key} is ${old.status} and its definition can no longer be replaced — use recover_session instead.`);
       }
       db.prepare('UPDATE pd_sessions SET name = ?, purpose = ?, prompt = ?, depends_on = ?, status = ?, agent_profile_id = ?, difficulty = ?, review_required = ? WHERE id = ?')
-        .run(s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), 'planned', s.agentProfileId ?? null, s.difficulty ?? 'medium', s.reviewRequired === false ? 0 : 1, old.id);
+        .run(s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), 'planned', s.agentProfileId ?? null, plannedDifficulty(s), s.reviewRequired === false ? 0 : 1, old.id);
     } else {
       db.prepare(`INSERT INTO pd_sessions (id, run_id, milestone_id, key, name, purpose, prompt, status, depends_on, branch, agent_profile_id, difficulty, review_required)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)`)
-        .run(randomUUID(), runId, ms.id, s.key, s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), s.isolated ? `pd/${s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : null, s.agentProfileId ?? null, s.difficulty ?? 'medium', s.reviewRequired === false ? 0 : 1);
+        .run(randomUUID(), runId, ms.id, s.key, s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), s.isolated ? `pd/${s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : null, s.agentProfileId ?? null, plannedDifficulty(s), s.reviewRequired === false ? 0 : 1);
     }
   }
   broadcastRun(runId);
@@ -478,6 +489,7 @@ export function resetStallStreak(runId: string): void {
 
 /** the effective Builder/Reviewer models for a difficulty, as the tiers stand right now */
 export function effectiveTierText(difficulty: Difficulty | null | undefined): string {
+  if (!DIFFICULTY_ROUTING_ENABLED) return ''; // archived: the snapshot does not mention tiers
   if (!difficulty) return '';
   const tier = getSettings().difficulty?.[difficulty];
   const b = tier?.builder ? `${tier.builder.model}·${tier.builder.effort}` : 'role default';

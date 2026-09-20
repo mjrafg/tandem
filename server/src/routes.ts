@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
+import { DIFFICULTY_ROUTING_ENABLED } from '../../shared/features';
 import { DIFFICULTIES, DIFFICULTY_LABEL, type AppSettings, type AttachmentMeta, type BrowserActionPayload, type Difficulty, type RoleName } from '../../shared/types';
 import {
   createSession, destroySession, getUser, loginAllowed, recordLoginAttempt,
@@ -110,6 +111,9 @@ export function registerRoutes(app: FastifyInstance): void {
     const { title, difficulty, agentProfileId } = (req.body ?? {}) as { title?: string; difficulty?: unknown; agentProfileId?: unknown };
     if (title?.trim()) setChatTitle(chat.id, title.trim().slice(0, 80));
     if (difficulty !== undefined) {
+      if (!DIFFICULTY_ROUTING_ENABLED) {
+        return reply.code(409).send({ error: 'Difficulty-based model routing is archived — a chat\'s difficulty no longer selects a model. Recorded values are kept; see shared/features.ts to reactivate.' });
+      }
       // the Director owns a project session's difficulty (set_session_difficulty)
       if (chat.kind === 'pd-session' || chat.kind === 'project') return reply.code(409).send({ error: 'This chat belongs to a project — its difficulty is set by the Project Director.' });
       if (difficulty !== null && !DIFFICULTIES.includes(difficulty as Difficulty)) return reply.code(400).send({ error: `Unknown difficulty "${String(difficulty)}".` });
@@ -138,7 +142,7 @@ export function registerRoutes(app: FastifyInstance): void {
         }
         broadcastChat(chat.id);
         addEvent(chat.id, 'status', { text: snap
-          ? `Builder Agent set to ${snap.profileName} (${snap.provider === 'codex' ? 'Codex' : 'Claude Code'} · ${snap.model} · ${snap.effort}) — the next request runs with its instructions and model${snap.enforceModel ? '; its model is enforced, so a difficulty tier does not override it' : '; a difficulty tier, when set, still decides the model'}.`
+          ? `Builder Agent set to ${snap.profileName} (${snap.provider === 'codex' ? 'Codex' : 'Claude Code'} · ${snap.model} · ${snap.effort}) — the next request runs with its instructions and model${DIFFICULTY_ROUTING_ENABLED ? (snap.enforceModel ? '; its model is enforced, so a difficulty tier does not override it' : '; a difficulty tier, when set, still decides the model') : ''}.`
           : 'Builder Agent cleared — the next request uses the Builder role defaults.' });
       }
     }

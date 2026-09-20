@@ -1,7 +1,9 @@
 #!/bin/bash
-# Review is intentional, per session — decided by the Director, separate from difficulty, live.
-#   S1 (hard, review WAIVED)  → completes with NO reviewer call; verdict "waived"; the Director's outcome says so
-#   S2 (easy, review REQUIRED) → reviewed as usual
+# Review is intentional, per session — decided by the Director and live. It is a
+# capability of its own: difficulty routing is archived (shared/features.ts) and
+# this harness runs with it off, which is exactly how production runs.
+#   S1 (review WAIVED)   → completes with NO reviewer call; verdict "waived"; the Director's outcome says so
+#   S2 (review REQUIRED) → reviewed as usual
 #   then the Director REQUIRES a review of the completed S1 → a round-1 review runs on the result as it stands → PASS
 # Real isolated server, fake CLIs (the Director scripted).
 set -u
@@ -67,8 +69,10 @@ const s1FirstReviewers=reviewers(e1).filter(r=>r.seq<(s1FirstRun?.seq??Infinity)
 check('S1 (hard, review waived) completed its first run with NO reviewer call', s1FirstReviewers.length===0 && !!s1FirstRun);
 check('   the waiver is recorded in the session chat and as the standing verdict at that point', e1.some(r=>r.kind==='status'&&/Independent review waived by the Project Director/.test(r.p.text||'')) && /Review WAIVED by your decision/.test(obsS1));
 check('   the Director\'s outcome for S1 said so explicitly, not "no verdict"', /FINAL STATE: REVIEW WAIVED/.test(obsS1));
-check('   the planning decision recorded the waiver next to the difficulty (hard, review waived)', acts.some(a=>/S1: hard, review waived/.test(a)));
-check('S2 (easy, review required) was reviewed as usual — difficulty did not decide review', reviewers(e2).length>=1 && s2.review_verdict==='pass' && s2.difficulty==='easy');
+check('   the planning decision recorded the waiver', acts.some(a=>/S1: review waived/.test(a)));
+check('   and it recorded no difficulty, which is archived', !acts.some(a=>/S1: (easy|medium|hard|very hard)/.test(a)));
+check('S2 (review required) was reviewed as usual', reviewers(e2).length>=1 && s2.review_verdict==='pass');
+check('   neither session carries a difficulty', s1.difficulty===null && s2.difficulty===null);
 // the change of mind: a review after the fact
 check('set_session_review on the completed S1 recorded the decision', acts.some(a=>/^S1: independent review now REQUIRED \(it had completed with its review waived\)/.test(a)));
 check('   a round-1 review then ran on S1\'s result as it stands', reviewers(e1).length===1 && e1.some(r=>r.kind==='findings'&&r.p.round===1));

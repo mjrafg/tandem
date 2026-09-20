@@ -17,7 +17,9 @@ rm -rf "$DD" "$STATE" "$PROJ"; mkdir -p "$DD" "$STATE" "$PROJ"
 lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null; sleep 0.3
 # the repair sleeps so the Director's difficulty change lands while it runs
 RECIPES='{"RECIPE_BUILD":["echo a > a.txt"],"returned these findings":["sleep 8","echo fixed >> a.txt"]}'
-ENV=(DATA_DIR="$DD" PORT=$PORT HOST=127.0.0.1 TANDEM_INTERNAL_TOKEN=devtoken TANDEM_REVIEW_SWEEP_MS=2000
+# Difficulty routing is ARCHIVED by default (shared/features.ts). This harness is
+# the proof that it still works, so it boots the server with the feature on.
+ENV=(TANDEM_DIFFICULTY_ROUTING=1 DATA_DIR="$DD" PORT=$PORT HOST=127.0.0.1 TANDEM_INTERNAL_TOKEN=devtoken TANDEM_REVIEW_SWEEP_MS=2000
      TANDEM_CLAUDE_BIN="$FAKES/fake-claude.cjs" TANDEM_CODEX_BIN="$FAKES/fake-codex.cjs"
      FAKE_STATE_DIR="$STATE" FAKE_DIRECTOR_SCRIPT="$RR/dscript.json" FAKE_BUILDER_RECIPES="$RECIPES"
      FAKE_FINDINGS_FOR=1 FAKE_R2=resolved FAKE_CODEX_SLEEP_ON_CALL=1)

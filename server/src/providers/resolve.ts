@@ -9,6 +9,7 @@
  */
 import type { AppSettings, Difficulty, Effort, ModelSource, Provider } from '../../../shared/types';
 import { builderExecFor } from '../agents/exec';
+import { DIFFICULTY_ROUTING_ENABLED } from '../../../shared/features';
 import { asDifficulty, db } from '../db';
 import { providerOfModel } from './catalog';
 import { canonicalProvider, providerRegistry } from './registry';
@@ -32,6 +33,10 @@ export interface ResolvedRole {
  * change it while the session is running, and the next request must follow.
  */
 export function sessionDifficulty(chatId: string | undefined): Difficulty | null {
+  // Archived: no difficulty is consulted, so no tier can be selected and no new
+  // record is attributed to one. Values already stored stay exactly as they are
+  // (see shared/features.ts).
+  if (!DIFFICULTY_ROUTING_ENABLED) return null;
   if (!chatId) return null;
   // a Director-owned session: the Director's judgement on the session row
   try {

@@ -12,6 +12,7 @@ import { findOrCreateProject } from '../projectRoutes';
 import { executeRole, providerLabel, providerShortLabel } from '../providers/executor';
 import { listFindings } from '../engine/findings';
 import { getLedger as getReviewLedger } from '../engine/reviewLedger';
+import { DIFFICULTY_ROUTING_ENABLED } from '../../../shared/features';
 import type { Difficulty, SessionFinalState } from '../../../shared/types';
 import { DIFFICULTIES } from '../../../shared/types';
 import { resolveBuilderRole, resolveDirectorReviewerRole, resolveDirectorRoleConfig } from '../providers/resolve';
@@ -1779,12 +1780,14 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
           dependsOn: Array.isArray(s.depends_on) ? s.depends_on.map(String) : [],
           isolated: !!s.isolated,
           agentProfileId: s.agent_profile_id ? String(s.agent_profile_id) : null,
-          difficulty: (DIFFICULTIES as string[]).includes(String(s.difficulty ?? '')) ? (String(s.difficulty) as Difficulty) : 'medium',
+          ...(DIFFICULTY_ROUTING_ENABLED
+            ? { difficulty: ((DIFFICULTIES as string[]).includes(String(s.difficulty ?? '')) ? String(s.difficulty) : 'medium') as Difficulty }
+            : {}),
           reviewRequired: s.review_required === false || s.review_required === 'false' ? false : true,
         }));
         if (sessions.length === 0) return { ok: false, error: 'Provide at least one session.' };
         for (const [i, raw] of ((args.sessions ?? []) as any[]).entries()) {
-          if (raw.difficulty !== undefined && !(DIFFICULTIES as string[]).includes(String(raw.difficulty))) {
+          if (DIFFICULTY_ROUTING_ENABLED && raw.difficulty !== undefined && !(DIFFICULTIES as string[]).includes(String(raw.difficulty))) {
             return { ok: false, error: `Session ${sessions[i]?.key ?? i + 1}: unknown difficulty "${raw.difficulty}" — use easy, medium, hard or very_hard.` };
           }
         }
@@ -1806,11 +1809,20 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         const ms = planSessions(runId, msKeyArg, sessions);
         patchMilestone(runId, ms.key, { status: 'running' });
         resetStallStreak(runId); // a plan is progress
-        addActivity(runId, 'decision', `${ms.key} planned into ${ms.sessions.length} sessions (${sessions.map((x) => `${x.key}: ${(x.difficulty ?? 'medium').replace('_', ' ')}${x.reviewRequired === false ? ', review waived' : ''}`).join(', ')})`, String(args.reasoning ?? '').slice(0, 1_500));
+        const planned = sessions.map((x) => {
+          const tier = DIFFICULTY_ROUTING_ENABLED ? `: ${(x.difficulty ?? 'medium').replace('_', ' ')}` : '';
+          return `${x.key}${tier}${x.reviewRequired === false ? `${tier ? ',' : ':'} review waived` : ''}`;
+        });
+        addActivity(runId, 'decision', `${ms.key} planned into ${ms.sessions.length} sessions (${planned.join(', ')})`, String(args.reasoning ?? '').slice(0, 1_500));
         return { ok: true, text: `Milestone ${ms.key} now has ${ms.sessions.length} sessions. Start the ready ones with start_sessions.` };
       }
 
       case 'set_session_difficulty': {
+        // archived: the tool is not advertised, so this only catches a Director
+        // working from a stale tool list (see shared/features.ts)
+        if (!DIFFICULTY_ROUTING_ENABLED) {
+          return { ok: false, error: 'Difficulty-based model routing is archived — sessions are not classified by difficulty, and every session runs on the configured Builder and Builder Reviewer. Decide review_required instead; that is still yours.' };
+        }
         const key = String(args.key ?? '').trim();
         const difficulty = String(args.difficulty ?? '').trim() as Difficulty;
         if (!(DIFFICULTIES as string[]).includes(difficulty)) return { ok: false, error: `Unknown difficulty "${args.difficulty}" — use easy, medium, hard or very_hard.` };

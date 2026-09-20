@@ -1,6 +1,6 @@
-import { ArrowDown, Boxes, Check, Copy, FolderOpen } from 'lucide-react';
+import { ArrowDown, Boxes, Check, Copy, FolderOpen, ArrowLeft } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import type { Chat, Project } from '@shared/types';
 import { selectChat, selectProject, useStore } from '../store';
 import { CompactDialog } from './CompactDialog';
@@ -121,8 +121,16 @@ export function ChatView() {
       )}
 
       {chat.kind === 'pd-session' ? (
-        <div className="border-t border-linesoft px-4 py-3 text-center text-[12.5px] text-dim">
-          This session is driven by its Project Director — talk to it from the Project Chat.
+        <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-linesoft px-4 py-3 text-center text-[12.5px] text-dim">
+          <span>
+            This session belongs to{' '}
+            {chat.session ? <span className="text-mut">{chat.session.runTitle}</span> : 'a project'} and is driven by its Project Director — talk to it from the Project Chat.
+          </span>
+          {chat.session && (
+            <Link to={`/c/${chat.session.projectChatId}`} className="inline-flex items-center gap-1 text-accent hover:underline">
+              <ArrowLeft size={12} /> Back to {chat.session.runTitle}
+            </Link>
+          )}
         </div>
       ) : (
         <Composer chat={chat} prefill={prefill} onUsedPrefill={() => setPrefill(undefined)} />
@@ -145,10 +153,32 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer }: {
     <header className="flex h-[50px] shrink-0 items-center justify-between gap-2 border-b border-linesoft px-2 sm:gap-3 sm:px-4">
       <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-2.5">
         <MenuButton />
-        <span className="inline-flex min-w-0 max-w-[40vw] shrink items-center gap-1.5 text-[13.5px] font-medium sm:max-w-[45vw] sm:shrink-0">
-          <FolderOpen size={14} className="shrink-0 text-dim" />
-          <span className="truncate">{project.name}</span>
-        </span>
+        {chat.kind === 'pd-session' && chat.session ? (
+          // a project-owned session: the parent project first, the way back
+          // beside it, then where this session sits in the plan
+          <span className="inline-flex min-w-0 shrink items-center gap-1.5 text-[13.5px]">
+            <Link
+              to={`/c/${chat.session.projectChatId}`}
+              className="inline-flex min-w-0 items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-2 py-[3px] text-[12.5px] font-medium text-accent hover:bg-accent/20"
+              title={`Back to the project: ${chat.session.runTitle}`}
+            >
+              <ArrowLeft size={13} className="shrink-0" />
+              <Boxes size={13} className="shrink-0" />
+              <span className="truncate">{chat.session.runTitle}</span>
+            </Link>
+            <span className="hidden text-dim sm:inline">›</span>
+            <span className="hidden min-w-0 items-center gap-1 truncate text-[12.5px] text-mut sm:inline-flex">
+              {chat.session.milestoneKey && <span className="mono text-dim">{chat.session.milestoneKey}</span>}
+              <span className="mono text-dim">{chat.session.key}</span>
+              <span className="truncate">{chat.session.name}</span>
+            </span>
+          </span>
+        ) : (
+          <span className="inline-flex min-w-0 max-w-[40vw] shrink items-center gap-1.5 text-[13.5px] font-medium sm:max-w-[45vw] sm:shrink-0">
+            <FolderOpen size={14} className="shrink-0 text-dim" />
+            <span className="truncate">{project.name}</span>
+          </span>
+        )}
         <button
           className="group hidden min-w-0 flex-1 items-center gap-1 sm:flex"
           title="Copy path"

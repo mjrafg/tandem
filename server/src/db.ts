@@ -160,8 +160,26 @@ export function rowToChat(r: any): Chat {
     running: !!r.running, lastCompactionEventId: r.last_compaction_event_id ?? null,
     gitState,
     ...(r.kind === 'project' ? { kind: 'project' as const, projectRunId: r.project_run_id ?? null } : {}),
-    ...(r.kind === 'pd-session' ? { kind: 'pd-session' as const } : {}),
+    ...(r.kind === 'pd-session' ? { kind: 'pd-session' as const, session: sessionParent(r.id) } : {}),
   };
+}
+
+/**
+ * The project a Director-owned session belongs to: its run, the Project Chat
+ * to return to, and the session's place in the plan. Looked up per chat row so
+ * every view of the chat can name its parent; null when the session row is
+ * gone (the chat then reads as an orphan, which is the truth).
+ */
+function sessionParent(chatId: string): import('../../shared/types').SessionParent | null {
+  try {
+    const r = db.prepare(`SELECT s.key, s.name, r.id AS run_id, r.title AS run_title, r.chat_id AS project_chat_id, m.key AS ms_key, m.name AS ms_name
+      FROM pd_sessions s JOIN project_runs r ON r.id = s.run_id LEFT JOIN pd_milestones m ON m.id = s.milestone_id
+      WHERE s.chat_id = ? ORDER BY s.started_at DESC LIMIT 1`).get(chatId) as any;
+    if (!r) return null;
+    return { runId: r.run_id, runTitle: r.run_title || 'Project', projectChatId: r.project_chat_id, key: r.key, name: r.name, milestoneKey: r.ms_key ?? null, milestoneName: r.ms_name ?? null };
+  } catch {
+    return null; // the Director tables are created by the Director store; before that there are no sessions
+  }
 }
 
 export function rowToEvent(r: any): ChatEvent {

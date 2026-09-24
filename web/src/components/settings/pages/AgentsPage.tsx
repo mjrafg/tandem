@@ -1,5 +1,4 @@
 import { Archive, ChevronRight, Download, Plus, RotateCcw, Star, Upload, Lock } from 'lucide-react';
-import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { AgentProfile } from '@shared/types';
@@ -129,7 +128,7 @@ export function AgentsPage() {
             agent={a}
             busy={busyId === a.id}
             onToggle={() => void act(a.id, () => api.updateAgent(a.id, { enabled: !a.enabled }), a.enabled ? `${a.name} disabled` : `${a.name} enabled`)}
-            onToggleEnforce={() => void act(a.id, () => api.updateAgent(a.id, { enforceModel: !a.enforceModel }), a.enforceModel ? `${a.name} no longer pins its own model` : `${a.name} always runs on its own model`)}
+            onToggleEnforce={() => void act(a.id, () => api.updateAgent(a.id, { enforceModel: !a.enforceModel }), a.enforceModel ? `${a.name} now follows the Builder role's model` : `${a.name} now runs on its own model`)}
             onDefault={() => void act(a.id, () => api.setDefaultAgent(a.id), `${a.name} is now the default agent`)}
             onArchive={() => void act(a.id, () => api.archiveAgent(a.id), `${a.name} archived`)}
           />
@@ -171,8 +170,8 @@ function AgentRow({ agent, busy, onToggle, onToggleEnforce, onDefault, onArchive
             </span>
           )}
           {agent.enforceModel && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-bg3 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-mut" title={DIFFICULTY_ROUTING_ENABLED ? 'Always runs on its own model — difficulty tiers do not override it' : 'Pinned to its own model. Nothing overrides it today; difficulty tiers, which could, are archived'}>
-              <Lock size={10} /> Model enforced
+            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-bg3 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-mut" title="Runs on its own model, whatever the Builder role is set to">
+              <Lock size={10} /> Own model
             </span>
           )}
           {!agent.enabled && <span className="shrink-0 rounded bg-bg3 px-1.5 py-0.5 text-[10.5px] uppercase tracking-wide text-dim">Disabled</span>}
@@ -180,9 +179,15 @@ function AgentRow({ agent, busy, onToggle, onToggleEnforce, onDefault, onArchive
         </div>
         <p className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-dim">{agent.description || 'No description.'}</p>
         <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[11.5px] text-dim">
-          <span>{agent.provider === 'codex' ? 'Codex CLI' : 'Claude Code CLI'}</span>
-          <span className="mono text-mut">{agent.model}</span>
-          <span className="mono text-mut">{agent.effort}</span>
+          {agent.enforceModel ? (
+            <>
+              <span>{agent.provider === 'codex' ? 'Codex CLI' : 'Claude Code CLI'}</span>
+              <span className="mono text-mut">{agent.model}</span>
+              <span className="mono text-mut">{agent.effort}</span>
+            </>
+          ) : (
+            <span className="text-dim">follows the Builder role&apos;s model</span>
+          )}
         </div>
       </Link>
       <div className="flex items-center gap-1 border-t border-linesoft px-2.5 py-1.5">
@@ -201,13 +206,11 @@ function AgentRow({ agent, busy, onToggle, onToggleEnforce, onDefault, onArchive
           <span
             className="flex items-center gap-2"
             title={agent.enforceModel
-              ? `On: this agent always runs on its own provider, model and effort${DIFFICULTY_ROUTING_ENABLED ? ' — difficulty tiers do not override it' : ''}`
-              : (DIFFICULTY_ROUTING_ENABLED
-                ? 'Off: a configured difficulty tier decides the model; this agent contributes its instructions only'
-                : 'Off. Difficulty tiers, the only thing that overrode an agent\'s model, are archived, so this changes nothing today')}
+              ? 'On: this agent runs on its own provider, model and effort, whatever the Builder role is set to'
+              : 'Off: this agent contributes its instructions only and runs on the Builder role\'s model'}
           >
-            <span className="text-[11.5px] text-dim">Enforce model</span>
-            <Toggle checked={agent.enforceModel} onChange={onToggleEnforce} label={`${agent.name} enforces its model`} />
+            <span className="text-[11.5px] text-dim">Own model</span>
+            <Toggle checked={agent.enforceModel} onChange={onToggleEnforce} label={`${agent.name} uses its own model`} />
           </span>
           <span className="flex items-center gap-2">
             <span className="text-[11.5px] text-dim">{agent.enabled ? 'Enabled' : 'Disabled'}</span>

@@ -94,28 +94,34 @@ function coerce(
 /**
  * The Builder for a chat, resolved for THIS request.
  *
- * Precedence: the session's difficulty tier (when the Director has set a
- * difficulty and the admin configured that tier) → the session's Agent
- * snapshot (its specialist model, kept for sessions no tier covers) → the
- * Builder role default. An Agent whose snapshot ENFORCES its model steps in
- * front of the tier: the tier is then ignored for the model and the source is
- * the Agent, while the difficulty stays on record. The specialist PROMPT overlay always comes from the
- * snapshot — that is the session's identity — while the model follows the
- * latest applicable configuration, so changing a tier in Settings or the
- * session's difficulty changes the very next request.
+/**
+ * Precedence: an Agent that PINS its model (enforceModel) → the session's
+ * difficulty tier, when one is configured → the Builder role default.
+ *
+ * An Agent that does not pin its model contributes its instructions only, and
+ * the model comes from the ordinary configuration. That is what makes the
+ * Builder role setting reach project sessions at all: without it every session
+ * carries an Agent, and an Agent always won.
+ *
+ * The specialist PROMPT overlay always comes from the snapshot — that is the
+ * session's identity. The MODEL follows the latest applicable configuration, so
+ * for a session whose Agent does not pin one, changing the Builder role reaches
+ * the very next request, even mid-session.
  */
 export function resolveBuilderRole(settings: AppSettings, chatId?: string): ResolvedRole {
   // a snapshot only counts as an Agent when the chat has one; without it
   // builderExecFor echoes the role values, and the source is the role
   const exec = chatId ? builderExecFor(chatId, settings) : null;
   const agent = exec?.agentName ? exec : null;
+  // only an Agent that pins its model decides the model; the rest is ordinary
+  const pinned = agent?.enforceModel ? agent : null;
   const difficulty = sessionDifficulty(chatId);
-  const tier = agent?.enforceModel ? null : tierFor(settings, difficulty, 'builder');
+  const tier = pinned ? null : tierFor(settings, difficulty, 'builder');
   const b = settings.roles.builder;
-  const base = tier
-    ? coerce('builder', tier.provider, tier.model, tier.effort, 'difficulty')
-    : agent
-      ? coerce('builder', agent.provider ?? b.provider, agent.model ?? b.model, agent.effort ?? b.effort, 'agent')
+  const base = pinned
+    ? coerce('builder', pinned.provider ?? b.provider, pinned.model ?? b.model, pinned.effort ?? b.effort, 'agent')
+    : tier
+      ? coerce('builder', tier.provider, tier.model, tier.effort, 'difficulty')
       : coerce('builder', b.provider, b.model, b.effort, 'role');
   return {
     ...base,

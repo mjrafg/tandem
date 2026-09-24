@@ -327,7 +327,7 @@ function AgentPicker({ chat }: { chat: Chat }) {
         current ? 'bg-builder/10 text-builder hover:bg-builder/[0.17]' : 'text-dim hover:bg-bg3 hover:text-mut'
       } ${disabled ? 'opacity-60' : ''}`}
       title={current
-        ? `Builder Agent ${current.profileName} — ${current.model} · ${current.effort}, captured when chosen (pick it again after editing the Agent to refresh).${DIFFICULTY_ROUTING_ENABLED ? (current.enforceModel ? ' Its model is enforced: a difficulty tier does not override it.' : ' A difficulty tier, when set, still decides the model.') : ''}`
+        ? `Builder Agent ${current.profileName}, captured when chosen — pick it again after editing the Agent to refresh. ${current.enforceModel ? `It runs on its own model, ${current.model} · ${current.effort}.` : 'It supplies its instructions only; the model comes from the Builder role.'}`
         : 'Builder Agent: none — the Builder runs with the role defaults. Pick an Agent to give this chat its instructions and model.'}
     >
       <Bot size={13} className="shrink-0" />

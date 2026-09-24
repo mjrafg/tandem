@@ -6,7 +6,6 @@ import { EFFORTS, MAX_AGENT_PROMPT_CHARS } from '@shared/types';
 import { descriptorFor, modelForProvider, providerOptions, useProviders } from '../useProviders';
 import { api } from '../../../api';
 import { useStore } from '../../../store';
-import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { Field, SelectBox, Spinner, Toggle } from '../../ui';
 
 const BLANK = {
@@ -161,6 +160,12 @@ export function AgentEditorPage() {
 
         <section className="card px-4 py-3.5">
           <h2 className="mb-3 text-[13px] font-semibold">Runtime</h2>
+          {!draft.enforceModel && (
+            <p className="mb-3 text-[12px] leading-relaxed text-warn">
+              These three are not in use: this agent follows the Builder role&apos;s model. They apply again the moment you turn
+              &ldquo;use this agent&apos;s own model&rdquo; on below.
+            </p>
+          )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Field label="Provider">
               <SelectBox
@@ -195,12 +200,11 @@ export function AgentEditorPage() {
             </Field>
           </div>
           <div className="mt-3 flex items-start gap-2.5 border-t border-linesoft pt-3">
-            <Toggle checked={draft.enforceModel} onChange={(v) => set({ enforceModel: v })} label="Enforce this agent's model" />
+            <Toggle checked={draft.enforceModel} onChange={(v) => set({ enforceModel: v })} label="Use this agent's own model" />
             <span className="text-[12.5px] leading-relaxed text-mut">
-              Enforce model — this agent always runs on the provider, model and effort above.{' '}
-              {DIFFICULTY_ROUTING_ENABLED
-                ? 'Off: a configured difficulty tier decides the model and the agent contributes its instructions only.'
-                : 'Difficulty tiers, the only thing that overrode it, are archived, so this changes nothing today; it keeps the agent pinned if they return.'}
+              {draft.enforceModel
+                ? 'Use this agent\'s own model — it runs on the provider, model and effort above, whatever the Builder role is set to.'
+                : 'Follows the Builder role — this agent contributes its instructions only, and the model, provider and effort above are ignored. A change in Settings → Roles → Builder then reaches its sessions, including one already running, on their next request.'}
             </span>
           </div>
           <div className="mt-3 flex items-center gap-2.5 border-t border-linesoft pt-3">

@@ -237,40 +237,43 @@ console.log(`--- difficulty tiers (${DIFFICULTY_ROUTING_ENABLED ? 'ACTIVE' : 'AR
   db.prepare("UPDATE chats SET difficulty = 'very_hard' WHERE id = 'c-s1'").run();
   check(DIFFICULTY_ROUTING_ENABLED ? 'a project session takes its difficulty from the session row, never the chat row' : 'ARCHIVED: a project session reports no difficulty whatever either row holds',
     resolveBuilderRole(cfgC, 'c-s1').difficulty === (DIFFICULTY_ROUTING_ENABLED ? 'easy' : undefined));
-  // a standalone chat's Builder Agent: chosen by the user, captured like a session's, replaceable
+  // a standalone chat's Builder Agent: chosen by the user, captured like a session's, replaceable.
+  // An Agent supplies the MODEL only when it pins one; otherwise it supplies its
+  // instructions and the Builder role supplies the model.
   const spec = createAgent({ slug: 'unit-spec', name: 'Unit Specialist', systemPrompt: 'You are the unit specialist.', provider: 'codex', model: 'gpt-5.6-terra', effort: 'medium' });
   db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
+  check('a new Agent does not pin its model by default', spec.enforceModel === false);
   const a1 = setChatAgent('c-plain', spec.id);
-  const withAgent = resolveBuilderRole(cfgC, 'c-plain');
-  check('choosing an Agent makes the next resolution run as it (source agent, its provider/model/effort, its prompt)',
-    a1?.profileName === 'Unit Specialist' && withAgent.source === 'agent' && withAgent.provider === 'codex' && withAgent.model === 'gpt-5.6-terra' && withAgent.effort === 'medium' && withAgent.agentPrompt === 'You are the unit specialist.');
-  db.prepare("UPDATE chats SET difficulty = 'easy' WHERE id = 'c-plain'").run();
-  const both = resolveBuilderRole(cfgC, 'c-plain');
-  check(DIFFICULTY_ROUTING_ENABLED ? 'with a difficulty tier set, the tier decides the model and the Agent still supplies the prompt' : 'ARCHIVED: the Agent decides the model, with no tier to override it',
-    DIFFICULTY_ROUTING_ENABLED
-      ? (both.source === 'difficulty' && both.model === 'gpt-5.6-sol' && both.agentPrompt === 'You are the unit specialist.')
-      : (both.source === 'agent' && both.model === 'gpt-5.6-terra' && both.agentPrompt === 'You are the unit specialist.'));
-  updateAgent(spec.id, { model: 'gpt-6-astra' });
-  db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
-  check('editing the profile does not change the chat (the snapshot is frozen)', resolveBuilderRole(cfgC, 'c-plain').model === 'gpt-5.6-terra');
-  setChatAgent('c-plain', spec.id);
-  check('choosing it again captures the profile as it is now', resolveBuilderRole(cfgC, 'c-plain').model === 'gpt-6-astra');
-  setChatAgent('c-plain', null);
-  check('clearing the Agent returns to the role default', resolveBuilderRole(cfgC, 'c-plain').source === 'role');
-  // an Agent that enforces its model steps in front of the tier
+  const notPinned = resolveBuilderRole(cfgC, 'c-plain');
+  check('an Agent that does not pin its model supplies the prompt, and the ROLE supplies the model',
+    a1?.profileName === 'Unit Specialist' && notPinned.source === 'role'
+    && notPinned.model === DEFAULT_SETTINGS.roles.builder.model && notPinned.provider === DEFAULT_SETTINGS.roles.builder.provider
+    && notPinned.agentPrompt === 'You are the unit specialist.');
+  // the whole point: the Builder role setting now reaches a chat that has an Agent
+  const roleMoved = { ...cfgC, roles: { ...cfgC.roles, builder: { ...cfgC.roles.builder, model: 'claude-opus-5', effort: 'high' as const } } };
+  check('changing the Builder role reaches that chat on its very next request, with no relaunch',
+    resolveBuilderRole(roleMoved, 'c-plain').model === 'claude-opus-5');
+
+  // pinning it: the Agent decides again
   updateAgent(spec.id, { enforceModel: true });
+  check('turning the pin on does not disturb a chat already captured', resolveBuilderRole(roleMoved, 'c-plain').source === 'role');
   setChatAgent('c-plain', spec.id);
-  db.prepare("UPDATE chats SET difficulty = 'easy' WHERE id = 'c-plain'").run();
-  const enforced = resolveBuilderRole(cfgC, 'c-plain');
-  check('with Enforce model on, the Agent keeps its model (source agent)',
-    enforced.source === 'agent' && enforced.model === 'gpt-6-astra' && enforced.difficulty === (DIFFICULTY_ROUTING_ENABLED ? 'easy' : undefined) && enforced.agentPrompt === 'You are the unit specialist.');
+  const pinned = resolveBuilderRole(roleMoved, 'c-plain');
+  check('re-chosen with the pin on, the Agent supplies provider, model and effort',
+    pinned.source === 'agent' && pinned.provider === 'codex' && pinned.model === 'gpt-5.6-terra' && pinned.effort === 'medium'
+    && pinned.agentPrompt === 'You are the unit specialist.');
+  check('and the Builder role no longer reaches it',
+    resolveBuilderRole({ ...roleMoved, roles: { ...roleMoved.roles, builder: { ...roleMoved.roles.builder, model: 'claude-haiku-4-5' } } }, 'c-plain').model === 'gpt-5.6-terra');
+  updateAgent(spec.id, { model: 'gpt-6-astra' });
+  check('editing the profile does not change the chat (the snapshot is frozen)', resolveBuilderRole(roleMoved, 'c-plain').model === 'gpt-5.6-terra');
+  setChatAgent('c-plain', spec.id);
+  check('choosing it again captures the profile as it is now', resolveBuilderRole(roleMoved, 'c-plain').model === 'gpt-6-astra');
   updateAgent(spec.id, { enforceModel: false });
-  check('the snapshot froze the enforcement too — turning it off on the profile changes nothing until re-chosen', resolveBuilderRole(cfgC, 'c-plain').source === 'agent');
   setChatAgent('c-plain', spec.id);
-  check(DIFFICULTY_ROUTING_ENABLED ? 're-chosen with Enforce model off, the tier decides the model again' : 'ARCHIVED: re-chosen with Enforce model off, the Agent still decides',
-    resolveBuilderRole(cfgC, 'c-plain').source === (DIFFICULTY_ROUTING_ENABLED ? 'difficulty' : 'agent'));
+  check('turning the pin off hands the model back to the role', resolveBuilderRole(roleMoved, 'c-plain').source === 'role' && resolveBuilderRole(roleMoved, 'c-plain').model === 'claude-opus-5');
   setChatAgent('c-plain', null);
-  db.prepare("UPDATE chats SET difficulty = NULL WHERE id = 'c-plain'").run();
+  check('clearing the Agent leaves the role default and no specialist prompt',
+    resolveBuilderRole(cfgC, 'c-plain').source === 'role' && resolveBuilderRole(cfgC, 'c-plain').agentPrompt === undefined);
   let refused = '';
   try { setChatAgent('c-plain', 'no-such-profile'); } catch (e) { refused = (e as Error).message; }
   check('an unknown profile is refused', /Unknown Builder Agent/.test(refused));

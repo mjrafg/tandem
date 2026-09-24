@@ -72,6 +72,21 @@ CREATE TABLE IF NOT EXISTS chat_agent_snapshots (
 // per-Agent: its model beats a difficulty tier (default off — tiers decide the model)
 try { db.exec('ALTER TABLE agent_profiles ADD COLUMN enforce_model INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE chat_agent_snapshots ADD COLUMN enforce_model INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+/**
+ * `enforce_model` once meant "this Agent's model beats a difficulty tier", and
+ * an Agent's own model was used either way. It now decides something bigger:
+ * whether the Agent supplies the model AT ALL, or the Builder role does. Rows
+ * written under the old meaning are therefore set to 1 — including snapshots,
+ * so no session that is running right now changes what it executes. Turning it
+ * off afterwards is the operator's decision, per Agent.
+ */
+if (!kvGet('agents.enforce_model_is_model_source')) {
+  db.transaction(() => {
+    db.prepare('UPDATE agent_profiles SET enforce_model = 1').run();
+    db.prepare('UPDATE chat_agent_snapshots SET enforce_model = 1').run();
+  })();
+  kvSet('agents.enforce_model_is_model_source', true);
+}
 
 function rowToProfile(r: any): AgentProfile {
   return {

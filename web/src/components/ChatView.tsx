@@ -1,4 +1,4 @@
-import { ArrowDown, Boxes, Check, Copy, FolderOpen, ArrowLeft } from 'lucide-react';
+import { ArrowDown, Boxes, Check, Copy, FolderOpen, FolderTree, ArrowLeft } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import type { Chat, Project } from '@shared/types';
@@ -7,6 +7,7 @@ import { CompactDialog } from './CompactDialog';
 import { Composer } from './Composer';
 import { ContextBanner, ContextMeter } from './ContextMeter';
 import { ExportMenu } from './ExportMenu';
+import { FilesPanel, type FilesTab } from './files/FilesPanel';
 import { GitChip } from './GitChip';
 import { ProjectMemoryMenu } from './ProjectMemoryMenu';
 import { ProjectDrawer } from './ProjectDrawer';
@@ -27,7 +28,10 @@ export function ChatView() {
   const [compactOpen, setCompactOpen] = useState(false);
   const [prefill, setPrefill] = useState<string | undefined>();
   const isProject = chat?.kind === 'project';
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  // one side panel at a time: the project's structure, or its files
+  const [panel, setPanel] = useState<'project' | 'files' | null>(null);
+  const [filesTab, setFilesTab] = useState<FilesTab>('files');
+  const openFiles = useCallback((tab: FilesTab) => { setFilesTab(tab); setPanel('files'); }, []);
 
   useEffect(() => {
     if (chatId && !loaded) void loadChat(chatId);
@@ -39,7 +43,7 @@ export function ChatView() {
 
   // on wide screens a project chat opens its drawer beside the conversation
   useEffect(() => {
-    setDrawerOpen(isProject && window.matchMedia('(min-width: 1024px)').matches);
+    setPanel(isProject && window.matchMedia('(min-width: 1024px)').matches ? 'project' : null);
   }, [isProject, chatId]);
 
   // ---- scroll pinning
@@ -91,7 +95,8 @@ export function ChatView() {
     <div className="flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
       <TopBar chat={chat} project={project} onCompact={() => setCompactOpen(true)}
-        isProject={isProject} onToggleDrawer={() => setDrawerOpen((o) => !o)} />
+        isProject={isProject} onToggleDrawer={() => setPanel((p) => (p === 'project' ? null : 'project'))}
+        onToggleFiles={() => (panel === 'files' ? setPanel(null) : openFiles('files'))} onOpenChanges={() => openFiles('changes')} />
       <ContextBanner usage={usage} onCompact={() => setCompactOpen(true)} />
 
       <div ref={scrollRef} onScroll={onScroll} className="relative min-h-0 flex-1 overflow-y-auto">
@@ -139,14 +144,16 @@ export function ChatView() {
       <CompactDialog chatId={chat.id} open={compactOpen} onClose={() => setCompactOpen(false)} />
       </div>
       {isProject && chat.projectRunId && (
-        <ProjectDrawer runId={chat.projectRunId} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+        <ProjectDrawer runId={chat.projectRunId} open={panel === 'project'} onClose={() => setPanel(null)} />
       )}
+      <FilesPanel chat={chat} project={project} open={panel === 'files'} tab={filesTab} onTab={setFilesTab} onClose={() => setPanel(null)} />
     </div>
   );
 }
 
-function TopBar({ chat, project, onCompact, isProject, onToggleDrawer }: {
+function TopBar({ chat, project, onCompact, isProject, onToggleDrawer, onToggleFiles, onOpenChanges }: {
   chat: Chat; project: Project; onCompact: () => void; isProject?: boolean; onToggleDrawer?: () => void;
+  onToggleFiles: () => void; onOpenChanges: () => void;
 }) {
   const usage = useStore((s) => s.usage[chat.id]);
   const [copied, setCopied] = useState(false);
@@ -201,7 +208,7 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer }: {
             ? <Check size={11} className="shrink-0 text-ok" />
             : <Copy size={11} className="shrink-0 text-dim opacity-0 transition-opacity group-hover:opacity-100" />}
         </button>
-        {!parent && <GitChip projectId={project.id} gitState={chat.gitState} />}
+        {!parent && <GitChip projectId={project.id} gitState={chat.gitState} onOpenChanges={onOpenChanges} />}
       </div>
       {parent && (
         <>
@@ -209,7 +216,7 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer }: {
           <span className="order-1 basis-full sm:hidden" aria-hidden />
           <div className="order-1 -mt-1.5 flex min-w-0 flex-1 items-center pb-2 sm:hidden">{place}</div>
           <div className="order-1 -mt-1.5 flex min-w-0 shrink items-center pb-2 sm:order-none sm:mt-0 sm:pb-0">
-            <GitChip projectId={project.id} gitState={chat.gitState} />
+            <GitChip projectId={project.id} gitState={chat.gitState} onOpenChanges={onOpenChanges} />
           </div>
         </>
       )}
@@ -217,6 +224,9 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer }: {
         <ContextMeter usage={usage} onCompact={onCompact} />
         <ProjectMemoryMenu projectId={project.id} />
         <ExportMenu chatId={chat.id} />
+        <button className="btn-ghost px-2 py-1.5" onClick={onToggleFiles} title="Files, changes and branches" aria-label="Files, changes and branches">
+          <FolderTree size={15} />
+        </button>
         {isProject && (
           <button className="btn-ghost px-2 py-1.5" onClick={onToggleDrawer} title="Project structure">
             <Boxes size={15} />

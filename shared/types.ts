@@ -830,6 +830,106 @@ export interface GitStatus {
   files?: GitFileStat[];
 }
 
+// ---------------------------------------------------------------- repository browser
+//
+// Read-only views of a project's files, branches and changes. Every path is
+// relative to the project's root and confined to it; `ref` is null for the
+// working tree on disk and a branch, tag or commit otherwise.
+
+export interface RepoEntry {
+  name: string;
+  /** relative to the project root, '/'-separated */
+  path: string;
+  type: 'dir' | 'file' | 'symlink' | 'submodule';
+  size?: number;
+}
+
+export interface RepoTree {
+  isRepo: boolean;
+  ref: string | null;
+  path: string;
+  entries: RepoEntry[];
+  /** more entries existed than were returned */
+  truncated: boolean;
+}
+
+export interface RepoFile {
+  path: string;
+  ref: string | null;
+  size: number;
+  /** contains NUL bytes; content is omitted */
+  binary: boolean;
+  /** larger than the viewer's cap; content holds the beginning only */
+  truncated: boolean;
+  content?: string;
+}
+
+export interface RepoBranch {
+  name: string;
+  current: boolean;
+  sha: string;
+  subject: string;
+  author: string;
+  date: number;
+  /** commits on this branch not on the base, and the reverse */
+  ahead?: number;
+  behind?: number;
+  /** the Tandem chat that works on this branch, when one does */
+  chatId?: string;
+  chatTitle?: string;
+}
+
+export interface RepoBranches {
+  isRepo: boolean;
+  current: string | null;
+  /** what ahead/behind are counted against */
+  base: string | null;
+  branches: RepoBranch[];
+}
+
+export interface RepoCommit {
+  sha: string;
+  subject: string;
+  author: string;
+  date: number;
+}
+
+export interface RepoLog {
+  isRepo: boolean;
+  ref: string;
+  base: string | null;
+  commits: RepoCommit[];
+  truncated: boolean;
+}
+
+export type RepoChangeScope = 'working' | 'branch' | 'commit';
+
+export interface RepoFileChange {
+  path: string;
+  oldPath?: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  /** unified diff for this file; '' when binary or a pure rename */
+  diff: string;
+  /** the diff was cut to the per-file cap */
+  truncated: boolean;
+}
+
+export interface RepoChanges {
+  isRepo: boolean;
+  scope: RepoChangeScope;
+  /** working: HEAD; branch: the merge base's branch; commit: its parent */
+  base: string | null;
+  head: string | null;
+  files: RepoFileChange[];
+  additions: number;
+  deletions: number;
+  /** more files changed than were returned */
+  truncated: boolean;
+}
+
 // ---------------------------------------------------------------- fs browse
 
 export interface DirEntry { name: string; path: string }

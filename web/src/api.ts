@@ -1,7 +1,7 @@
 import type { Difficulty,
   AgentProfile, ObservabilityKey,
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
-  DirListing, GitStatus, Integration, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
+  DirListing, GitStatus, Integration, RepoBranches, RepoChangeScope, RepoChanges, RepoFile, RepoLog, RepoTree, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
   AuthProvider, LoginState, ProviderStatus, StoredTokenMeta,
   Effort, Provider, ProviderDescriptor, ProviderHealth,
 } from '@shared/types';
@@ -35,6 +35,13 @@ async function j<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** a query string from the set values only */
+function qs(params: Record<string, string | null | undefined>): string {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
+  return q.toString();
+}
+
 export const api = {
   // auth
   login: (email: string, password: string) =>
@@ -49,6 +56,17 @@ export const api = {
   openProject: (id: string) => j<{ ok: true }>('/api/projects/open', { method: 'POST', body: JSON.stringify({ id }) }),
   addDirectory: (dirPath: string) => j<Project>('/api/projects/directory', { method: 'POST', body: JSON.stringify({ dirPath }) }),
   gitStatus: (projectId: string) => j<GitStatus>(`/api/projects/${projectId}/git`),
+
+  // repository browser (read-only): ref null/omitted = the working tree on disk
+  repoTree: (projectId: string, path: string, ref?: string | null) =>
+    j<RepoTree>(`/api/projects/${projectId}/repo/tree?${qs({ path, ref })}`),
+  repoFile: (projectId: string, path: string, ref?: string | null) =>
+    j<RepoFile>(`/api/projects/${projectId}/repo/file?${qs({ path, ref })}`),
+  repoBranches: (projectId: string) => j<RepoBranches>(`/api/projects/${projectId}/repo/branches`),
+  repoLog: (projectId: string, ref: string, base?: string | null) =>
+    j<RepoLog>(`/api/projects/${projectId}/repo/log?${qs({ ref, base })}`),
+  repoChanges: (projectId: string, scope: RepoChangeScope, ref?: string | null, base?: string | null) =>
+    j<RepoChanges>(`/api/projects/${projectId}/repo/changes?${qs({ scope, ref, base })}`),
 
   // filesystem (New chat browser)
   listDir: (path: string) => j<DirListing>(`/api/fs/list?path=${encodeURIComponent(path)}`),

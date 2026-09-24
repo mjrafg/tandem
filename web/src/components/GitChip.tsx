@@ -1,4 +1,4 @@
-import { GitBranch } from 'lucide-react';
+import { FileDiff, GitBranch } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { GitFlowState, GitStatus } from '@shared/types';
 import { api } from '../api';
@@ -10,7 +10,9 @@ function workflowLabel(g: GitFlowState): string {
   return `Working branch → target ${g.targetBranch}${push}`;
 }
 
-export function GitChip({ projectId, gitState }: { projectId: string; gitState?: GitFlowState | null }) {
+export function GitChip({ projectId, gitState, onOpenChanges }: {
+  projectId: string; gitState?: GitFlowState | null; onOpenChanges?: () => void;
+}) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -68,6 +70,11 @@ export function GitChip({ projectId, gitState }: { projectId: string; gitState?:
             </div>
           ) : (
             <p className="text-[12px] text-dim">Working tree is clean.</p>
+          )}
+          {onOpenChanges && (
+            <button className="btn-outline mt-2.5 w-full justify-center py-1.5 text-[12.5px]" onClick={() => { setOpen(false); onOpenChanges(); }}>
+              <FileDiff size={13} /> {dirty ? 'See the changes' : 'Files, changes and branches'}
+            </button>
           )}
           <p className="mt-2 border-t border-linesoft pt-2 text-[11px] leading-snug text-dim">
             {gitState && gitState.mode !== 'none'

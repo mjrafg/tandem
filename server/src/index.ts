@@ -9,6 +9,7 @@ import { config } from './config';
 import { DIFFICULTY_ROUTING_ENABLED } from '../../shared/features';
 import { registerRoutes } from './routes';
 import { registerProjectRoutes } from './projectRoutes';
+import { registerRepoBrowseRoutes } from './repoBrowse';
 import { registerIntegrationRoutes } from './integrationRoutes';
 import { registerAgentRoutes } from './agents/routes';
 import { registerObservabilityRoutes } from './observability/routes';
@@ -136,6 +137,7 @@ const app = Fastify({
   registerRoutes(app);
   registerIntegrationRoutes(app);
   registerProjectRoutes(app);
+  registerRepoBrowseRoutes(app);
   registerAgentRoutes(app);
   registerObservabilityRoutes(app);
 

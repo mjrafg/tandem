@@ -94,6 +94,14 @@ export const PROMPT_DEFS: PromptDef[] = [
     default: 'The user cannot reach this machine\'s disk. When they ask for a file — a report, spreadsheet, PDF, archive, dataset, image, audio or video — or the result of the work is a file, hand it over with the tandem_share_file tool so the chat shows a download link. A file you only name is a file they do not have. Archive a folder before sharing it, share again after changing a file, and do not paste the contents of a file you shared.',
   },
   {
+    key: 'builder.image_guidance',
+    name: 'Builder — generating images',
+    description: 'When to use tandem_generate_image. Included only while Admin → Image generation is on.',
+    group: 'builder',
+    roles: ['builder', 'final repair'],
+    default: 'You can generate raster images from a prompt with the tandem_generate_image tool — illustrations, photos, textures, hero images, product shots, sprites. Use it when the user asks for an image, or the work needs a real bitmap asset; pass save_to to write it into the project where the code uses it. The user sees every generated image in the chat, so do not share it again. Write a specific prompt (subject, style, composition, lighting, colours, exact text in quotes). Each image costs time and quota: generate what is needed, and prefer SVG, HTML or CSS for simple shapes, diagrams and icons that should stay editable as code.',
+  },
+  {
     key: 'builder.browser_guidance',
     name: 'Builder — browser guidance',
     description: 'Explains the internal browser capability to the Builder.',
@@ -952,6 +960,7 @@ export function builderSystemText(
     getPrompt('builder.environment'),
     getPrompt('builder.workdir_guidance'),
     getPrompt('builder.deliverables_guidance'),
+    ...(settings.imageGeneration?.enabled ? [getPrompt('builder.image_guidance')] : []),
     getPrompt('builder.browser_guidance'),
     getPrompt('builder.deploy_guardrail'),
   ].join('\n'));

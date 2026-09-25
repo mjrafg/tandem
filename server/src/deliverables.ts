@@ -208,6 +208,16 @@ export function shareContent(chatId: string, content: unknown, opts: { name?: un
   if (bytes.length > MAX_CONTENT_BYTES) {
     throw new DeliverableError(413, `That content is ${(bytes.length / 1048576).toFixed(1)} MB; the limit for content is ${MAX_CONTENT_BYTES / 1048576} MB. Write it to a file and share the file instead.`);
   }
+  return shareBytes(chatId, bytes, { name: opts.name, note: opts.note });
+}
+
+/**
+ * Bytes Tandem itself produced (text a role wrote, an image it generated),
+ * stored as a file the user can download. `sourcePath` is where a copy was
+ * also saved in the project, if anywhere.
+ */
+export function shareBytes(chatId: string, bytes: Buffer, opts: { name: string; note?: unknown; sourcePath?: string }): Deliverable {
+  if (!getChat(chatId)) throw new DeliverableError(404, 'This chat does not exist.');
   const id = randomUUID();
   const dir = path.join(store, id);
   fs.mkdirSync(dir, { recursive: true });
@@ -215,7 +225,7 @@ export function shareContent(chatId: string, content: unknown, opts: { name?: un
     fs.writeFileSync(path.join(dir, 'file'), bytes);
     const name = safeName(opts.name);
     const d: Deliverable = {
-      id, chatId, name, sourcePath: '', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+      id, chatId, name, sourcePath: opts.sourcePath ?? '', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
       mime: mimeFor(name), note: typeof opts.note === 'string' ? opts.note.trim().slice(0, 300) : '', createdAt: Date.now(),
     };
     db.prepare(`INSERT INTO deliverables (id, chat_id, name, source_path, size, sha256, mime, note, created_at)

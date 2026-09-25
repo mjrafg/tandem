@@ -148,6 +148,12 @@ for (const role of ['builder', 'final_repair', 'builder_reviewer', 'director_rev
   check(`${role} can share files with the user`, policyFor(role).shareFiles === true);
 }
 check('the arbiter — one decision, no tools — cannot', policyFor('arbiter').shareFiles === false);
+for (const role of ['builder', 'final_repair'] as const) {
+  check(`${role} can generate images`, policyFor(role).imageTools === true);
+}
+for (const role of ['builder_reviewer', 'director_reviewer', 'reviewer', 'arbiter', 'director'] as const) {
+  check(`${role} cannot generate images (it would write the project)`, policyFor(role).imageTools === false);
+}
 check('sharing does not make a read-only role writable or give it workdir tools',
   (['builder_reviewer', 'director_reviewer', 'director'] as const).every((role) => policyFor(role).filesystem === 'read-only' && !policyFor(role).workdirTools));
 check('Director Reviewer has the same read-only posture', JSON.stringify(policyFor('director_reviewer')) === JSON.stringify(r));

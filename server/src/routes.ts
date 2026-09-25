@@ -10,6 +10,7 @@ import {
 } from './auth';
 import { computeUsage } from './context';
 import { DeliverableError, INLINE_SAFE, deleteDeliverables, deliverablePath, downloadType, getDeliverable, shareContent, shareFile } from './deliverables';
+import { generateForChat } from './imageGen';
 
 /** the roles whose tool server may share a file (mirrors policies.ts shareFiles) */
 const SHARING_ROLES = ['builder', 'final_repair', 'builder_reviewer', 'director_reviewer', 'reviewer', 'director'] as const;
@@ -416,6 +417,40 @@ export function registerRoutes(app: FastifyInstance): void {
         id: d.id, name: d.name, size: d.size, mime: d.mime, note: d.note, path: d.sourcePath, sha256: d.sha256, by,
       }, { runId: activeCtx(d.chatId)?.runId });
       return { ok: true, id: d.id, name: d.name, size: d.size, mime: d.mime };
+    } catch (err) {
+      if (err instanceof DeliverableError) return reply.code(err.status).send({ ok: false, error: err.message });
+      throw err;
+    }
+  });
+
+  /**
+   * An image from a prompt (the tandem_generate_image tool). Only the roles
+   * that may write the project get it — enforced here, not only by which
+   * tool servers a role is handed.
+   */
+  app.post('/api/internal/generate-image', async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (b.token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const role = String(b.role ?? '');
+    if (role !== 'builder' && role !== 'final_repair') {
+      return reply.code(403).send({ ok: false, error: 'Only the Builder generates images.' });
+    }
+    const chatId = String(b.chatId ?? '');
+    try {
+      const r = await generateForChat({
+        chatId, prompt: b.prompt, shape: b.shape, transparent: b.transparent, name: b.name,
+        saveTo: b.save_to, note: b.note, workdir: b.workdir, settings: getSettings(),
+      });
+      const d = r.deliverable;
+      addEvent(chatId, 'file_output', {
+        id: d.id, name: d.name, size: d.size, mime: d.mime, note: d.note, path: d.sourcePath, sha256: d.sha256,
+        by: role as FileOutputPayload['by'],
+        generated: { provider: r.image.provider, model: r.image.model, prompt: String(b.prompt).trim().slice(0, 2000) },
+      }, { runId: activeCtx(chatId)?.runId });
+      return {
+        ok: true, id: d.id, name: d.name, size: d.size, mime: d.mime, width: r.image.width, height: r.image.height,
+        savedTo: r.savedTo, provider: r.image.provider, model: r.image.model,
+      };
     } catch (err) {
       if (err instanceof DeliverableError) return reply.code(err.status).send({ ok: false, error: err.message });
       throw err;

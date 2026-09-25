@@ -245,6 +245,29 @@ export interface AppSettings {
   difficulty: Record<Difficulty, DifficultyTier>;
   /** the autonomy watchdog: how long an active project may sit with nothing running before the Director is woken */
   orchestration: OrchestrationConfig;
+  /** how agents generate images from a prompt (the tandem_generate_image tool) */
+  imageGeneration: ImageGenConfig;
+}
+
+export type ImageProvider = 'codex' | 'openai';
+
+export interface ImageGenConfig {
+  /** offer the tool to the Builder at all */
+  enabled: boolean;
+  /**
+   * codex: the Codex CLI's built-in image tool, on the Codex sign-in — no key.
+   * openai: the OpenAI Images API, with an API key from a stored credential.
+   */
+  provider: ImageProvider;
+  /**
+   * codex: the Codex model that drives its image tool ('' = Codex's own default);
+   * openai: the image model itself, e.g. gpt-image-2.
+   */
+  model: string;
+  /** openai only: the credential (bearer token or API-key header) holding the API key */
+  credentialId: string | null;
+  /** openai only */
+  quality: 'auto' | 'low' | 'medium' | 'high';
 }
 
 export interface OrchestrationConfig {
@@ -787,6 +810,8 @@ export interface FileOutputPayload {
   sha256: string;
   /** the role that shared it; absent on files shared before roles were recorded (the Builder) */
   by?: 'builder' | 'final_repair' | 'builder_reviewer' | 'director_reviewer' | 'reviewer' | 'director';
+  /** set when the image was generated from a prompt rather than shared from a file */
+  generated?: { provider: ImageProvider; model: string; prompt: string };
 }
 
 export interface ChatEvent<K extends EventKind = EventKind> {

@@ -9,6 +9,7 @@ import { AgentsPage } from './components/settings/pages/AgentsPage';
 import { AgentEditorPage } from './components/settings/pages/AgentEditorPage';
 import { RolesPage } from './components/settings/pages/RolesPage';
 import { AccountPage, ContextPage, InstructionsPage, IntegrationsPage, ToolsPage } from './components/settings/pages/SimplePages';
+import { ImagePage } from './components/settings/pages/ImagePage';
 import { ObservabilityPage } from './components/settings/pages/ObservabilityPage';
 import { ProvidersPage } from './components/settings/pages/ProvidersPage';
 import { NewProjectDialog } from './components/NewProjectDialog';
@@ -50,6 +51,7 @@ export default function App() {
             <Route path="instructions" element={<InstructionsPage />} />
             <Route path="tools" element={<ToolsPage />} />
             <Route path="integrations" element={<IntegrationsPage />} />
+            <Route path="images" element={<ImagePage />} />
             <Route path="context" element={<ContextPage />} />
             <Route path="observability" element={<ObservabilityPage />} />
             <Route path="providers" element={<ProvidersPage />} />

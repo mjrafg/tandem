@@ -72,6 +72,8 @@ export interface RoleExecutionPolicy {
    * and changes nothing in the project itself.
    */
   shareFiles: boolean;
+  /** generate an image from a prompt (Admin → Image generation); it writes into the project, so writers only */
+  imageTools: boolean;
 }
 
 /** One turn, expressed without a single provider-specific concept. */

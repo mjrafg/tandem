@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, Gauge, Plug, Radio, SlidersHorizontal, Sparkles, UserRound, Wrench, X, KeyRound } from 'lucide-react';
+import { ArrowLeft, Bot, Gauge, Image as ImageIcon, Plug, Radio, SlidersHorizontal, Sparkles, UserRound, Wrench, X, KeyRound } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
@@ -25,6 +25,7 @@ export const ADMIN_CATEGORIES: AdminCategory[] = [
   { path: 'instructions', label: 'Prompts & Skills', blurb: "Every instruction Tandem sends, and the skills appended to a role's prompt", icon: Sparkles },
   { path: 'tools', label: 'Tools', blurb: 'How each tool is described to the AI', icon: Wrench },
   { path: 'integrations', label: 'Integrations', blurb: 'External capabilities and the credentials that authenticate them', icon: Plug },
+  { path: 'images', label: 'Image generation', blurb: 'The provider and model the Builder generates images with', icon: ImageIcon },
   { path: 'context', label: 'Context', blurb: 'Window thresholds and provider-native compaction', icon: Gauge },
   { path: 'observability', label: 'Observability API', blurb: 'Read-only API keys for an external evidence consumer', icon: Radio },
   { path: 'providers', label: 'Provider sign-in', blurb: "The Claude and Codex CLIs' own logins, which every run depends on", icon: KeyRound },

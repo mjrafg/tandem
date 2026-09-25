@@ -63,6 +63,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
     // rather than spending a Director turn every backoff forever
     stallMaxWakes: 5,
   },
+  imageGeneration: {
+    enabled: true,
+    // Codex's built-in image tool runs on the Codex sign-in — nothing to configure
+    provider: 'codex',
+    model: '',
+    credentialId: null,
+    quality: 'auto',
+  },
 };
 
 // All built-in instruction text lives in prompts.ts (Admin → AI Prompts).
@@ -182,6 +190,16 @@ function normalizeProviders(s: AppSettings): void {
       tier[slot] = { provider, model, effort: t.effort };
     }
   }
+  const img = s.imageGeneration;
+  if (img.provider !== 'codex' && img.provider !== 'openai') img.provider = 'codex';
+  img.model = typeof img.model === 'string' ? img.model.trim() : '';
+  if (img.provider === 'openai' && !img.model) img.model = 'gpt-image-2';
+  // a chat model is not an image model and vice versa: switching provider keeps neither
+  if (img.provider === 'codex' && /^(gpt-image|dall-e)/i.test(img.model)) img.model = '';
+  if (img.provider === 'openai' && !/^(gpt-image|dall-e)/i.test(img.model)) img.model = 'gpt-image-2';
+  if (!['auto', 'low', 'medium', 'high'].includes(img.quality)) img.quality = 'auto';
+  img.enabled = img.enabled !== false;
+  if (typeof img.credentialId !== 'string' || !img.credentialId) img.credentialId = null;
   const o = s.orchestration;
   o.stallAfterMinutes = clamp(o.stallAfterMinutes, 2, 24 * 60);
   o.stallMaxWakes = clamp(o.stallMaxWakes, 1, 50);

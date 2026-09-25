@@ -28,6 +28,7 @@ const SERVERS: ServerDef[] = [
   { key: 'tandem', label: 'Tandem Working Directory', script: 'mcp-workdir.cjs', roles: ['builder', 'final repair'] },
   { key: 'tandem_director', label: 'Project Director', script: 'mcp-director.cjs', roles: ['director'] },
   { key: 'tandem_share', label: 'Tandem File Sharing', script: 'mcp-share.cjs', roles: ['builder', 'final repair', 'reviewer', 'director'] },
+  { key: 'tandem_image', label: 'Tandem Image Generation', script: 'mcp-image.cjs', roles: ['builder', 'final repair'] },
 ];
 
 interface RawTool {

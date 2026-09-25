@@ -10,6 +10,7 @@ import { catalogForRole, hasIntegrationTools } from '../../integrations/exec';
 import { spawnStreaming } from '../../engine/procs';
 import { bwrapAvailable, readOnlyJailArgs } from '../../engine/sandbox';
 import { servedToolRecord, toolTextEnv } from '../../toolText';
+import { getSettings } from '../../settings';
 import type { RunHandle } from '../../engine/run';
 
 export interface CodexResult {
@@ -79,12 +80,12 @@ function tomlStr(s: string): string {
  * Keeping them in the profile file — rather than `-c` flags — also keeps the
  * internal token off the command line and out of the recorded transcript.
  */
-function mcpBlock(name: string, command: string, args: string[], env: Record<string, string>): string {
+function mcpBlock(name: string, command: string, args: string[], env: Record<string, string>, timeoutSec = 120): string {
   return [
     `[mcp_servers.${name}]`,
     `command = ${tomlStr(command)}`,
     `args = ${JSON.stringify(args)}`,
-    'tool_timeout_sec = 120',
+    `tool_timeout_sec = ${timeoutSec}`,
     `[mcp_servers.${name}.env]`,
     ...Object.entries(env).map(([k, v]) => `${k} = ${tomlStr(v)}`),
     '',
@@ -151,6 +152,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const extScript = path.resolve(distDir, 'mcp-integrations.cjs');
   const directorScript = path.resolve(distDir, 'mcp-director.cjs');
   const shareScript = path.resolve(distDir, 'mcp-share.cjs');
+  const imageScript = path.resolve(distDir, 'mcp-image.cjs');
   const withWorkdir = opts.policy.workdirTools && fs.existsSync(workdirScript);
   const withBrowser = opts.policy.browserTools && fs.existsSync(browserScript);
   // integration tools the admin has allowed for this role (the gateway
@@ -161,6 +163,8 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const withDirector = opts.policy.directorTools && fs.existsSync(directorScript);
   // handing the user a file — read-only roles included (see mcp-share.cjs)
   const withShare = opts.policy.shareFiles && fs.existsSync(shareScript);
+  // image generation — writers only, and only while Admin has it switched on
+  const withImage = opts.policy.imageTools && getSettings().imageGeneration.enabled && fs.existsSync(imageScript);
   // a Director session's first Builder turn names itself through a workdir tool
   const nameSession = opts.nameSession
     ?? (h.chat.kind === 'pd-session' && opts.role === 'builder' && !opts.resumeThreadId && withWorkdir);
@@ -176,6 +180,8 @@ export async function runCodexTurn(h: RunHandle, opts: {
     TANDEM_BROWSER_ROLE: family,
     TANDEM_ROLE: family,
       TANDEM_LOGICAL_ROLE: opts.role,
+    // the Builder's working directory, where a generated image may be saved
+    TANDEM_WORKDIR: opts.cwd,
     TANDEM_TOOL_TEXT: toolTextEnv(),
     TANDEM_ATTACHMENTS_DIR: path.join(config.dataDir, 'attachments'),
     ...(nameSession ? { TANDEM_NAME_SESSION: '1' } : {}),
@@ -186,6 +192,8 @@ export async function runCodexTurn(h: RunHandle, opts: {
   if (withExt) blocks.push(mcpBlock('tandem_ext', process.execPath, [extScript], serverEnv));
   if (withDirector) blocks.push(mcpBlock('tandem_director', process.execPath, [directorScript], serverEnv));
   if (withShare) blocks.push(mcpBlock('tandem_share', process.execPath, [shareScript], serverEnv));
+  // generating an image takes minutes, not seconds
+  if (withImage) blocks.push(mcpBlock('tandem_image', process.execPath, [imageScript], serverEnv, 330));
   const writable = readOnly ? [] : [...new Set([h.project.rootPath, opts.cwd])];
   const profileName = writeRoleProfile(opts.role, h.ctx.runId, writable, blocks);
 
@@ -224,11 +232,12 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const startedAt = Date.now();
   const servedTools = profileName
     ? [
-      ...(withWorkdir || withBrowser || withShare
+      ...(withWorkdir || withBrowser || withShare || withImage
         ? await servedToolRecord([
           ...(withWorkdir ? ['tandem'] : []),
           ...(withBrowser ? ['tandem_browser'] : []),
           ...(withShare ? ['tandem_share'] : []),
+          ...(withImage ? ['tandem_image'] : []),
         ])
         : []),
       ...(withExt ? catalogForRole(family).map((t) => ({ name: t.name, description: t.description })) : []),

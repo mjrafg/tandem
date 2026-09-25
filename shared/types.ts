@@ -782,9 +782,11 @@ export interface FileOutputPayload {
   mime: string;
   /** one line from the agent about what the file is */
   note: string;
-  /** where it was shared from, relative to the chat's directory */
+  /** where it was shared from, relative to the chat's directory; '' for text the agent wrote */
   path: string;
   sha256: string;
+  /** the role that shared it; absent on files shared before roles were recorded (the Builder) */
+  by?: 'builder' | 'final_repair' | 'builder_reviewer' | 'director_reviewer' | 'reviewer' | 'director';
 }
 
 export interface ChatEvent<K extends EventKind = EventKind> {

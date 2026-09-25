@@ -299,6 +299,14 @@ export const PROMPT_DEFS: PromptDef[] = [
     default: 'A real internal browser (headless Chromium) is available through the browser_* tools \u2014 open URLs including localhost, interact with pages, resize the viewport, read the console, take screenshots you can see. Use it to verify what this change actually affects; a full viewport or screenshot matrix belongs to the final integrated delivery, not to every review.',
   },
   {
+    key: 'reviewer.deliverables_guidance',
+    name: 'Reviewer — handing over files',
+    description: 'When a Reviewer gives the user a file with tandem_share_file.',
+    group: 'reviewer',
+    roles: ['reviewer'],
+    default: 'When the user asks you for a file — review notes, a report, a log, a CSV of results — or evidence you produced is best handed over as a file (a screenshot, a recording), give it to them with the tandem_share_file tool: pass text you wrote as `content` with a `name`, or share an existing file by `path`. The chat then shows a download card. Your access to the project is read-only, so never try to write that file into the project or into /tmp — the user cannot reach this machine\'s disk. Your verdict and findings still go in your normal output; do not hand over files nobody asked for.',
+  },
+  {
     key: 'reviewer.network_guidance',
     name: 'Reviewer — network/proxy guidance',
     description: 'Documents how the sandbox proxy reaches public and local addresses.',
@@ -570,6 +578,14 @@ export const PROMPT_DEFS: PromptDef[] = [
       'Conversation style: you are in a chat with the user. Post concise, meaningful project-level updates — what completed, what is running, what you decided and why. Never flood the chat with low-level steps; those live inside the sessions. Answer the user\'s questions directly; if the user changes direction, replan.',
       'Session prompts you write must be self-contained: the session\'s Builder knows nothing about this conversation. State the goal, the relevant context (files, interfaces, conventions), the constraints, and what "done" means. Always include: never amend, rebase, or otherwise rewrite commits that are already on a shared branch (the integration branch) — add new commits instead.',
     ].join('\n'),
+  },
+  {
+    key: 'director.deliverables_guidance',
+    name: 'Director — handing over files',
+    description: 'When the Director gives the user a file with tandem_share_file.',
+    group: 'director',
+    roles: ['director'],
+    default: 'When the user asks you for a file — a brief, a plan, a status report, a summary of what was delivered — hand it over with the tandem_share_file tool: pass the text as `content` with a `name` (e.g. "status.md"), or share an existing repository file by `path`. The chat then shows a download card. This writes nothing into the project, so it stays within your read-only boundary; a file you only mention is one the user does not have.',
   },
   {
     key: 'director.arbitration_base',
@@ -950,7 +966,7 @@ export function reviewerSystemText(settings: AppSettings, role: 'builder_reviewe
   const own = settings.roles[role]?.instructions?.trim();
   if (own) parts.push(own);
   parts.push(...skillTexts('reviewer'));
-  parts.push([getPrompt('reviewer.browser_guidance'), getPrompt('reviewer.network_guidance')].join('\n'));
+  parts.push([getPrompt('reviewer.browser_guidance'), getPrompt('reviewer.deliverables_guidance'), getPrompt('reviewer.network_guidance')].join('\n'));
   return parts.join('\n\n');
 }
 
@@ -966,6 +982,7 @@ function skillTexts(role: 'builder' | 'reviewer'): string[] {
 export function directorSystemText(settings: AppSettings): string {
   const parts = [getPrompt('director.base')];
   if (settings.sharedInstructions.trim()) parts.push(settings.sharedInstructions.trim());
+  parts.push(getPrompt('director.deliverables_guidance'));
   return parts.join('\n\n');
 }
 

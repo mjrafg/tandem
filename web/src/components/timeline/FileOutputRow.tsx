@@ -27,6 +27,7 @@ export function FileOutputRow({ ev }: { ev: ChatEvent }) {
           <div className="mt-0.5 flex flex-wrap gap-x-2 text-[11.5px] text-dim">
             <span>{fmtBytes(p.size)}</span>
             {type && <span>{type}</span>}
+            <span>{sharedBy(p.by)}</span>
             {p.path && p.path !== p.name && <span className="mono min-w-0 truncate" title={p.path}>{p.path}</span>}
           </div>
         </div>
@@ -57,6 +58,16 @@ export function FileOutputRow({ ev }: { ev: ChatEvent }) {
       )}
     </div>
   );
+}
+
+/** who handed it over; files shared before this was recorded came from the Builder */
+function sharedBy(by: FileOutputPayload['by']): string {
+  switch (by) {
+    case 'builder_reviewer': case 'reviewer': return 'from the Reviewer';
+    case 'director_reviewer': return 'from the Director Reviewer';
+    case 'director': return 'from the Director';
+    default: return 'from the Builder';
+  }
 }
 
 /** mirrors the server's inline-safe list; the server is the one that enforces it */

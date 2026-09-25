@@ -3,13 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { DIFFICULTY_ROUTING_ENABLED } from '../../shared/features';
-import { DIFFICULTIES, DIFFICULTY_LABEL, type AppSettings, type AttachmentMeta, type BrowserActionPayload, type Difficulty, type RoleName } from '../../shared/types';
+import { DIFFICULTIES, DIFFICULTY_LABEL, type AppSettings, type FileOutputPayload, type AttachmentMeta, type BrowserActionPayload, type Difficulty, type RoleName } from '../../shared/types';
 import {
   createSession, destroySession, getUser, loginAllowed, recordLoginAttempt,
   setPassword, setSessionCookie, verifyPassword,
 } from './auth';
 import { computeUsage } from './context';
-import { DeliverableError, INLINE_SAFE, deleteDeliverables, deliverablePath, downloadType, getDeliverable, shareFile } from './deliverables';
+import { DeliverableError, INLINE_SAFE, deleteDeliverables, deliverablePath, downloadType, getDeliverable, shareContent, shareFile } from './deliverables';
+
+/** the roles whose tool server may share a file (mirrors policies.ts shareFiles) */
+const SHARING_ROLES = ['builder', 'final_repair', 'builder_reviewer', 'director_reviewer', 'reviewer', 'director'] as const;
 import { config, shotsDir } from './config';
 import { db, getChat, getProject, rowToChat } from './db';
 import {
@@ -391,13 +394,26 @@ export function registerRoutes(app: FastifyInstance): void {
    * token-authenticated call, never from the model, and the file must be inside
    * that chat's own directory. What the user gets is a copy (see deliverables.ts).
    */
-  app.post('/api/internal/share-file', async (req, reply) => {
-    const { chatId, token, path: filePath, name, note } = (req.body ?? {}) as Record<string, unknown>;
+  // Text handed over inline arrives inside this body, JSON-escaped (which can
+  // grow it several times over), so the route takes more than the 2 MB global
+  // limit; the content itself is held to MAX_CONTENT_BYTES by shareContent,
+  // which says so plainly instead of failing with a generic "too large".
+  app.post('/api/internal/share-file', { bodyLimit: 16 * 1024 * 1024 }, async (req, reply) => {
+    const { chatId, token, path: filePath, content, name, note, role } = (req.body ?? {}) as Record<string, unknown>;
     if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    const hasPath = typeof filePath === 'string' && filePath.trim() !== '';
+    const hasContent = typeof content === 'string';
+    if (hasPath === hasContent) {
+      return reply.code(400).send({ ok: false, error: hasPath ? 'Give either path or content, not both.' : 'Give the path of a file to share, or content with a name.' });
+    }
+    // set by Tandem in the tool server's environment when it spawned the role — never by the model
+    const by = (SHARING_ROLES as readonly string[]).includes(String(role)) ? (role as FileOutputPayload['by']) : 'builder';
     try {
-      const d = await shareFile(String(chatId ?? ''), filePath, { name, note });
+      const d = hasPath
+        ? await shareFile(String(chatId ?? ''), filePath, { name, note })
+        : shareContent(String(chatId ?? ''), content, { name, note });
       addEvent(d.chatId, 'file_output', {
-        id: d.id, name: d.name, size: d.size, mime: d.mime, note: d.note, path: d.sourcePath, sha256: d.sha256,
+        id: d.id, name: d.name, size: d.size, mime: d.mime, note: d.note, path: d.sourcePath, sha256: d.sha256, by,
       }, { runId: activeCtx(d.chatId)?.runId });
       return { ok: true, id: d.id, name: d.name, size: d.size, mime: d.mime };
     } catch (err) {

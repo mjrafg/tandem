@@ -142,6 +142,14 @@ console.log('--- role policy is separate from provider');
 const b = policyFor('builder'), r = policyFor('builder_reviewer'), d = policyFor('director');
 check('Builder writes, has workdir tools, no director tools', b.filesystem === 'read-write' && b.workdirTools && !b.directorTools);
 check('Builder Reviewer is read-only with no workdir tools', r.filesystem === 'read-only' && !r.workdirTools && r.browserTools);
+// handing the user a file is its own capability: every role that works in a
+// conversation has it, read-only ones included, and it never brings workdir tools
+for (const role of ['builder', 'final_repair', 'builder_reviewer', 'director_reviewer', 'reviewer', 'director'] as const) {
+  check(`${role} can share files with the user`, policyFor(role).shareFiles === true);
+}
+check('the arbiter — one decision, no tools — cannot', policyFor('arbiter').shareFiles === false);
+check('sharing does not make a read-only role writable or give it workdir tools',
+  (['builder_reviewer', 'director_reviewer', 'director'] as const).every((role) => policyFor(role).filesystem === 'read-only' && !policyFor(role).workdirTools));
 check('Director Reviewer has the same read-only posture', JSON.stringify(policyFor('director_reviewer')) === JSON.stringify(r));
 check('the arbiter is read-only with no tools at all', policyFor('arbiter').filesystem === 'read-only' && !policyFor('arbiter').browserTools && !policyFor('arbiter').directorTools);
 check('tool grants follow the role family', roleFamily('builder_reviewer') === 'reviewer' && roleFamily('director_reviewer') === 'reviewer' && roleFamily('final_repair') === 'builder');

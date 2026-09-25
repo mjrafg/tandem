@@ -1,7 +1,8 @@
 #!/bin/bash
-# An agent hands the user a file: the Builder's tandem_share_file tool, the
-# route behind it, the download, and every way a share must be refused.
-# Real isolated Tandem; the Builder is played by the real MCP workdir server.
+# An agent hands the user a file: the tandem_share_file tool (its own MCP
+# server, served to the Builder, the Reviewers and the Director), the route
+# behind it, the download, and every way a share must be refused.
+# Real isolated Tandem; each role is played by the real MCP share server.
 set -u
 RR="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$RR/../../.." && pwd)"; export RR_ROOT="$ROOT"
 DIST="${DIST:-$ROOT/server/dist/index.js}"; PORT="${PORT:-8014}"; B="http://127.0.0.1:$PORT"
@@ -38,22 +39,54 @@ api(){ curl -s -b "$CJ" -H 'content-type: application/json' "$@"; }
 P=$(api -d "{\"dirPath\":\"$PROJ\"}" "$B/api/projects/directory"); PID=$(jget "$P" 'r.id')
 C=$(api -d "{\"projectId\":\"$PID\"}" "$B/api/chats"); CHAT=$(jget "$C" 'r.id')
 [ -n "$CHAT" ] || { echo "setup failed: $P $C"; kill -9 $SRV; exit 1; }
+mcp(){ # ROLE, then JSON-RPC lines on stdin — the real share server, as that role would run it
+  ( cat; sleep 3 ) | env TANDEM_INTERNAL_URL="$B/api/internal/workdir" TANDEM_CHAT_ID="$CHAT" TANDEM_INTERNAL_TOKEN=devtoken TANDEM_LOGICAL_ROLE="$1" node "$ROOT/server/src/mcp-share.cjs" 2>/dev/null; }
+callshare(){ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"tandem_share_file\",\"arguments\":$2}}" | mcp "$1"; }
 share(){ curl -s -H 'content-type: application/json' -d "{\"token\":\"${2:-devtoken}\",\"chatId\":\"$CHAT\",\"path\":$1${3:+,$3}}" "$B/api/internal/share-file"; }
 events(){ api "$B/api/chats/$CHAT/events" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(JSON.parse(s).events)))'; }
 get(){ curl -s -b "$CJ" -D "$DD/h" -o "$DD/body" "$@"; }
 hdr(){ grep -i "^$1:" "$DD/h" | head -1 | cut -d' ' -f2- | tr -d '\r'; }
 
 echo "== the Builder's tool"
-TOOLS=$( ( printf '%s\n' \
+TOOLS=$(printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tandem_share_file","arguments":{"path":"dist/report.pdf","note":"The quarterly report"}}}'; sleep 3 ) \
-  | env TANDEM_INTERNAL_URL="$B/api/internal/workdir" TANDEM_CHAT_ID="$CHAT" TANDEM_INTERNAL_TOKEN=devtoken node "$ROOT/server/src/mcp-workdir.cjs" 2>/dev/null )
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tandem_share_file","arguments":{"path":"dist/report.pdf","note":"The quarterly report"}}}' | mcp builder)
 check "the Builder is offered tandem_share_file" "$(printf '%s' "$TOOLS" | grep -q '"name":"tandem_share_file"' && echo 1 || echo 0)"
+WD=$( ( printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 2 ) \
+  | env TANDEM_INTERNAL_URL="$B/api/internal/workdir" TANDEM_CHAT_ID="$CHAT" TANDEM_INTERNAL_TOKEN=devtoken node "$ROOT/server/src/mcp-workdir.cjs" 2>/dev/null )
+check "   and only from the share server — the Builder is not offered it twice" "$(printf '%s' "$WD" | grep -q 'tandem_share_file' && echo 0 || echo 1)"
 check "calling it shares the file and tells the Builder the user has a link" "$(printf '%s' "$TOOLS" | grep -q 'Shared \\"report.pdf\\"' && echo 1 || echo 0)" "$(printf '%s' "$TOOLS" | tail -c 400)"
 EV=$(events)
-check "the chat shows a download card for it" "$(is "$EV" "r.some(e=>e.kind==='file_output' && e.payload.name==='report.pdf' && e.payload.note==='The quarterly report' && e.payload.path==='dist/report.pdf')")" "$(jget "$EV" 'r.filter(e=>e.kind==="file_output")')"
+check "the chat shows a download card for it, from the Builder" "$(is "$EV" "r.some(e=>e.kind==='file_output' && e.payload.name==='report.pdf' && e.payload.note==='The quarterly report' && e.payload.path==='dist/report.pdf' && e.payload.by==='builder')")" "$(jget "$EV" 'r.filter(e=>e.kind==="file_output")')"
 RID=$(jget "$EV" "r.find(e=>e.kind==='file_output').payload.id")
+
+echo "== a Reviewer and the Director, which cannot write to the project"
+RL=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | mcp builder_reviewer)
+check "a Reviewer is offered the tool, and told its access is read-only" "$(printf '%s' "$RL" | grep -q 'read-only' && printf '%s' "$RL" | grep -q 'tandem_share_file' && echo 1 || echo 0)"
+R=$(callshare builder_reviewer '{"content":"# Review\n\nThe totals are off by one on the last row.\n","name":"review.md","note":"My review notes"}')
+check "a Reviewer hands over a report it wrote, as content" "$(printf '%s' "$R" | grep -q 'Shared \\"review.md\\"' && echo 1 || echo 0)" "$(printf '%s' "$R" | tail -c 300)"
+EV=$(events)
+check "   the card says it came from the Reviewer, and names no project path" "$(is "$EV" "r.some(e=>e.kind==='file_output' && e.payload.name==='review.md' && e.payload.by==='builder_reviewer' && e.payload.path==='')")" "$(jget "$EV" 'r.filter(e=>e.kind==="file_output").map(e=>e.payload.name+":"+e.payload.by)')"
+REV=$(jget "$EV" "r.find(e=>e.payload&&e.payload.name==='review.md').payload.id")
+get "$B/api/deliverables/$REV"
+check "   the download is exactly what the Reviewer wrote" "$( [ "$(cat "$DD/body")" = "$(printf '# Review\n\nThe totals are off by one on the last row.\n')" ] && echo 1 || echo 0)" "$(cat "$DD/body")"
+check "   typed from its name" "$( [ "$(hdr content-type)" = text/markdown ] && echo 1 || echo 0)" "$(hdr content-type)"
+check "   and nothing was written into the project" "$( [ ! -e "$PROJ/review.md" ] && echo 1 || echo 0)"
+R=$(callshare builder_reviewer '{"path":"dist/chart.png","note":"The chart that renders wrong"}')
+check "a Reviewer can share an existing file it can read, such as a screenshot" "$(printf '%s' "$R" | grep -q 'Shared' && echo 1 || echo 0)" "$(printf '%s' "$R" | tail -c 200)"
+R=$(callshare director '{"content":"month,revenue\nJan,1\n","name":"brief.csv"}')
+EV=$(events)
+check "the Director hands over a file too, credited to the Director" "$(is "$EV" "r.some(e=>e.kind==='file_output' && e.payload.name==='brief.csv' && e.payload.by==='director')")" "$(printf '%s' "$R" | tail -c 200)"
+R=$(share 'null' devtoken '"content":"x"')
+check "content without a name is refused" "$(is "$R" "r.ok===false && /name/.test(r.error)")" "$R"
+R=$(share '"notes.md"' devtoken '"content":"x","name":"a.txt"')
+check "a path and content together are refused" "$(is "$R" "r.ok===false && /not both/.test(r.error)")" "$R"
+BIG=$(node -e 'console.log(JSON.stringify("x".repeat(5*1024*1024+1)))')
+R=$(curl -s -H 'content-type: application/json' --data-binary @- "$B/api/internal/share-file" <<< "{\"token\":\"devtoken\",\"chatId\":\"$CHAT\",\"content\":$BIG,\"name\":\"big.txt\"}")
+check "content over 5 MB is refused, with the advice to share a file" "$(is "$R" "r.ok===false && /limit/.test(r.error)")" "$(printf '%s' "$R" | tail -c 200)"
+R=$(share 'null' devtoken '"content":"x","name":"y.txt","role":"superuser"')
+check "an unknown role in the call is not believed — it is recorded as the Builder" "$(is "$(events)" "r.some(e=>e.kind==='file_output' && e.payload.name==='y.txt' && e.payload.by==='builder')")"
 
 echo "== the download"
 get "$B/api/deliverables/$RID"

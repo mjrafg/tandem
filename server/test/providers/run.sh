@@ -118,6 +118,12 @@ echo "== 5. Reviewer on Claude sees a repair round like Codex would"
 NF=$(q "SELECT COUNT(*) FROM events WHERE chat_id='$CHAT' AND kind='error'")
 check "no error events in the whole scenario" "$([ "${NF:-0}" = 0 ] && echo 1 || echo 0)" "$(q "SELECT payload FROM events WHERE chat_id='$CHAT' AND kind='error' LIMIT 1")"
 
+echo "== 6. which tool servers each role is handed (file sharing is its own)"
+MCPLOG="$STATE/claude-mcp.log"
+has(){ node -e 'const want=process.argv[2].split(","), not=process.argv[3]?process.argv[3].split(","):[]; const rows=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").map(l=>JSON.parse(l)).filter(r=>r.role===process.argv[4]); console.log(rows.length>0 && rows.every(r=>want.every(w=>r.servers.includes(w)) && not.every(n=>!r.servers.includes(n))) ? 1 : 0)' "$MCPLOG" "$1" "$2" "$3"; }
+check "a Claude Builder gets the share server and its own workdir server" "$(has tandem_share,tandem '' builder)" "$(grep builder "$MCPLOG" | head -2)"
+check "a Claude Reviewer gets the share server, but never the Builder's workdir server" "$( [ "$(has tandem_share '' builder_reviewer)$(has tandem_share tandem builder_reviewer)" = 11 ] && echo 1 || echo 0)" "$(grep reviewer "$MCPLOG" | head -2)"
+
 stop
 echo; if [ $BAD = 0 ]; then echo "ALL PROVIDER SWITCH CHECKS PASSED"; else echo "$BAD FAILED"; fi
 exit $BAD

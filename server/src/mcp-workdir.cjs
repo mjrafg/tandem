@@ -105,25 +105,6 @@ const TOOLS = [
 // Served only on a Director session's FIRST Builder turn (TANDEM_NAME_SESSION):
 // the model contributes just the short descriptive part; Tandem composes the
 // final "M2 - S2.1 - Storage Engine" title from Director metadata.
-TOOLS.push({
-  name: 'tandem_share_file',
-  description: [
-    'Give the user a file you produced, as a download link in the chat — a report, spreadsheet, PDF, archive, dataset, image, audio or video.',
-    'Use it whenever the user asked for a file, or the result of the work IS a file: they cannot reach the server\'s disk, so a file you only mention is a file they do not have.',
-    'The file must be inside your working directory; give its path relative to it (or absolute inside it). It is copied at this moment, so the link keeps working even if you change or delete the file afterwards — share again after changing it.',
-    'To hand over a folder, archive it first (e.g. a .zip) and share the archive. Images, audio and video also play or preview in the chat. Limit 200 MB.',
-    'After sharing, just tell the user the file is ready; do not paste its contents.',
-  ].join(' '),
-  inputSchema: {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: 'The file to share, relative to your working directory, e.g. "dist/report.pdf".' },
-      name: { type: 'string', description: 'Optional file name for the download, when it should differ from the file\'s own name. Keep the extension.' },
-      note: { type: 'string', description: 'Optional one line telling the user what the file is.' },
-    },
-    required: ['path'],
-  },
-});
 
 if (process.env.TANDEM_NAME_SESSION === '1') {
   TOOLS.push({
@@ -199,18 +180,6 @@ async function callTool(name, args) {
       return { content: [{ type: 'text', text: `Could not update the Git workflow: ${body.error || 'error'}` }], isError: true };
     }
     return { content: [{ type: 'text', text: `Git workflow updated and persisted for this chat: ${body.summary}` }] };
-  }
-  if (name === 'tandem_share_file') {
-    const { httpOk, body } = await post('/share-file', {
-      path: typeof args.path === 'string' ? args.path : '',
-      name: typeof args.name === 'string' ? args.name : undefined,
-      note: typeof args.note === 'string' ? args.note : undefined,
-    });
-    if (!httpOk || body.ok === false) {
-      return { content: [{ type: 'text', text: `The file was not shared: ${body.error || 'error'}` }], isError: true };
-    }
-    const kb = body.size < 1024 ? `${body.size} bytes` : body.size < 1048576 ? `${(body.size / 1024).toFixed(1)} KB` : `${(body.size / 1048576).toFixed(1)} MB`;
-    return { content: [{ type: 'text', text: `Shared "${body.name}" (${kb}). The user now has a download link for it in the chat.` }] };
   }
   if (name === 'tandem_name_session') {
     const { httpOk, body } = await post('/name-session', { name: typeof args.name === 'string' ? args.name : '' });

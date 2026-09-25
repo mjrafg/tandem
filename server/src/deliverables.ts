@@ -22,6 +22,8 @@ import { db, getChat } from './db';
 import { BrowseError, cleanRel, projectRoot, resolveInside } from './repoBrowse';
 
 export const MAX_DELIVERABLE_BYTES = 200 * 1024 * 1024; // the same ceiling as an upload
+/** text handed over inline travels inside one tool call, so it is kept smaller */
+export const MAX_CONTENT_BYTES = 5 * 1024 * 1024;
 const store = path.join(config.dataDir, 'deliverables');
 
 db.exec(`CREATE TABLE IF NOT EXISTS deliverables (
@@ -188,6 +190,40 @@ export async function shareFile(chatId: string, rawPath: unknown, opts: { name?:
     throw err;
   } finally {
     fs.closeSync(fd);
+  }
+}
+
+/**
+ * Text the agent wrote, stored as a file Tandem creates — never written into
+ * the project. This is how a read-only role (a Reviewer, the Director) hands
+ * over a report or a log without its access to the project changing.
+ */
+export function shareContent(chatId: string, content: unknown, opts: { name?: unknown; note?: unknown } = {}): Deliverable {
+  if (!getChat(chatId)) throw new DeliverableError(404, 'This chat does not exist.');
+  if (typeof content !== 'string') throw new DeliverableError(400, 'content must be text.');
+  if (typeof opts.name !== 'string' || !opts.name.trim()) {
+    throw new DeliverableError(400, 'Give the file a name, with its extension (e.g. "review.md"), when sharing content.');
+  }
+  const bytes = Buffer.from(content, 'utf8');
+  if (bytes.length > MAX_CONTENT_BYTES) {
+    throw new DeliverableError(413, `That content is ${(bytes.length / 1048576).toFixed(1)} MB; the limit for content is ${MAX_CONTENT_BYTES / 1048576} MB. Write it to a file and share the file instead.`);
+  }
+  const id = randomUUID();
+  const dir = path.join(store, id);
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.writeFileSync(path.join(dir, 'file'), bytes);
+    const name = safeName(opts.name);
+    const d: Deliverable = {
+      id, chatId, name, sourcePath: '', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+      mime: mimeFor(name), note: typeof opts.note === 'string' ? opts.note.trim().slice(0, 300) : '', createdAt: Date.now(),
+    };
+    db.prepare(`INSERT INTO deliverables (id, chat_id, name, source_path, size, sha256, mime, note, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(d.id, d.chatId, d.name, d.sourcePath, d.size, d.sha256, d.mime, d.note, d.createdAt);
+    return d;
+  } catch (err) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw err;
   }
 }
 

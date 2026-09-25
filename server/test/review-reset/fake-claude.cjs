@@ -65,6 +65,13 @@ try { stdin = fs.readFileSync(0, 'utf8'); } catch {}
 const mcpConfigPath = arg('--mcp-config');
 let mcpServers = {};
 try { if (mcpConfigPath) mcpServers = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8')).mcpServers || {}; } catch {}
+// test hook: which tool servers each role was handed, so a harness can prove
+// the adapter's per-role wiring without a model (e.g. a Reviewer gets
+// tandem_share but never the Builder's workdir server)
+try {
+  fs.appendFileSync(path.join(process.env.FAKE_STATE_DIR || '/tmp', 'claude-mcp.log'),
+    JSON.stringify({ role: process.env.TANDEM_LOGICAL_ROLE || process.env.TANDEM_ROLE || '', servers: Object.keys(mcpServers).sort() }) + '\n');
+} catch {}
 const isDirector = !!mcpServers.tandem_director;
 const cwd = arg('cwd') || process.cwd();
 

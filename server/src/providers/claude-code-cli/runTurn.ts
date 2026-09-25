@@ -169,6 +169,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   const browserScript = path.resolve(distDir, 'mcp-browser.cjs');
   const extScript = path.resolve(distDir, 'mcp-integrations.cjs');
   const directorScript = path.resolve(distDir, 'mcp-director.cjs');
+  const shareScript = path.resolve(distDir, 'mcp-share.cjs');
   const mcpServers: Record<string, unknown> = {};
   // Tandem env (chat id, internal token, shots dir) is inherited from this
   // process's environment by the stdio servers.
@@ -180,10 +181,13 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   const family = roleFamily(opts.role);
   const withExt = opts.policy.integrationTools && fs.existsSync(extScript) && hasIntegrationTools(family);
   const withDirector = opts.policy.directorTools && fs.existsSync(directorScript);
+  // handing the user a file — read-only roles included (see mcp-share.cjs)
+  const withShare = opts.policy.shareFiles && fs.existsSync(shareScript);
   if (withWorkdir) mcpServers.tandem = { type: 'stdio', command: process.execPath, args: [workdirScript] };
   if (withBrowser) mcpServers.tandem_browser = { type: 'stdio', command: process.execPath, args: [browserScript] };
   if (withExt) mcpServers.tandem_ext = { type: 'stdio', command: process.execPath, args: [extScript] };
   if (withDirector) mcpServers.tandem_director = { type: 'stdio', command: process.execPath, args: [directorScript] };
+  if (withShare) mcpServers.tandem_share = { type: 'stdio', command: process.execPath, args: [shareScript] };
   if (Object.keys(mcpServers).length > 0) {
     mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
     fs.writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers }));
@@ -199,8 +203,12 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   }
   const startedAt = Date.now();
   const servedTools = [
-    ...(withWorkdir || withBrowser
-      ? await servedToolRecord([...(withWorkdir ? ['tandem'] : []), ...(withBrowser ? ['tandem_browser'] : [])])
+    ...(withWorkdir || withBrowser || withShare
+      ? await servedToolRecord([
+        ...(withWorkdir ? ['tandem'] : []),
+        ...(withBrowser ? ['tandem_browser'] : []),
+        ...(withShare ? ['tandem_share'] : []),
+      ])
       : []),
     ...(withExt ? catalogForRole(family).map((t) => ({ name: t.name, description: t.description })) : []),
   ];

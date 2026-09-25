@@ -150,6 +150,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const browserScript = path.resolve(distDir, 'mcp-browser.cjs');
   const extScript = path.resolve(distDir, 'mcp-integrations.cjs');
   const directorScript = path.resolve(distDir, 'mcp-director.cjs');
+  const shareScript = path.resolve(distDir, 'mcp-share.cjs');
   const withWorkdir = opts.policy.workdirTools && fs.existsSync(workdirScript);
   const withBrowser = opts.policy.browserTools && fs.existsSync(browserScript);
   // integration tools the admin has allowed for this role (the gateway
@@ -158,6 +159,8 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const family = roleFamily(opts.role);
   const withExt = opts.policy.integrationTools && fs.existsSync(extScript) && hasIntegrationTools(family);
   const withDirector = opts.policy.directorTools && fs.existsSync(directorScript);
+  // handing the user a file — read-only roles included (see mcp-share.cjs)
+  const withShare = opts.policy.shareFiles && fs.existsSync(shareScript);
   // a Director session's first Builder turn names itself through a workdir tool
   const nameSession = opts.nameSession
     ?? (h.chat.kind === 'pd-session' && opts.role === 'builder' && !opts.resumeThreadId && withWorkdir);
@@ -182,6 +185,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
   if (withBrowser) blocks.push(mcpBlock('tandem_browser', process.execPath, [browserScript], serverEnv));
   if (withExt) blocks.push(mcpBlock('tandem_ext', process.execPath, [extScript], serverEnv));
   if (withDirector) blocks.push(mcpBlock('tandem_director', process.execPath, [directorScript], serverEnv));
+  if (withShare) blocks.push(mcpBlock('tandem_share', process.execPath, [shareScript], serverEnv));
   const writable = readOnly ? [] : [...new Set([h.project.rootPath, opts.cwd])];
   const profileName = writeRoleProfile(opts.role, h.ctx.runId, writable, blocks);
 
@@ -220,8 +224,12 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const startedAt = Date.now();
   const servedTools = profileName
     ? [
-      ...(withWorkdir || withBrowser
-        ? await servedToolRecord([...(withWorkdir ? ['tandem'] : []), ...(withBrowser ? ['tandem_browser'] : [])])
+      ...(withWorkdir || withBrowser || withShare
+        ? await servedToolRecord([
+          ...(withWorkdir ? ['tandem'] : []),
+          ...(withBrowser ? ['tandem_browser'] : []),
+          ...(withShare ? ['tandem_share'] : []),
+        ])
         : []),
       ...(withExt ? catalogForRole(family).map((t) => ({ name: t.name, description: t.description })) : []),
     ]

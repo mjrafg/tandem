@@ -66,6 +66,12 @@ export interface RoleExecutionPolicy {
   integrationTools: boolean;
   /** the Project Director's orchestration tools */
   directorTools: boolean;
+  /**
+   * hand the user a file with a download link. Read-only roles may have it:
+   * sharing copies a file OUT of the project, or stores text the role wrote,
+   * and changes nothing in the project itself.
+   */
+  shareFiles: boolean;
 }
 
 /** One turn, expressed without a single provider-specific concept. */

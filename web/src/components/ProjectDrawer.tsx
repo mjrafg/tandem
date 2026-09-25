@@ -79,15 +79,13 @@ export function ProjectDrawer({ runId, open, onClose }: { runId: string; open: b
     : 0;
 
   return (
-    <>
-      <div className="fixed inset-0 z-40 bg-black/50 lg:hidden" onClick={onClose} aria-hidden />
-      <aside className="fixed inset-y-0 right-0 z-50 flex w-[320px] max-w-[88vw] flex-col border-l border-linesoft bg-bg1 shadow-2xl shadow-black/40 lg:static lg:z-auto lg:w-[300px] lg:shadow-none">
+    <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center justify-between gap-2 border-b border-linesoft px-3.5 py-3">
           <span className="inline-flex min-w-0 items-center gap-2">
             <Boxes size={15} className="shrink-0 text-dim" />
             <span className="min-w-0 truncate text-[13.5px] font-semibold">{run?.title || 'Project'}</span>
           </span>
-          <button className="btn-ghost -mr-1 px-1.5 py-1.5 lg:hidden" onClick={onClose} aria-label="Close project panel"><X size={15} /></button>
+          <button className="btn-ghost -mr-1 px-1.5 py-1.5" onClick={onClose} aria-label="Close project panel"><X size={15} /></button>
         </div>
 
         {!run ? (
@@ -149,8 +147,7 @@ export function ProjectDrawer({ runId, open, onClose }: { runId: string; open: b
             </div>
           </>
         )}
-      </aside>
-    </>
+    </div>
   );
 }
 

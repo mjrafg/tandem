@@ -164,14 +164,11 @@ export function BrowserPanel({ chat, open, role, onRole, onClose }: {
   if (!open) return null;
   const running = !!state?.running;
   const who = ROLE_LABEL[role];
-  const panelCls = expanded
-    ? 'fixed inset-0 z-50'
-    : 'fixed inset-0 z-50 sm:inset-y-0 sm:left-auto sm:w-[560px] sm:max-w-[94vw] sm:border-l sm:border-linesoft sm:shadow-2xl sm:shadow-black/40 lg:static lg:z-auto lg:w-[520px] lg:shadow-none xl:w-[640px]';
+  // expanded, it leaves its dock and fills the window
+  const panelCls = expanded ? 'fixed inset-0 z-50' : 'min-h-0 flex-1';
 
   return (
-    <>
-      {!expanded && <div className="fixed inset-0 z-40 bg-black/50 lg:hidden" onClick={onClose} aria-hidden />}
-      <aside className={`${panelCls} flex flex-col bg-bg1`}>
+    <div className={`${panelCls} flex flex-col bg-bg1`}>
         <div className="flex items-center gap-2 border-b border-linesoft px-3 py-2">
           <Globe size={15} className="shrink-0 text-dim" />
           <span className="text-[13.5px] font-semibold">Browser</span>
@@ -307,7 +304,6 @@ export function BrowserPanel({ chat, open, role, onRole, onClose }: {
             ))}
           </form>
         )}
-      </aside>
-    </>
+    </div>
   );
 }

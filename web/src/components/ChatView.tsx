@@ -1,9 +1,10 @@
 import { ArrowDown, Boxes, Check, Copy, FolderOpen, FolderTree, Globe, ArrowLeft } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import type { Chat, Project } from '@shared/types';
 import { selectChat, selectProject, useStore } from '../store';
 import { CompactDialog } from './CompactDialog';
+import { CHAT_MIN, DOCK_SIZES, Dock, type DockId, loadDockWidths, saveDockWidths, useWide } from './Dock';
 import { Composer } from './Composer';
 import { ContextBanner, ContextMeter } from './ContextMeter';
 import { BrowserPanel, type LiveRole } from './browser/BrowserPanel';
@@ -29,16 +30,72 @@ export function ChatView() {
   const [compactOpen, setCompactOpen] = useState(false);
   const [prefill, setPrefill] = useState<string | undefined>();
   const isProject = chat?.kind === 'project';
-  // one side panel at a time: the project's structure, its files, or an agent's browser
-  const [panel, setPanel] = useState<'project' | 'files' | 'browser' | null>(null);
+  // ---- docks: the project's structure, its files, an agent's browser. On a
+  // wide screen any of them sit side by side beside the chat, each resizable;
+  // on a narrower one, one at a time.
+  const wide = useWide();
+  const wideRef = useRef(wide);
+  wideRef.current = wide;
+  const [docks, setDocks] = useState<DockId[]>([]); // open ones, oldest first
+  const [widths, setWidths] = useState(loadDockWidths);
+  const [rowWidth, setRowWidth] = useState(0);
+  const rowWidthRef = useRef(0);
+  rowWidthRef.current = rowWidth;
+  const observer = useRef<ResizeObserver | null>(null);
+  const rowRef = useCallback((node: HTMLDivElement | null) => {
+    observer.current?.disconnect();
+    if (!node) return;
+    observer.current = new ResizeObserver(([e]) => setRowWidth(Math.round(e.contentRect.width)));
+    observer.current.observe(node);
+  }, []);
+
+  const openDock = useCallback((id: DockId) => setDocks((cur) => {
+    if (cur.includes(id)) return cur;
+    if (!wideRef.current) return [id];
+    const next = [...cur, id];
+    // if even their smallest sizes cannot sit beside the chat, the oldest goes
+    const avail = rowWidthRef.current;
+    while (avail > 0 && next.length > 1 && next.reduce((n, d) => n + DOCK_SIZES[d].min, 0) + CHAT_MIN > avail) next.shift();
+    return next;
+  }), []);
+  const closeDock = useCallback((id: DockId) => setDocks((cur) => cur.filter((d) => d !== id)), []);
+  const docksRef = useRef<DockId[]>([]);
+  docksRef.current = docks;
+  const flipDock = useCallback((id: DockId) => (docksRef.current.includes(id) ? closeDock(id) : openDock(id)), [openDock, closeDock]);
+  const resizeDock = useCallback((id: DockId, w: number) => setWidths((cur) => {
+    const next = { ...cur, [id]: w };
+    saveDockWidths(next);
+    return next;
+  }), []);
+
+  // a narrow screen shows the most recently opened dock only
+  const shown = wide ? docks : docks.slice(-1);
+  // the widths the open docks get: what the user chose, squeezed toward their
+  // minimums (without forgetting the choice) when the window cannot fit them all
+  const fitted = useMemo(() => {
+    const w = {} as Record<DockId, number>;
+    for (const d of shown) w[d] = Math.max(DOCK_SIZES[d].min, widths[d]);
+    if (wide && rowWidth > 0) {
+      const room = Math.max(0, rowWidth - CHAT_MIN);
+      const total = shown.reduce((n, d) => n + w[d], 0);
+      const slack = shown.reduce((n, d) => n + (w[d] - DOCK_SIZES[d].min), 0);
+      if (total > room && slack > 0) {
+        const k = Math.min(1, (total - room) / slack);
+        for (const d of shown) w[d] = Math.round(w[d] - (w[d] - DOCK_SIZES[d].min) * k);
+      }
+    }
+    return w;
+  }, [shown.join(','), widths, wide, rowWidth]); // eslint-disable-line react-hooks/exhaustive-deps
+  const roomFor = (id: DockId) => Math.max(0, rowWidth - CHAT_MIN) - shown.filter((d) => d !== id).reduce((n, d) => n + fitted[d], 0);
+
   const [filesTab, setFilesTab] = useState<FilesTab>('files');
-  const openFiles = useCallback((tab: FilesTab) => { setFilesTab(tab); setPanel('files'); }, []);
+  const openFiles = useCallback((tab: FilesTab) => { setFilesTab(tab); openDock('files'); }, [openDock]);
   const [browserRole, setBrowserRole] = useState<LiveRole>('builder');
   // "Watch live" on a browser step in the timeline
   const browserRequest = useStore((s) => s.browserRequest);
   useEffect(() => {
-    if (browserRequest && browserRequest.chatId === chatId) { setBrowserRole(browserRequest.role); setPanel('browser'); }
-  }, [browserRequest, chatId]);
+    if (browserRequest && browserRequest.chatId === chatId) { setBrowserRole(browserRequest.role); openDock('browser'); }
+  }, [browserRequest, chatId, openDock]);
 
   useEffect(() => {
     if (chatId && !loaded) void loadChat(chatId);
@@ -48,9 +105,13 @@ export function ChatView() {
     if (!settings) void loadSettings();
   }, [settings, loadSettings]);
 
-  // on wide screens a project chat opens its drawer beside the conversation
+  // moving to another chat keeps the docks you had open; the project dock
+  // belongs to project chats only, and on a wide screen it opens with them
   useEffect(() => {
-    setPanel(isProject && window.matchMedia('(min-width: 1024px)').matches ? 'project' : null);
+    setDocks((cur) => {
+      const next = cur.filter((d) => d !== 'project' || isProject);
+      return isProject && wideRef.current && !next.includes('project') ? ['project', ...next] : next;
+    });
   }, [isProject, chatId]);
 
   // ---- scroll pinning
@@ -99,12 +160,10 @@ export function ChatView() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1">
+    <div ref={rowRef} className="flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
       <TopBar chat={chat} project={project} onCompact={() => setCompactOpen(true)}
-        isProject={isProject} onToggleDrawer={() => setPanel((p) => (p === 'project' ? null : 'project'))}
-        onToggleFiles={() => (panel === 'files' ? setPanel(null) : openFiles('files'))} onOpenChanges={() => openFiles('changes')}
-        onToggleBrowser={() => setPanel((p) => (p === 'browser' ? null : 'browser'))} />
+        isProject={isProject} docks={docks} onToggleDock={flipDock} onOpenChanges={() => openFiles('changes')} />
       <ContextBanner usage={usage} onCompact={() => setCompactOpen(true)} />
 
       <div ref={scrollRef} onScroll={onScroll} className="relative min-h-0 flex-1 overflow-y-auto">
@@ -151,19 +210,32 @@ export function ChatView() {
       )}
       <CompactDialog chatId={chat.id} open={compactOpen} onClose={() => setCompactOpen(false)} />
       </div>
-      {isProject && chat.projectRunId && (
-        <ProjectDrawer runId={chat.projectRunId} open={panel === 'project'} onClose={() => setPanel(null)} />
-      )}
-      <FilesPanel chat={chat} project={project} open={panel === 'files'} tab={filesTab} onTab={setFilesTab} onClose={() => setPanel(null)} />
-      <BrowserPanel chat={chat} open={panel === 'browser'} role={browserRole} onRole={setBrowserRole} onClose={() => setPanel(null)} />
+      {shown.map((id) => {
+        const close = () => closeDock(id);
+        const body = id === 'project'
+          ? (isProject && chat.projectRunId ? <ProjectDrawer runId={chat.projectRunId} open onClose={close} /> : null)
+          : id === 'files'
+            ? <FilesPanel chat={chat} project={project} open tab={filesTab} onTab={setFilesTab} onClose={close} />
+            : <BrowserPanel chat={chat} open role={browserRole} onRole={setBrowserRole} onClose={close} />;
+        if (!body) return null;
+        return (
+          <Dock
+            key={id} id={id} label={id === 'project' ? 'Project panel' : id === 'files' ? 'Files panel' : 'Browser panel'}
+            wide={wide} width={fitted[id]} maxWidth={roomFor(id)} onResize={(w) => resizeDock(id, w)} onClose={close}
+          >
+            {body}
+          </Dock>
+        );
+      })}
     </div>
   );
 }
 
-function TopBar({ chat, project, onCompact, isProject, onToggleDrawer, onToggleFiles, onOpenChanges, onToggleBrowser }: {
-  chat: Chat; project: Project; onCompact: () => void; isProject?: boolean; onToggleDrawer?: () => void;
-  onToggleFiles: () => void; onOpenChanges: () => void; onToggleBrowser: () => void;
+function TopBar({ chat, project, onCompact, isProject, docks, onToggleDock, onOpenChanges }: {
+  chat: Chat; project: Project; onCompact: () => void; isProject?: boolean;
+  docks: DockId[]; onToggleDock: (id: DockId) => void; onOpenChanges: () => void;
 }) {
+  const dockBtn = (id: DockId) => `btn-ghost px-2 py-1.5 ${docks.includes(id) ? 'bg-bg2 text-ink' : ''}`;
   const usage = useStore((s) => s.usage[chat.id]);
   const [copied, setCopied] = useState(false);
   const parent = chat.kind === 'pd-session' ? chat.session ?? null : null;
@@ -198,7 +270,7 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer, onToggleF
             <span className="hidden min-w-0 sm:inline-flex">{place}</span>
           </span>
         ) : (
-          <span className="inline-flex min-w-0 max-w-[40vw] shrink items-center gap-1.5 text-[13.5px] font-medium sm:max-w-[45vw] sm:shrink-0">
+          <span className="inline-flex min-w-0 max-w-[40vw] shrink items-center gap-1.5 text-[13.5px] font-medium sm:max-w-[45vw]">
             <FolderOpen size={14} className="shrink-0 text-dim" />
             <span className="truncate">{project.name}</span>
           </span>
@@ -233,14 +305,14 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer, onToggleF
         <ContextMeter usage={usage} onCompact={onCompact} />
         <ProjectMemoryMenu projectId={project.id} />
         <ExportMenu chatId={chat.id} />
-        <button className="btn-ghost px-2 py-1.5" onClick={onToggleFiles} title="Files, changes and branches" aria-label="Files, changes and branches">
+        <button className={dockBtn('files')} onClick={() => onToggleDock('files')} aria-pressed={docks.includes('files')} title="Files, changes and branches" aria-label="Files, changes and branches">
           <FolderTree size={15} />
         </button>
-        <button className="btn-ghost px-2 py-1.5" onClick={onToggleBrowser} title="The Builder's and Reviewer's browser, live" aria-label="Live browser">
+        <button className={dockBtn('browser')} onClick={() => onToggleDock('browser')} aria-pressed={docks.includes('browser')} title="The Builder's and Reviewer's browser, live" aria-label="Live browser">
           <Globe size={15} />
         </button>
         {isProject && (
-          <button className="btn-ghost px-2 py-1.5" onClick={onToggleDrawer} title="Project structure">
+          <button className={dockBtn('project')} onClick={() => onToggleDock('project')} aria-pressed={docks.includes('project')} title="Project structure" aria-label="Project structure">
             <Boxes size={15} />
           </button>
         )}

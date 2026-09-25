@@ -42,7 +42,7 @@ function useLoad<T>(fn: (() => Promise<T>) | null, deps: unknown[]): Load<T> {
 /**
  * The project's files, changes and branches, read-only. It works on the chat's
  * own directory, so inside a Director session it shows that session's worktree
- * and branch. Full screen on a phone, a side panel on wide screens.
+ * and branch. It fills whatever dock holds it (./Dock.tsx).
  */
 export function FilesPanel({ chat, project, open, tab, onTab, onClose }: {
   chat: Chat; project: Project; open: boolean; tab: FilesTab; onTab: (t: FilesTab) => void; onClose: () => void;
@@ -77,9 +77,7 @@ export function FilesPanel({ chat, project, open, tab, onTab, onClose }: {
   const currentBranch = branches.data?.current ?? null;
 
   return (
-    <>
-      <div className="fixed inset-0 z-40 bg-black/50 lg:hidden" onClick={onClose} aria-hidden />
-      <aside className="fixed inset-0 z-50 flex flex-col bg-bg1 sm:inset-y-0 sm:left-auto sm:w-[460px] sm:max-w-[92vw] sm:border-l sm:border-linesoft sm:shadow-2xl sm:shadow-black/40 lg:static lg:z-auto lg:w-[440px] lg:shadow-none xl:w-[500px]">
+    <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center gap-2 border-b border-linesoft px-3.5 py-2.5">
           <FolderTree size={15} className="shrink-0 text-dim" />
           <div className="min-w-0 flex-1">
@@ -138,8 +136,7 @@ export function FilesPanel({ chat, project, open, tab, onTab, onClose }: {
             )
           )}
         </div>
-      </aside>
-    </>
+    </div>
   );
 }
 

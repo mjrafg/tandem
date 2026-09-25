@@ -105,8 +105,18 @@ R=$(input '{"role":"builder","action":"key","key":"Enter"}')
 check "a named key is accepted" "$(js "$R" 'r.ok')" "$R"
 check "an unsupported key is refused" "$(( $(code -b "$CJ" -H 'content-type: application/json' -d '{"role":"builder","action":"key","key":"F13"}' "$B/api/chats/$CHAT/browser/input") == 400 ))"
 R=$(input '{"role":"builder","action":"wheel","x":200,"y":200,"dx":0,"dy":800}')
-E=$(agent browser_evaluate '{"code":"window.scrollY"}')
-check "scrolling moves the agent's page" "$(js "$E" 'Number(r.content[0].text.match(/\d+/)[0])>0')" "$E"
+# A wheel is dispatched, then applied by Chromium's compositor a few frames
+# later — Playwright's mouse.wheel returns before the page has moved. The
+# route deliberately does not wait for that: the panel sends a wheel batch
+# every 140 ms while the user scrolls, and settling each one would back the
+# input queue up behind the gesture. So poll, as any real observer would.
+SCROLLED=0
+for i in $(seq 1 30); do
+  E=$(agent browser_evaluate '{"code":"window.scrollY"}')
+  [ "$(js "$E" 'Number(r.content[0].text.match(/\d+/)[0])>0')" = 1 ] && { SCROLLED=1; break; }
+  sleep 0.1
+done
+check "scrolling moves the agent's page" "$SCROLLED" "$E"
 
 echo "== the user navigates"
 R=$(input "{\"role\":\"builder\",\"action\":\"navigate\",\"url\":\"$SITE_URL/two\"}")

@@ -10,6 +10,7 @@ import { DIFFICULTY_ROUTING_ENABLED } from '../../shared/features';
 import { registerRoutes } from './routes';
 import { registerProjectRoutes } from './projectRoutes';
 import { registerRepoBrowseRoutes } from './repoBrowse';
+import { registerBrowserLiveRoutes } from './engine/browserLive';
 import { registerIntegrationRoutes } from './integrationRoutes';
 import { registerAgentRoutes } from './agents/routes';
 import { registerObservabilityRoutes } from './observability/routes';
@@ -138,6 +139,7 @@ const app = Fastify({
   registerIntegrationRoutes(app);
   registerProjectRoutes(app);
   registerRepoBrowseRoutes(app);
+  registerBrowserLiveRoutes(app);
   registerAgentRoutes(app);
   registerObservabilityRoutes(app);
 

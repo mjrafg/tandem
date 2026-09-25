@@ -21,7 +21,7 @@ import { config, shotsDir } from '../config';
  * dead process (JS heap, modals, sessionStorage) is honestly reported as reset.
  */
 
-type RoleBucket = 'builder' | 'reviewer';
+export type RoleBucket = 'builder' | 'reviewer';
 
 interface BrowserInstance {
   key: string;
@@ -43,6 +43,10 @@ interface BrowserInstance {
   disposed: boolean;
   /** serializes tool calls on this instance — two callers can never interleave */
   chain: Promise<unknown>;
+  /** an agent tool call is running right now (the live view shows it) */
+  busy: boolean;
+  /** what the user did from the live view since the agent's last call, told to the agent once */
+  userLog: string[];
 }
 
 export interface BrowserToolResult {
@@ -92,11 +96,30 @@ function getInstance(chatId: string, role: string): BrowserInstance {
       dsr: 1, viewport: { width: 1280, height: 800 },
       shotSeq: 0, consoleBuf: [], ariaRefWorks: true,
       notes: [], lastUsed: Date.now(), lastSaved: 0, disposed: false,
-      chain: Promise.resolve(),
+      chain: Promise.resolve(), busy: false, userLog: [],
     };
     instances.set(key, inst);
   }
   return inst;
+}
+
+// ---------------------------------------------------------------- live view hooks
+//
+// The live view (./browserLive.ts) watches an instance without owning it: it
+// is told when the active page may have changed, when an agent call starts or
+// ends, and when the browser goes away, and it re-reads the state itself.
+
+const changeListeners = new Set<(key: string) => void>();
+
+export function onBrowserChange(fn: (key: string) => void): () => void {
+  changeListeners.add(fn);
+  return () => { changeListeners.delete(fn); };
+}
+
+function changed(inst: BrowserInstance): void {
+  for (const fn of changeListeners) {
+    try { fn(inst.key); } catch { /* a viewer must never break the browser */ }
+  }
 }
 
 // ---------------------------------------------------------------- durable state
@@ -157,6 +180,7 @@ function dropLive(inst: BrowserInstance): void {
   inst.context = null;
   inst.page = null;
   inst.ariaRefWorks = true;
+  changed(inst);
 }
 
 async function closeLive(inst: BrowserInstance): Promise<void> {
@@ -170,6 +194,7 @@ async function disposeInstance(inst: BrowserInstance): Promise<void> {
   inst.disposed = true;
   if (instances.get(inst.key) === inst) instances.delete(inst.key);
   await closeLive(inst);
+  changed(inst);
 }
 
 async function launch(inst: BrowserInstance): Promise<void> {
@@ -197,6 +222,7 @@ async function launch(inst: BrowserInstance): Promise<void> {
 
 function wirePage(inst: BrowserInstance, p: any): void {
   inst.page = p; // popups/new tabs become the active page
+  changed(inst);
   p.on('console', (msg: any) => pushConsole(inst, msg.type(), msg.text()));
   p.on('pageerror', (err: unknown) => pushConsole(inst, 'error', String(err)));
   p.on('requestfailed', (req: any) => {
@@ -272,6 +298,13 @@ async function ensurePage(inst: BrowserInstance): Promise<any> {
 function takeNotes(inst: BrowserInstance): string {
   const notes = inst.notes.splice(0).join('');
   return notes;
+}
+
+/** what the user did in this browser since the agent last used it, said once */
+function takeUserNote(inst: BrowserInstance): string {
+  const acts = inst.userLog.splice(0);
+  if (acts.length === 0) return '';
+  return ` (note: since your last browser call, the user acted in this browser from Tandem's live view: ${acts.join('; ')}. The page may have changed — take a fresh snapshot before relying on earlier refs.)`;
 }
 
 // ---------------------------------------------------------------- snapshot
@@ -632,6 +665,8 @@ export async function handleBrowserTool(chatId: string, role: string, name: stri
   const inst = getInstance(chatId, role);
   const run = inst.chain.then(async (): Promise<BrowserToolResult> => {
     inst.lastUsed = Date.now();
+    inst.busy = true;
+    changed(inst);
     try {
       // watchdog: a wedged handler must not block this instance's chain (which
       // includes the recovery tools) forever. On timeout the instance is
@@ -641,8 +676,9 @@ export async function handleBrowserTool(chatId: string, role: string, name: stri
         handler(inst, args ?? {}),
         new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error('the browser operation timed out and the browser was reset; retry your last step')), CALL_WATCHDOG_MS); }),
       ]).finally(() => { if (timer) clearTimeout(timer); }) as BrowserToolResult;
-      const note = takeNotes(inst);
-      if (note && out.report) out.report = { ...out.report, detail: `${out.report.detail}${note.includes('crash') ? ' · browser restarted after a crash' : ' · restored from saved state'}` };
+      const sysNote = takeNotes(inst);
+      if (sysNote && out.report) out.report = { ...out.report, detail: `${out.report.detail}${sysNote.includes('crash') ? ' · browser restarted after a crash' : ' · restored from saved state'}` };
+      const note = sysNote + takeUserNote(inst);
       if (out.content) {
         if (note && out.content[0]?.type === 'text') out.content[0] = { type: 'text', text: `${out.content[0].text}${note}` };
         const textPart = out.content.find((c) => c.type === 'text');
@@ -665,10 +701,66 @@ export async function handleBrowserTool(chatId: string, role: string, name: stri
         isError: true,
         report: { action: name.replace('browser_', ''), detail: `${name.replace('browser_', '')} failed`, error: message, status: 'failed', ...info },
       };
+    } finally {
+      inst.busy = false;
+      changed(inst);
     }
   });
   inst.chain = run.catch(() => undefined); // the chain itself never rejects
   return run;
+}
+
+/** What a live viewer may see of an instance: its open page, if any. Never launches anything. */
+export function peekBrowser(chatId: string, bucket: RoleBucket): {
+  page: any | null; context: any | null; busy: boolean; viewport: { width: number; height: number } | null;
+} {
+  const inst = instances.get(keyFor(chatId, bucket));
+  if (!inst || inst.disposed || !inst.context || !inst.page || inst.page.isClosed()) {
+    return { page: null, context: null, busy: !!inst?.busy, viewport: inst?.viewport ?? null };
+  }
+  return { page: inst.page, context: inst.context, busy: inst.busy, viewport: inst.viewport };
+}
+
+export class BrowserUserError extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+
+const USER_ACTION_MS = 20_000;
+
+/**
+ * Run something the USER did from the live view, in turn with the agent's calls
+ * on the same queue, so a click can never land in the middle of an agent's
+ * action. `start` may open the browser (restoring its saved state); anything
+ * else needs one already open. The action is described to the agent on its
+ * next call, so it never works from a page it thinks it still knows.
+ */
+export async function userBrowserAction(
+  chatId: string, bucket: RoleBucket, describe: string, fn: (page: any) => Promise<void>, opts: { start?: boolean } = {},
+): Promise<void> {
+  const key = keyFor(chatId, bucket);
+  const existing = instances.get(key);
+  if (!opts.start && (!existing || existing.disposed)) throw new BrowserUserError(409, 'No browser is open. Open one first.');
+  const inst = existing && !existing.disposed ? existing : getInstance(chatId, bucket);
+  const run = inst.chain.then(async () => {
+    if (inst.disposed) throw new BrowserUserError(409, 'This browser was just closed.');
+    if (!opts.start && (!inst.page || inst.page.isClosed())) throw new BrowserUserError(409, 'No browser is open. Open one first.');
+    inst.lastUsed = Date.now();
+    const page = await ensurePage(inst);
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      fn(page),
+      new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new BrowserUserError(504, 'The page did not respond in time.')), USER_ACTION_MS); }),
+    ]).finally(() => { if (timer) clearTimeout(timer); });
+    inst.userLog.push(describe);
+    if (inst.userLog.length > 12) inst.userLog.splice(0, inst.userLog.length - 12);
+    if (!inst.disposed && Date.now() - inst.lastSaved > CHECKPOINT_MS) void saveDurable(inst);
+  });
+  inst.chain = run.catch(() => undefined);
+  try {
+    await run;
+  } finally {
+    changed(inst);
+  }
 }
 
 /** Release a chat's live browsers (both roles). Durable state optionally erased — chat deletion must leave no cookies behind. */

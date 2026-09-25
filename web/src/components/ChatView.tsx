@@ -1,4 +1,4 @@
-import { ArrowDown, Boxes, Check, Copy, FolderOpen, FolderTree, ArrowLeft } from 'lucide-react';
+import { ArrowDown, Boxes, Check, Copy, FolderOpen, FolderTree, Globe, ArrowLeft } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import type { Chat, Project } from '@shared/types';
@@ -6,6 +6,7 @@ import { selectChat, selectProject, useStore } from '../store';
 import { CompactDialog } from './CompactDialog';
 import { Composer } from './Composer';
 import { ContextBanner, ContextMeter } from './ContextMeter';
+import { BrowserPanel, type LiveRole } from './browser/BrowserPanel';
 import { ExportMenu } from './ExportMenu';
 import { FilesPanel, type FilesTab } from './files/FilesPanel';
 import { GitChip } from './GitChip';
@@ -28,10 +29,16 @@ export function ChatView() {
   const [compactOpen, setCompactOpen] = useState(false);
   const [prefill, setPrefill] = useState<string | undefined>();
   const isProject = chat?.kind === 'project';
-  // one side panel at a time: the project's structure, or its files
-  const [panel, setPanel] = useState<'project' | 'files' | null>(null);
+  // one side panel at a time: the project's structure, its files, or an agent's browser
+  const [panel, setPanel] = useState<'project' | 'files' | 'browser' | null>(null);
   const [filesTab, setFilesTab] = useState<FilesTab>('files');
   const openFiles = useCallback((tab: FilesTab) => { setFilesTab(tab); setPanel('files'); }, []);
+  const [browserRole, setBrowserRole] = useState<LiveRole>('builder');
+  // "Watch live" on a browser step in the timeline
+  const browserRequest = useStore((s) => s.browserRequest);
+  useEffect(() => {
+    if (browserRequest && browserRequest.chatId === chatId) { setBrowserRole(browserRequest.role); setPanel('browser'); }
+  }, [browserRequest, chatId]);
 
   useEffect(() => {
     if (chatId && !loaded) void loadChat(chatId);
@@ -96,7 +103,8 @@ export function ChatView() {
       <div className="flex min-w-0 flex-1 flex-col">
       <TopBar chat={chat} project={project} onCompact={() => setCompactOpen(true)}
         isProject={isProject} onToggleDrawer={() => setPanel((p) => (p === 'project' ? null : 'project'))}
-        onToggleFiles={() => (panel === 'files' ? setPanel(null) : openFiles('files'))} onOpenChanges={() => openFiles('changes')} />
+        onToggleFiles={() => (panel === 'files' ? setPanel(null) : openFiles('files'))} onOpenChanges={() => openFiles('changes')}
+        onToggleBrowser={() => setPanel((p) => (p === 'browser' ? null : 'browser'))} />
       <ContextBanner usage={usage} onCompact={() => setCompactOpen(true)} />
 
       <div ref={scrollRef} onScroll={onScroll} className="relative min-h-0 flex-1 overflow-y-auto">
@@ -147,13 +155,14 @@ export function ChatView() {
         <ProjectDrawer runId={chat.projectRunId} open={panel === 'project'} onClose={() => setPanel(null)} />
       )}
       <FilesPanel chat={chat} project={project} open={panel === 'files'} tab={filesTab} onTab={setFilesTab} onClose={() => setPanel(null)} />
+      <BrowserPanel chat={chat} open={panel === 'browser'} role={browserRole} onRole={setBrowserRole} onClose={() => setPanel(null)} />
     </div>
   );
 }
 
-function TopBar({ chat, project, onCompact, isProject, onToggleDrawer, onToggleFiles, onOpenChanges }: {
+function TopBar({ chat, project, onCompact, isProject, onToggleDrawer, onToggleFiles, onOpenChanges, onToggleBrowser }: {
   chat: Chat; project: Project; onCompact: () => void; isProject?: boolean; onToggleDrawer?: () => void;
-  onToggleFiles: () => void; onOpenChanges: () => void;
+  onToggleFiles: () => void; onOpenChanges: () => void; onToggleBrowser: () => void;
 }) {
   const usage = useStore((s) => s.usage[chat.id]);
   const [copied, setCopied] = useState(false);
@@ -226,6 +235,9 @@ function TopBar({ chat, project, onCompact, isProject, onToggleDrawer, onToggleF
         <ExportMenu chatId={chat.id} />
         <button className="btn-ghost px-2 py-1.5" onClick={onToggleFiles} title="Files, changes and branches" aria-label="Files, changes and branches">
           <FolderTree size={15} />
+        </button>
+        <button className="btn-ghost px-2 py-1.5" onClick={onToggleBrowser} title="The Builder's and Reviewer's browser, live" aria-label="Live browser">
+          <Globe size={15} />
         </button>
         {isProject && (
           <button className="btn-ghost px-2 py-1.5" onClick={onToggleDrawer} title="Project structure">

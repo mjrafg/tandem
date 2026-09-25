@@ -34,10 +34,13 @@ interface State {
   projectRuns: Record<string, ProjectRun>;
   /** mobile drawer state; ignored by the static desktop sidebar */
   sidebarOpen: boolean;
+  /** a request, from anywhere in a chat, to show an agent's live browser */
+  browserRequest: { chatId: string; role: 'builder' | 'reviewer'; at: number } | null;
 
   setNewProjectOpen: (open: boolean, mode?: 'chat' | 'project') => void;
   loadProjectRun: (id: string) => Promise<void>;
   setSidebarOpen: (open: boolean) => void;
+  openLiveBrowser: (chatId: string, role: 'builder' | 'reviewer') => void;
   init: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -72,6 +75,7 @@ export const useStore = create<State>((set, get) => ({
   newProjectMode: 'chat',
   projectRuns: {},
   sidebarOpen: false,
+  browserRequest: null,
 
   // opening the project dialog dismisses the mobile drawer beneath it
   setNewProjectOpen: (open, mode = 'chat') => set(open ? { newProjectOpen: open, newProjectMode: mode, sidebarOpen: false } : { newProjectOpen: open }),
@@ -80,6 +84,7 @@ export const useStore = create<State>((set, get) => ({
     catch { /* ignore */ }
   },
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
+  openLiveBrowser: (chatId, role) => set({ browserRequest: { chatId, role, at: Date.now() } }),
 
   init: async () => {
     try {

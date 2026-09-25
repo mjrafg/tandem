@@ -830,6 +830,32 @@ export interface GitStatus {
   files?: GitFileStat[];
 }
 
+// ---------------------------------------------------------------- live browser view
+//
+// What an agent's browser shows right now, streamed as server-sent events from
+// /api/chats/:id/browser/live?role=builder|reviewer: `state` when anything
+// about the browser changes, `frame` for each new picture of the page.
+
+export interface BrowserLiveState {
+  /** a browser is open for this chat and role */
+  running: boolean;
+  /** the agent is in the middle of a browser action */
+  busy: boolean;
+  url: string;
+  title: string;
+  viewport: { width: number; height: number } | null;
+}
+
+export interface BrowserLiveFrame {
+  /** base64 JPEG */
+  data: string;
+  /** the page's size in CSS pixels, for mapping a click on the picture back to the page */
+  width: number;
+  height: number;
+}
+
+export type BrowserInputAction = 'start' | 'click' | 'wheel' | 'key' | 'text' | 'navigate' | 'back' | 'forward' | 'reload';
+
 // ---------------------------------------------------------------- repository browser
 //
 // Read-only views of a project's files, branches and changes. Every path is

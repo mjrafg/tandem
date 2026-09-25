@@ -6,6 +6,7 @@ import {
 import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { Link } from 'react-router-dom';
 import { useState } from 'react';
+import { useStore } from '../../store';
 import type {
   AiCallPayload, BrowserActionPayload, ChatEvent, CheckpointPayload, CommandPayload, CompactionPayload, ErrorPayload,
   FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, SessionsPayload, StatusPayload, ToolCallPayload, ArbitrationPayload, DispositionsPayload } from '@shared/types';
@@ -536,6 +537,7 @@ export function BrowserGroupRow({ events }: { events: ChatEvent[] }) {
   const failed = acts.filter((a) => a.p.status === 'failed').length;
   const elapsed = groupElapsed(events, false);
   const reviewer = acts[0].p.role === 'reviewer';
+  const openLiveBrowser = useStore((s) => s.openLiveBrowser);
   const label = acts.length === 1
     ? <>Browser · {truncate(acts[0].p.detail, 62)}</>
     : <>Browser activity · {acts.length} actions</>;
@@ -554,6 +556,12 @@ export function BrowserGroupRow({ events }: { events: ChatEvent[] }) {
       meta={fmtDuration(elapsed)}
     >
       <div className="space-y-1.5">
+        <button
+          className="btn-outline px-2.5 py-1 text-[12px]"
+          onClick={() => openLiveBrowser(events[0].chatId, reviewer ? 'reviewer' : 'builder')}
+        >
+          <Globe size={12} /> Watch the {reviewer ? 'Reviewer' : 'Builder'}&apos;s browser live
+        </button>
         <ElapsedNote events={events} running={false} />
         {acts.map(({ ev, p }) => <BrowserActionDetail key={ev.id} chatId={ev.chatId} p={p} />)}
       </div>

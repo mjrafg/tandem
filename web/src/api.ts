@@ -1,7 +1,7 @@
 import type { Difficulty,
   AgentProfile, ObservabilityKey,
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
-  DirListing, GitStatus, Integration, RepoBranches, RepoChangeScope, RepoChanges, RepoFile, RepoLog, RepoTree, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
+  BrowserInputAction, DirListing, GitStatus, Integration, RepoBranches, RepoChangeScope, RepoChanges, RepoFile, RepoLog, RepoTree, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
   AuthProvider, LoginState, ProviderStatus, StoredTokenMeta,
   Effort, Provider, ProviderDescriptor, ProviderHealth,
 } from '@shared/types';
@@ -56,6 +56,11 @@ export const api = {
   openProject: (id: string) => j<{ ok: true }>('/api/projects/open', { method: 'POST', body: JSON.stringify({ id }) }),
   addDirectory: (dirPath: string) => j<Project>('/api/projects/directory', { method: 'POST', body: JSON.stringify({ dirPath }) }),
   gitStatus: (projectId: string) => j<GitStatus>(`/api/projects/${projectId}/git`),
+
+  // live view of an agent's browser: frames/state arrive on an EventSource at
+  // /api/chats/:id/browser/live?role=…; input goes through this
+  browserInput: (chatId: string, body: { role: 'builder' | 'reviewer'; action: BrowserInputAction } & Record<string, unknown>) =>
+    j<{ ok: true }>(`/api/chats/${chatId}/browser/input`, { method: 'POST', body: JSON.stringify(body) }),
 
   // repository browser (read-only): ref null/omitted = the working tree on disk
   repoTree: (projectId: string, path: string, ref?: string | null) =>

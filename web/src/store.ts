@@ -31,6 +31,7 @@ interface State {
   newProjectOpen: boolean;
   /** New chat vs New project — which flow the shared dialog is running */
   newProjectMode: 'chat' | 'project';
+  newVideoOpen: boolean;
   projectRuns: Record<string, ProjectRun>;
   /** mobile drawer state; ignored by the static desktop sidebar */
   sidebarOpen: boolean;
@@ -38,6 +39,7 @@ interface State {
   browserRequest: { chatId: string; role: 'builder' | 'reviewer'; at: number } | null;
 
   setNewProjectOpen: (open: boolean, mode?: 'chat' | 'project') => void;
+  setNewVideoOpen: (open: boolean) => void;
   loadProjectRun: (id: string) => Promise<void>;
   setSidebarOpen: (open: boolean) => void;
   openLiveBrowser: (chatId: string, role: 'builder' | 'reviewer') => void;
@@ -73,12 +75,14 @@ export const useStore = create<State>((set, get) => ({
   toasts: [],
   newProjectOpen: false,
   newProjectMode: 'chat',
+  newVideoOpen: false,
   projectRuns: {},
   sidebarOpen: false,
   browserRequest: null,
 
   // opening the project dialog dismisses the mobile drawer beneath it
   setNewProjectOpen: (open, mode = 'chat') => set(open ? { newProjectOpen: open, newProjectMode: mode, sidebarOpen: false } : { newProjectOpen: open }),
+  setNewVideoOpen: (open) => set(open ? { newVideoOpen: true, sidebarOpen: false } : { newVideoOpen: false }),
   loadProjectRun: async (id) => {
     try { const { run } = await api.projectRun(id); set((s) => ({ projectRuns: { ...s.projectRuns, [run.id]: run } })); }
     catch { /* ignore */ }

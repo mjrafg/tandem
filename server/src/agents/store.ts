@@ -17,10 +17,11 @@
  * settings.ts lockProviders for the same rule at the role level).
  */
 import { randomUUID } from 'node:crypto';
-import type { AgentProfile, AgentSnapshot, Effort, Provider } from '../../../shared/types';
+import type { AgentKind, AgentProfile, AgentSnapshot, Effort, Provider } from '../../../shared/types';
 import { EFFORTS, MAX_AGENT_PROMPT_CHARS } from '../../../shared/types';
 import { db, kvGet, kvSet } from '../db';
 import { SEED_AGENTS } from './seeds';
+import { VIDEO_AGENTS } from './videoSeeds';
 
 /** V1: Builder execution is Claude Code only — the server, not the UI, enforces it. */
 export const BUILDER_PROVIDER: Provider = 'claude-code';
@@ -69,6 +70,25 @@ CREATE TABLE IF NOT EXISTS chat_agent_snapshots (
 );
 `);
 
+// 'builder' specialists run a session's Builder; 'reviewer' specialists shape its independent Reviewer
+try { db.exec("ALTER TABLE agent_profiles ADD COLUMN kind TEXT NOT NULL DEFAULT 'builder'"); } catch { /* exists */ }
+// a session's Reviewer Agent, frozen at launch exactly like its Builder Agent
+db.exec(`
+CREATE TABLE IF NOT EXISTS chat_reviewer_snapshots (
+  chat_id TEXT PRIMARY KEY REFERENCES chats(id),
+  profile_id TEXT NOT NULL,
+  profile_name TEXT NOT NULL,
+  profile_slug TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  effort TEXT NOT NULL,
+  enforce_model INTEGER NOT NULL DEFAULT 0,
+  system_prompt TEXT NOT NULL,
+  profile_updated_at INTEGER NOT NULL,
+  captured_at INTEGER NOT NULL
+);
+`);
+
 // per-Agent: its model beats a difficulty tier (default off — tiers decide the model)
 try { db.exec('ALTER TABLE agent_profiles ADD COLUMN enforce_model INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE chat_agent_snapshots ADD COLUMN enforce_model INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
@@ -94,6 +114,7 @@ function rowToProfile(r: any): AgentProfile {
     systemPrompt: r.system_prompt, provider: r.provider as Provider,
     model: r.model, effort: r.effort as Effort,
     enforceModel: !!r.enforce_model,
+    kind: (r.kind === 'reviewer' ? 'reviewer' : 'builder') as AgentKind,
     enabled: !!r.enabled, isDefault: !!r.is_default,
     createdAt: r.created_at, updatedAt: r.updated_at,
     archivedAt: r.archived_at ?? null,
@@ -146,6 +167,12 @@ function validatePair(provider: Provider, model: string): void {
   if (owner && owner !== provider) throw new AgentError(`"${model}" is not a model the ${provider} provider can run.`);
 }
 
+function validateKind(kind: unknown): AgentKind {
+  if (kind === undefined || kind === null || kind === '' || kind === 'builder') return 'builder';
+  if (kind === 'reviewer') return 'reviewer';
+  throw new AgentError('An agent is either a "builder" or a "reviewer" agent.');
+}
+
 function validateSlug(slug: unknown, exceptId?: string): string {
   if (slug !== undefined && slug !== null && typeof slug !== 'string') throw new AgentError('Slug must be text.');
   const s = String(slug ?? '').trim().toLowerCase();
@@ -182,14 +209,15 @@ export function getAgent(id: string): AgentProfile | null {
   return r ? rowToProfile(r) : null;
 }
 
-/** Profiles the Director may choose from: enabled and not archived. */
-export function selectableAgents(): AgentProfile[] {
-  return (db.prepare('SELECT * FROM agent_profiles WHERE archived_at IS NULL AND enabled = 1 ORDER BY is_default DESC, name').all() as any[])
+/** Profiles the Director may choose from: enabled and not archived, of one kind. */
+export function selectableAgents(kind: AgentKind = 'builder'): AgentProfile[] {
+  return (db.prepare('SELECT * FROM agent_profiles WHERE archived_at IS NULL AND enabled = 1 AND kind = ? ORDER BY is_default DESC, name').all(kind) as any[])
     .map(rowToProfile);
 }
 
+/** the default is always a Builder Agent — a session without a choice needs a Builder */
 export function defaultAgent(): AgentProfile | null {
-  const r = db.prepare('SELECT * FROM agent_profiles WHERE is_default = 1 AND enabled = 1 AND archived_at IS NULL').get() as any;
+  const r = db.prepare("SELECT * FROM agent_profiles WHERE is_default = 1 AND enabled = 1 AND archived_at IS NULL AND kind = 'builder'").get() as any;
   return r ? rowToProfile(r) : null;
 }
 
@@ -198,6 +226,8 @@ export function defaultAgent(): AgentProfile | null {
 export interface AgentInput {
   slug?: string; name?: string; description?: string; systemPrompt?: string;
   provider?: unknown; model?: string; effort?: string; enabled?: boolean; isDefault?: boolean; enforceModel?: boolean;
+  /** fixed at creation: a Builder Agent never becomes a Reviewer Agent or back */
+  kind?: unknown;
 }
 
 export function createAgent(input: AgentInput): AgentProfile {
@@ -214,15 +244,17 @@ export function createAgent(input: AgentInput): AgentProfile {
     effort: validateEffort(input.effort ?? ''),
     enforceModel: input.enforceModel === true,
     enabled: input.enabled !== false,
+    kind: validateKind(input.kind),
   };
   validatePair(row.provider, row.model);
   const makeDefault = !!input.isDefault;
   if (makeDefault && !row.enabled) throw new AgentError('The default agent must be enabled.');
+  if (makeDefault && row.kind !== 'builder') throw new AgentError('The default agent must be a Builder Agent.');
   db.transaction(() => {
-    db.prepare(`INSERT INTO agent_profiles (id, slug, name, description, system_prompt, provider, model, effort, enforce_model, enabled, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`)
-      .run(row.id, row.slug, row.name, row.description, row.systemPrompt, row.provider, row.model, row.effort, row.enforceModel ? 1 : 0, row.enabled ? 1 : 0, now, now);
-    if (makeDefault || !db.prepare('SELECT id FROM agent_profiles WHERE is_default = 1').get()) promoteDefault(id);
+    db.prepare(`INSERT INTO agent_profiles (id, slug, name, description, system_prompt, provider, model, effort, enforce_model, enabled, is_default, kind, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`)
+      .run(row.id, row.slug, row.name, row.description, row.systemPrompt, row.provider, row.model, row.effort, row.enforceModel ? 1 : 0, row.enabled ? 1 : 0, row.kind, now, now);
+    if (row.kind === 'builder' && (makeDefault || !db.prepare("SELECT id FROM agent_profiles WHERE is_default = 1 AND kind = 'builder'").get())) promoteDefault(id);
   })();
   return getAgent(id)!;
 }
@@ -244,6 +276,7 @@ export function updateAgent(id: string, input: AgentInput): AgentProfile {
   };
   validatePair(next.provider, next.model);
   const wantsDefault = input.isDefault === true;
+  if (wantsDefault && current.kind !== 'builder') throw new AgentError('The default agent must be a Builder Agent.');
   if (current.isDefault && !next.enabled && !wantsDefault) {
     throw new AgentError('This agent is the default — make another enabled agent the default before disabling it.');
   }
@@ -262,6 +295,7 @@ export function setDefaultAgent(id: string): AgentProfile {
   if (!target) throw new AgentError('Agent profile not found.');
   if (target.archivedAt) throw new AgentError('An archived agent cannot be the default.');
   if (!target.enabled) throw new AgentError('The default agent must be enabled — enable it first.');
+  if (target.kind !== 'builder') throw new AgentError('The default agent must be a Builder Agent.');
   db.transaction(() => promoteDefault(id))();
   return getAgent(id)!;
 }
@@ -313,6 +347,7 @@ export function resolveAgentForLaunch(profileId: string | null | undefined): Age
     if (!p) throw new AgentError(`Unknown Builder Agent profile "${profileId}" — choose one from the agent catalog.`);
     if (p.archivedAt) throw new AgentError(`Builder Agent "${p.name}" is archived and can no longer be selected.`);
     if (!p.enabled) throw new AgentError(`Builder Agent "${p.name}" is disabled and can no longer be selected.`);
+    if (p.kind !== 'builder') throw new AgentError(`"${p.name}" is a Reviewer Agent — pass it as reviewer_profile_id, not as the Builder.`);
     validateModel(p.model);
     validateEffort(p.effort);
     if (!canonicalProvider(p.provider)) throw new AgentError(`Builder Agent "${p.name}" is configured for an unknown provider "${p.provider}".`);
@@ -322,6 +357,36 @@ export function resolveAgentForLaunch(profileId: string | null | undefined): Age
   const d = defaultAgent();
   if (!d) throw new AgentError('No enabled default Builder Agent exists — set one in Settings → Builder Agents.');
   return d;
+}
+
+/** a Director-selected Reviewer Agent; none selected = the session's Reviewer runs with no specialist */
+export function resolveReviewerAgentForLaunch(profileId: string | null | undefined): AgentProfile | null {
+  if (!profileId) return null;
+  const p = getAgent(profileId);
+  if (!p) throw new AgentError(`Unknown Reviewer Agent profile "${profileId}" — choose one from the reviewer agent catalog.`);
+  if (p.kind !== 'reviewer') throw new AgentError(`"${p.name}" is a Builder Agent — pass it as agent_profile_id, not as the Reviewer.`);
+  if (p.archivedAt || !p.enabled) throw new AgentError(`Reviewer Agent "${p.name}" is ${p.archivedAt ? 'archived' : 'disabled'} and can no longer be selected.`);
+  validatePair(p.provider, p.model);
+  return p;
+}
+
+export function captureReviewerSnapshot(chatId: string, profile: AgentProfile): AgentSnapshot {
+  const existing = getReviewerSnapshot(chatId);
+  if (existing) return existing;
+  db.prepare(`INSERT INTO chat_reviewer_snapshots (chat_id, profile_id, profile_name, profile_slug, provider, model, effort, enforce_model, system_prompt, profile_updated_at, captured_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(chatId, profile.id, profile.name, profile.slug, profile.provider, profile.model, profile.effort, profile.enforceModel ? 1 : 0, profile.systemPrompt, profile.updatedAt, Date.now());
+  return getReviewerSnapshot(chatId)!;
+}
+
+export function getReviewerSnapshot(chatId: string): AgentSnapshot | null {
+  const r = db.prepare('SELECT * FROM chat_reviewer_snapshots WHERE chat_id = ?').get(chatId) as any;
+  if (!r) return null;
+  return {
+    profileId: r.profile_id, profileName: r.profile_name, profileSlug: r.profile_slug,
+    provider: r.provider as Provider, model: r.model, effort: r.effort as Effort, enforceModel: !!r.enforce_model,
+    systemPrompt: r.system_prompt, profileUpdatedAt: r.profile_updated_at, capturedAt: r.captured_at,
+  };
 }
 
 // ----------------------------------------------------------------- snapshots
@@ -384,7 +449,7 @@ export interface AgentsExport {
   exportedAt: number;
   agents: {
     slug: string; name: string; description: string; systemPrompt: string;
-    provider: Provider; model: string; effort: Effort; enforceModel?: boolean; enabled: boolean; isDefault: boolean;
+    provider: Provider; model: string; effort: Effort; enforceModel?: boolean; enabled: boolean; isDefault: boolean; kind?: AgentKind;
   }[];
 }
 
@@ -401,7 +466,7 @@ export function exportAgents(includeArchived = false): AgentsExport {
     exportedAt: Date.now(),
     agents: listAgents({ includeArchived }).map((a) => ({
       slug: a.slug, name: a.name, description: a.description, systemPrompt: a.systemPrompt,
-      provider: a.provider, model: a.model, effort: a.effort, enforceModel: a.enforceModel, enabled: a.enabled, isDefault: a.isDefault,
+      provider: a.provider, model: a.model, effort: a.effort, enforceModel: a.enforceModel, enabled: a.enabled, isDefault: a.isDefault, kind: a.kind,
     })),
   };
 }
@@ -444,10 +509,12 @@ export function importAgents(data: unknown): AgentsImportResult {
         effort: entry.effort,
         enforceModel: entry.enforceModel === true || entry.enforce_model === true,
         enabled: entry.enabled !== false,
+        kind: entry.kind,
       };
       const existing = db.prepare('SELECT id FROM agent_profiles WHERE slug = ? AND archived_at IS NULL').get(slug) as any;
       if (existing) {
-        updateAgent(existing.id, input);
+        const { kind: _kind, ...rest } = input; // a kind is fixed at creation
+        updateAgent(existing.id, rest);
         result.updated.push(slug);
       } else {
         createAgent(input);
@@ -492,4 +559,26 @@ export function seedAgents(): void {
     console.log(`[tandem] seeded ${SEED_AGENTS.length} Builder Agent profiles`);
   }
   kvSet('agent_profiles_seeded', true);
+}
+
+/**
+ * The video-production specialists, added ONCE to installations that already
+ * had their agents seeded — and never re-added after an admin deletes one.
+ * A slug already in use is left alone.
+ */
+export function seedVideoAgents(): void {
+  if (kvGet<boolean>('agents.video_seeded')) return;
+  let added = 0;
+  db.transaction(() => {
+    for (const seed of VIDEO_AGENTS) {
+      if (db.prepare('SELECT id FROM agent_profiles WHERE slug = ? AND archived_at IS NULL').get(seed.slug)) continue;
+      createAgent({
+        slug: seed.slug, name: seed.name, description: seed.description, systemPrompt: seed.systemPrompt,
+        provider: seed.provider, model: seed.model, effort: seed.effort, kind: seed.kind, enabled: true,
+      });
+      added++;
+    }
+  })();
+  if (added) console.log(`[tandem] added ${added} video-production agent profiles`);
+  kvSet('agents.video_seeded', true);
 }

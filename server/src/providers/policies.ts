@@ -23,6 +23,7 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
     directorTools: false,
     shareFiles: true,
     imageTools: true,
+    channelTools: true,
   },
   // the last repair round — Builder authority, different prompt semantics
   final_repair: {
@@ -33,6 +34,7 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
     directorTools: false,
     shareFiles: true,
     imageTools: true,
+    channelTools: true,
   },
   // judges the result: inspects everything, changes nothing, and never gets
   // the Builder's app-state tools (which is what keeps a review independent)
@@ -44,6 +46,7 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
     directorTools: false,
     shareFiles: true,
     imageTools: false,
+    channelTools: true,
   },
   // judges the Director's decisions: the same read-only posture
   director_reviewer: {
@@ -54,6 +57,7 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
     directorTools: false,
     shareFiles: true,
     imageTools: false,
+    channelTools: true,
   },
   // the historical generic reviewer — identical to builder_reviewer; kept so a
   // recorded role can still be looked up, never resolved for new work
@@ -65,6 +69,7 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
     directorTools: false,
     shareFiles: true,
     imageTools: false,
+    channelTools: true,
   },
   // decides a Builder/Reviewer disagreement: reads the repository to weigh
   // evidence, changes nothing, orchestrates nothing
@@ -76,6 +81,7 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
     directorTools: false,
     shareFiles: false,
     imageTools: false,
+    channelTools: false,
   },
   // orchestrates: reads the repository, drives sessions through its own tools
   director: {
@@ -86,6 +92,7 @@ const POLICIES: Record<AiRole, RoleExecutionPolicy> = {
     directorTools: true,
     shareFiles: true,
     imageTools: false,
+    channelTools: true,
   },
 };
 

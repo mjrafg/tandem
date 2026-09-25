@@ -20,7 +20,11 @@ import path from 'node:path';
 import type { AppSettings, ImageGenConfig } from '../../shared/types';
 import { config } from './config';
 import { db, getChat } from './db';
-import { DeliverableError, shareBytes, type Deliverable } from './deliverables';
+import { DeliverableError, deliverablePath, getDeliverable, shareBytes, type Deliverable } from './deliverables';
+import type { MediaAsset } from '../../shared/types';
+import { imageSpendGate, recordPaidOp } from './video/gates';
+import { VideoError, assetFilePath, getAsset, videoProjectForChat, visibleAssetIds } from './video/store';
+import { addAssets } from './video/tools';
 import { credentialSecret } from './integrations/store';
 import { BrowseError, cleanRel, projectRoot } from './repoBrowse';
 
@@ -30,6 +34,8 @@ export interface ImageRequest {
   prompt: string;
   shape: ImageShape;
   transparent: boolean;
+  /** reference images (absolute paths) that condition identity or style */
+  references?: string[];
 }
 
 export interface GeneratedImage {
@@ -86,6 +92,7 @@ function codexInstruction(req: ImageRequest): string {
     'Follow the specification faithfully; do not add subjects, text or branding it does not ask for.',
     shape,
     req.transparent ? 'Background: genuinely transparent (preserve the alpha channel).' : '',
+    req.references?.length ? `${req.references.length === 1 ? 'The attached image is a REFERENCE' : `The ${req.references.length} attached images are REFERENCES, in the order the specification names them`}: keep the identity, design, proportions, colours and rendering style they show exactly, and change only what the specification asks for.` : '',
     '',
     'Specification:',
     req.prompt,
@@ -98,7 +105,10 @@ async function generateWithCodex(req: ImageRequest, cfg: ImageGenConfig): Promis
   const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only'];
   if (cfg.model) args.push('-m', cfg.model);
   // the image tool does the work; the model only has to call it once
-  args.push('-c', 'model_reasoning_effort="low"', codexInstruction(req));
+  args.push('-c', 'model_reasoning_effort="low"');
+  // -i takes several files and would swallow the prompt: -- ends the list
+  for (const ref of req.references ?? []) args.push('-i', ref);
+  args.push('--', codexInstruction(req));
 
   let threadId = '';
   let lastText = '';
@@ -184,13 +194,23 @@ async function generateWithOpenAI(req: ImageRequest, cfg: ImageGenConfig): Promi
   const base = (process.env.TANDEM_OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
   let res: Response;
   try {
-    res = await fetch(`${base}/images/generations`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS),
-    });
+    if (req.references?.length) {
+      // references go to the edits endpoint, which conditions on several images
+      if (dalle) throw new DeliverableError(400, `${model} cannot use reference images; choose a gpt-image model in Admin → Image generation.`);
+      const form = new FormData();
+      for (const [k, v] of Object.entries(body)) if (k !== 'n' && v !== undefined) form.append(k, String(v));
+      for (const ref of req.references) form.append('image[]', new Blob([new Uint8Array(fs.readFileSync(ref))], { type: 'image/png' }), path.basename(ref));
+      res = await fetch(`${base}/images/edits`, { method: 'POST', headers: { authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS) });
+    } else {
+      res = await fetch(`${base}/images/generations`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS),
+      });
+    }
   } catch (err) {
+    if (err instanceof DeliverableError) throw err;
     const reason = (err as Error).name === 'TimeoutError' ? 'it took too long' : (err as Error).message;
     throw new DeliverableError(502, `The OpenAI Images API could not be reached (${reason}).`);
   }
@@ -277,6 +297,12 @@ export interface ImageToolResult {
   deliverable: Deliverable;
   image: GeneratedImage;
   savedTo: string;
+  /** the searchable asset it was registered as, if asked */
+  asset?: MediaAsset;
+  /** an identical earlier generation in this video project was returned instead */
+  reused?: boolean;
+  /** what it was charged to the video budget */
+  costUsd?: number;
 }
 
 export async function generateForChat(opts: {
@@ -288,6 +314,10 @@ export async function generateForChat(opts: {
   saveTo?: unknown;
   note?: unknown;
   workdir?: unknown;
+  referenceAssetIds?: unknown;
+  register?: unknown;
+  variant?: unknown;
+  role?: string;
   settings: AppSettings;
 }): Promise<ImageToolResult> {
   if (!opts.settings.imageGeneration.enabled) throw new DeliverableError(403, 'Image generation is turned off in Admin → Image generation.');
@@ -297,6 +327,36 @@ export async function generateForChat(opts: {
   if (prompt.length > MAX_PROMPT_CHARS) throw new DeliverableError(400, `The prompt is ${prompt.length} characters; keep it under ${MAX_PROMPT_CHARS}.`);
   const shape: ImageShape = ['square', 'landscape', 'portrait', 'auto'].includes(String(opts.shape)) ? opts.shape as ImageShape : 'auto';
   const saveTo = typeof opts.saveTo === 'string' && opts.saveTo.trim() ? opts.saveTo.trim() : '';
+
+  // reference assets: images this chat can see (in a video project, only its pinned channel version and its own)
+  const refIds = Array.isArray(opts.referenceAssetIds) ? [...new Set(opts.referenceAssetIds.map(String))].slice(0, 8) : [];
+  const video = videoProjectForChat(opts.chatId);
+  const visible = video ? visibleAssetIds({ channelId: video.channelId, version: video.channelVersion, runId: video.runId }) : null;
+  const references = refIds.map((id) => {
+    const a = getAsset(id);
+    if (!a || (visible && !visible.has(id))) throw new DeliverableError(404, `Reference asset ${id} is not available here${video ? ` (channel version ${video.channelVersion} or this project)` : ''}. Find ids with asset_search.`);
+    if (!a.mime.startsWith('image/')) throw new DeliverableError(400, `Reference ${id} is ${a.mime}, not an image.`);
+    return assetFilePath(a);
+  });
+
+  // a video project pays only after approval, within budget, and never twice for the same request
+  const provider = opts.settings.imageGeneration.provider;
+  const costUsd = opts.settings.video.rates.imageUsd[provider];
+  const gate = imageSpendGate(opts.chatId, costUsd, [provider, opts.settings.imageGeneration.model, prompt, shape, opts.transparent === true, [...refIds].sort(), String(opts.variant ?? ''), saveTo]);
+  if (gate?.refusal) throw new DeliverableError(402, gate.refusal);
+  if (gate?.cached) {
+    const earlier = JSON.parse(gate.cached) as { deliverableId: string; assetId?: string };
+    const deliverable = getDeliverable(earlier.deliverableId);
+    if (deliverable) {
+      const bytes = fs.readFileSync(deliverablePath(deliverable));
+      const kind = sniff(bytes)!;
+      return {
+        deliverable, savedTo: deliverable.sourcePath, reused: true, costUsd: 0,
+        image: { bytes, ...kind, provider, model: opts.settings.imageGeneration.model || 'Codex default' },
+        ...(earlier.assetId && getAsset(earlier.assetId) ? { asset: getAsset(earlier.assetId)! } : {}),
+      };
+    }
+  }
 
   // refuse a bad destination BEFORE spending a generation on it
   const dir = saveTo ? workingDir(opts.chatId, opts.workdir) : '';
@@ -314,7 +374,7 @@ export async function generateForChat(opts: {
     }
   }
 
-  const image = await generateImage({ prompt, shape, transparent: opts.transparent === true }, opts.settings);
+  const image = await generateImage({ prompt, shape, transparent: opts.transparent === true, references }, opts.settings);
   let savedTo = '';
   if (saveTo) {
     savedTo = saveInto(dir, saveTo, image.ext);
@@ -324,5 +384,28 @@ export async function generateForChat(opts: {
     ? withExt(opts.name.trim(), image.ext)
     : savedTo ? path.posix.basename(savedTo) : nameFromPrompt(prompt, image.ext);
   const deliverable = shareBytes(opts.chatId, image.bytes, { name, note: opts.note, sourcePath: savedTo });
-  return { deliverable, image, savedTo };
+
+  // register it as a searchable asset (project-scoped in a video project, else the named channel's)
+  let asset: MediaAsset | undefined;
+  if (opts.register && typeof opts.register === 'object') {
+    const r = opts.register as Record<string, unknown>;
+    try {
+      asset = addAssets(opts.chatId, opts.role ?? 'builder', [{ ...r, name: r.name ?? name }], {
+        channel: r.channel, bytes: { bytes: image.bytes, ext: image.ext },
+        defaultProvenance: { source: 'generated', provider: image.provider, model: image.model, prompt, references: refIds, deliverableId: deliverable.id },
+      }).assets[0];
+    } catch (err) {
+      // the image exists and the user can see it; say why it is not in the library
+      if (err instanceof VideoError) throw new DeliverableError(err.status, `The image was generated (it is in the chat) but not registered as an asset: ${err.message}`);
+      throw err;
+    }
+  }
+  if (gate) {
+    recordPaidOp({
+      runId: gate.video.runId, chatId: opts.chatId, key: gate.key, category: 'images',
+      label: `${image.provider} image: ${prompt.slice(0, 120)}`, costUsd,
+      result: JSON.stringify({ deliverableId: deliverable.id, assetId: asset?.id }),
+    });
+  }
+  return { deliverable, image, savedTo, ...(asset ? { asset } : {}), ...(gate ? { costUsd } : {}) };
 }

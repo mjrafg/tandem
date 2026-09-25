@@ -26,8 +26,10 @@ import { type ProviderOutage, classifyProviderOutage, fmtRetryAt, getPendingRevi
 import { expediteWake, getPendingWake, providerWaitActive, upsertPendingWake } from './pendingWake';
 import { terminateProcGroup } from '../engine/procGroups';
 import { agentCatalogText } from '../agents/catalog';
+import { directorVideoText } from '../video/tools';
+import { getVideoProject } from '../video/store';
 import { signalSessionState } from '../observability/signals';
-import { AgentError, captureAgentSnapshot, getAgent, getAgentSnapshot, resolveAgentForLaunch } from '../agents/store';
+import { AgentError, captureAgentSnapshot, getAgent, getAgentSnapshot, resolveAgentForLaunch, resolveReviewerAgentForLaunch, captureReviewerSnapshot } from '../agents/store';
 import {
   addActivity, broadcastRun, bumpAutoResumeStreak, canonicalSessionTitle, createRun, depsSatisfied,
   getRun, getRunRaw, getSession, listRuns, milestoneByKey, milestoneDepsOpen, openMilestones,
@@ -54,6 +56,12 @@ const REVIEW_TIMEOUT = 15 * 60_000;
 const DEFAULT_SESSION_TIMEOUT_MIN = 30;
 const MAX_SESSION_TIMEOUT_MIN = 90;
 const POLL_MS = 5_000;
+
+/** a video project's Director gets its production rules and the channel state, every turn */
+function videoDirectorSections(runId: string): string[] {
+  if (!getVideoProject(runId)) return [];
+  return [getPrompt('director.video_guidance'), `# This video project\n${directorVideoText(runId)}`];
+}
 
 // ---------------------------------------------------------------- run creation
 
@@ -361,7 +369,7 @@ async function runDirectorTurn(runId: string, message: string): Promise<TurnResu
       // the Agent catalog is rebuilt from the database for EVERY turn and rides
       // on the role prompt, so admin changes reach the very next planning
       // decision and never linger in conversation history
-      systemPrompt: `${directorSystemText(settings)}\n\n${agentCatalogText()}`,
+      systemPrompt: [directorSystemText(settings), agentCatalogText(), ...videoDirectorSections(runId)].join('\n\n'),
       userPrompt: `${state}\n\n${message}`,
       cwd: project.rootPath,
       session: storedSessionRef(chat.id),
@@ -839,6 +847,7 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   // profile that is unknown, archived, disabled or misconfigured fails the
   // launch loudly instead of being silently swapped for another agent
   const agent = resolveAgentForLaunch(session.agentProfileId);
+  const reviewerAgent = resolveReviewerAgentForLaunch(session.reviewerProfileId);
 
   const rootProject = getProject(run.projectId)!;
   let cwd = rootProject.rootPath;
@@ -909,6 +918,8 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   // a restart) reads this snapshot, so editing the profile template afterwards
   // can never change what this session runs
   const snapshot = captureAgentSnapshot(chatId, agent);
+  // the Reviewer Agent is frozen the same way, for every review of this chat
+  const reviewerSnap = reviewerAgent ? captureReviewerSnapshot(chatId, reviewerAgent) : null;
   broadcastChat(chatId);
 
   // pre-seed the chat's persistent Git policy so its checkpoints land on the
@@ -928,7 +939,7 @@ export async function launchSession(runId: string, key: string, timeoutMin?: num
   patchSession(runId, key, { chatId, cwd, status: 'running', startedAt: Date.now(), stopReason: null });
   resetStallStreak(runId); // work is running: the watchdog's count starts fresh
   // identity only — the full prompt stays in the snapshot, never in the feed
-  addActivity(runId, 'session', `${key} ${session.name} started · agent: ${snapshot.profileName} (${snapshot.model} · ${snapshot.effort})`, `chat ${chatId}`);
+  addActivity(runId, 'session', `${key} ${session.name} started · agent: ${snapshot.profileName} (${snapshot.model} · ${snapshot.effort})${reviewerSnap ? ` · reviewer agent: ${reviewerSnap.profileName}` : ''}`, `chat ${chatId}`);
   refreshLiveBlock(runId);
   ensurePoller(runId);
 
@@ -1782,6 +1793,7 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
           dependsOn: Array.isArray(s.depends_on) ? s.depends_on.map(String) : [],
           isolated: !!s.isolated,
           agentProfileId: s.agent_profile_id ? String(s.agent_profile_id) : null,
+          reviewerProfileId: s.reviewer_profile_id ? String(s.reviewer_profile_id) : null,
           ...(DIFFICULTY_ROUTING_ENABLED
             ? { difficulty: ((DIFFICULTIES as string[]).includes(String(s.difficulty ?? '')) ? String(s.difficulty) : 'medium') as Difficulty }
             : {}),
@@ -1797,8 +1809,10 @@ export async function handleDirectorTool(chatId: string, op: string, args: Recor
         // an explicitly chosen agent is validated NOW, so a bad id is a planning
         // error the Director can fix — never a silent substitution at launch
         for (const s of sessions) {
-          if (!s.agentProfileId) continue;
-          try { resolveAgentForLaunch(s.agentProfileId); } catch (err) {
+          try {
+            if (s.agentProfileId) resolveAgentForLaunch(s.agentProfileId);
+            resolveReviewerAgentForLaunch(s.reviewerProfileId);
+          } catch (err) {
             return { ok: false, error: `Session ${s.key}: ${err instanceof Error ? err.message : String(err)}` };
           }
         }

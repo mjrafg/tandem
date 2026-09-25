@@ -169,6 +169,11 @@ function AgentRow({ agent, busy, onToggle, onToggleEnforce, onDefault, onArchive
               <Star size={10} /> Default
             </span>
           )}
+          {agent.kind === 'reviewer' && (
+            <span className="shrink-0 rounded bg-reviewer/15 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-reviewer" title="Specializes a session's independent review">
+              Reviewer agent
+            </span>
+          )}
           {agent.enforceModel && (
             <span className="inline-flex shrink-0 items-center gap-1 rounded bg-bg3 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-mut" title="Runs on its own model, whatever the Builder role is set to">
               <Lock size={10} /> Own model
@@ -186,13 +191,13 @@ function AgentRow({ agent, busy, onToggle, onToggleEnforce, onDefault, onArchive
               <span className="mono text-mut">{agent.effort}</span>
             </>
           ) : (
-            <span className="text-dim">follows the Builder role&apos;s model</span>
+            <span className="text-dim">follows the {agent.kind === 'reviewer' ? 'Builder Reviewer' : 'Builder'} role&apos;s model</span>
           )}
         </div>
       </Link>
       <div className="flex items-center gap-1 border-t border-linesoft px-2.5 py-1.5">
         {busy && <Spinner size={13} />}
-        {!agent.isDefault && (
+        {!agent.isDefault && agent.kind !== 'reviewer' && (
           <button className="btn-ghost gap-1.5 text-[12px]" disabled={busy || !agent.enabled} title={agent.enabled ? 'Make this the default agent' : 'Enable the agent first'} onClick={onDefault}>
             <Star size={13} /> Set default
           </button>

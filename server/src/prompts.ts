@@ -596,6 +596,31 @@ export const PROMPT_DEFS: PromptDef[] = [
     default: 'When the user asks you for a file — a brief, a plan, a status report, a summary of what was delivered — hand it over with the tandem_share_file tool: pass the text as `content` with a `name` (e.g. "status.md"), or share an existing repository file by `path`. The chat then shows a download card. This writes nothing into the project, so it stays within your read-only boundary; a file you only mention is one the user does not have.',
   },
   {
+    key: 'director.video_guidance',
+    name: 'Director — video projects',
+    description: 'Added to the Director\'s instructions in a VIDEO project: channel pinning, the production invariants and the cost strategy.',
+    group: 'director',
+    roles: ['director'],
+    default: [
+      '# Directing a video project',
+      'This project produces a video on a Channel — a reusable creative identity (Style Bible, canonical characters, locations, props, reference and production assets) shared by many videos. The project is pinned to one channel version (below). You orchestrate exactly as for any project: your own milestones and sessions, chosen per video — there is no fixed template. The video specialists are normal Builder Agents (Storyteller, Visual Director, Video Producer) and a Reviewer Agent (Video Reviewer) for reviewing video work; assign them where they fit.',
+      '',
+      'Rules Tandem enforces in code (you cannot bypass them, so plan with them):',
+      '- No paid generation — production images, narration/TTS, other paid APIs — before the user approves the production plan and its cost. You request that with video_request_production_approval once story, script and plan are settled; the user decides in the chat. Spending beyond the approved budget is refused: request a new estimate instead of working around it.',
+      '- Narration before visual timing: animation keyframes and final renders are refused until the final narration is produced and locked with its real timing (video_lock_narration).',
+      '- An identical paid request in this project returns its earlier result instead of paying again.',
+      '- The Video Engine only accepts production assets; a reference sheet is never a layer.',
+      '- New assets belong to this project. The channel gains one only through asset_promote, which the user approves.',
+      '- The project stays on its channel version; video_upgrade_channel asks the user to move it.',
+      '',
+      'The usual shape, adapted to each video: research → story → script → review → a production plan with a REUSE ANALYSIS (which existing channel/project assets cover which moments, the few new images still needed and why, narration length) → user approval → production narration → narration timing → visual timing → scene animation → review → local render.',
+      '',
+      'Cost is a core requirement. Scene count is not image count: many moments can share a few assets through camera moves, crops, scale, masks, layering and character states. Prefer existing assets over new generation, an existing character with new animation over a new character image, the same environment recomposed over a new environment, and engine transforms over paid generation whenever the result stays good. Rendering is local and free; never plan dedicated AI video generation as the default. Do not spend while the story or script is still changing, and generate narration only after the script is locked (segmented, so a later fix regenerates one segment).',
+      '',
+      'Sessions receive a compact channel summary automatically and fetch details with the tandem_channel tools; you do not need to paste the channel into their prompts. State in each session prompt which entities and existing assets it should use, and — for sessions before approval — that they must not generate paid media.',
+    ].join('\n'),
+  },
+  {
     key: 'director.arbitration_base',
     name: 'Director — arbitration instructions',
     description: 'System text for the Director when it decides findings the Builder rejected or escalated.',
@@ -948,6 +973,8 @@ export function builderSystemText(
    * review lifecycle) come from the sections around it and stay authoritative.
    */
   agentPrompt?: string,
+  /** situational sections — e.g. a video project's compact channel context */
+  sections: string[] = [],
 ): string {
   const parts = [getPrompt('builder.base')];
   if (role === 'final_repair') parts.push(getPrompt('repair.final_base'));
@@ -965,17 +992,26 @@ export function builderSystemText(
     getPrompt('builder.deploy_guardrail'),
   ].join('\n'));
   if (gitWorkflow) parts.push(renderPrompt('builder.git_workflow', { git_workflow: gitWorkflow }));
+  parts.push(...sections.filter((x) => x.trim()));
   return parts.join('\n\n');
 }
 
 /** System text for one of the two reviewer roles — each with its own base and its own Admin instructions. */
-export function reviewerSystemText(settings: AppSettings, role: 'builder_reviewer' | 'director_reviewer' = 'builder_reviewer'): string {
+export function reviewerSystemText(
+  settings: AppSettings,
+  role: 'builder_reviewer' | 'director_reviewer' = 'builder_reviewer',
+  /** a session's Reviewer Agent specialization, if one was selected */
+  agentPrompt?: string,
+  extra: string[] = [],
+): string {
   const parts = [getPrompt(role === 'director_reviewer' ? 'director_reviewer.base' : 'reviewer.base')];
+  if (agentPrompt?.trim()) parts.push(`# Your specialist review profile\n\n${agentPrompt.trim()}`);
   if (settings.sharedInstructions.trim()) parts.push(settings.sharedInstructions.trim());
   const own = settings.roles[role]?.instructions?.trim();
   if (own) parts.push(own);
   parts.push(...skillTexts('reviewer'));
   parts.push([getPrompt('reviewer.browser_guidance'), getPrompt('reviewer.deliverables_guidance'), getPrompt('reviewer.network_guidance')].join('\n'));
+  parts.push(...extra.filter((x) => x.trim()));
   return parts.join('\n\n');
 }
 

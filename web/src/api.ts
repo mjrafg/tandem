@@ -4,6 +4,7 @@ import type { Difficulty,
   BrowserInputAction, DirListing, GitStatus, Integration, RepoBranches, RepoChangeScope, RepoChanges, RepoFile, RepoLog, RepoResolved, RepoTree, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
   AuthProvider, LoginState, ProviderStatus, StoredTokenMeta,
   Effort, Provider, ProviderDescriptor, ProviderHealth,
+  Channel, ChannelDetail, ChannelVersion, VideoProject,
 } from '@shared/types';
 
 export class ApiError extends Error {
@@ -152,6 +153,16 @@ export const api = {
   // project director
   createProjectRun: (dirPath: string) =>
     j<{ run: ProjectRun; chat: Chat }>('/api/project-runs', { method: 'POST', body: JSON.stringify({ dirPath }) }),
+  // channels & video projects
+  channels: () => j<(Channel & { description: string; entityCount: number; assetCount: number })[]>('/api/channels'),
+  channel: (id: string, version?: number) => j<ChannelDetail>(`/api/channels/${encodeURIComponent(id)}${version ? `?version=${version}` : ''}`),
+  createChannel: (name: string, description: string) => j<{ channel: Channel }>('/api/channels', { method: 'POST', body: JSON.stringify({ name, description }) }),
+  updateChannel: (id: string, patch: { expectedVersion?: number; name?: string; description?: string; styleBible?: { summary?: string; sections?: Record<string, string | null> }; note?: string }) =>
+    j<{ version: ChannelVersion; changes: string[] }>(`/api/channels/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  createVideoProject: (channelId: string, version?: number) =>
+    j<{ run: ProjectRun; chat: Chat; video: VideoProject }>('/api/video-projects', { method: 'POST', body: JSON.stringify({ channelId, version }) }),
+  videoProject: (runId: string) => j<{ video: VideoProject; costs: { category: string; count: number; usd: number }[] }>(`/api/video-projects/${runId}`),
+  decideApproval: (id: string, decision: 'approve' | 'decline') => j<{ ok: true }>(`/api/approvals/${id}/decide`, { method: 'POST', body: JSON.stringify({ decision }) }),
   projectRun: (id: string) => j<{ run: ProjectRun; activity: PdActivity[] }>(`/api/project-runs/${id}`),
   pauseProjectRun: (id: string) => j<{ ok: true; run: ProjectRun }>(`/api/project-runs/${id}/pause`, { method: 'POST' }),
   resumeProjectRun: (id: string) => j<{ ok: true; run: ProjectRun }>(`/api/project-runs/${id}/resume`, { method: 'POST' }),

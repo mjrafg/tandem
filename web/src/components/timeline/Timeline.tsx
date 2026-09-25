@@ -4,6 +4,7 @@ import { fmtBytes, fmtTime } from '../../lib/format';
 import { attachmentIcon } from '../Composer';
 import { Markdown } from '../Markdown';
 import { FileOutputRow } from './FileOutputRow';
+import { ApprovalRow } from './ApprovalRow';
 import {
   AiCallRow, BrowserGroupRow, ChangeGroupRow, CheckpointRow, CommandGroupRow, CompactionRow, ErrorRow, FindingsRow, ReadGroupRow, RunMarker, SearchGroupRow, SessionsRow, StatusLine, ToolCallRow, DispositionsRow, ArbitrationRow } from './rows';
 
@@ -64,6 +65,7 @@ export const Timeline = memo(function Timeline({ events }: { events: ChatEvent[]
           case 'tool_call': return <ToolCallRow key={item.key} ev={ev} />;
           case 'sessions': return <SessionsRow key={item.key} ev={ev} />;
           case 'file_output': return <FileOutputRow key={item.key} ev={ev} />;
+          case 'approval': return <ApprovalRow key={item.key} ev={ev} />;
           case 'error': return <ErrorRow key={item.key} ev={ev} />;
           case 'run': return <RunMarker key={item.key} ev={ev} />;
           default: return null;

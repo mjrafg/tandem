@@ -15,8 +15,12 @@ if (mode === 'fail') { out({ type: 'error', message: 'usage limit reached' }); o
 if (mode === 'ok') {
   const dir = path.join(process.env.CODEX_HOME, 'generated_images', thread);
   fs.mkdirSync(dir, { recursive: true });
-  // a real 1x1 PNG
-  fs.writeFileSync(path.join(dir, 'exec-1.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'));
+  // a real 1x1 PNG; the prompt rides after IEND (readers ignore it) so
+  // different requests produce different bytes, as a real generator would
+  fs.writeFileSync(path.join(dir, 'exec-1.png'), Buffer.concat([
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'),
+    Buffer.from(args.at(-1) || ''),
+  ]));
 }
 out({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: mode === 'noimage' ? 'I cannot generate that image.' : 'Done.' } });
 out({ type: 'turn.completed', usage: {} });

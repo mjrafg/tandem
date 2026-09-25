@@ -1,7 +1,7 @@
 import { ArrowLeft, Check } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { AgentProfile, Effort, Provider } from '@shared/types';
+import type { AgentKind, AgentProfile, Effort, Provider } from '@shared/types';
 import { EFFORTS, MAX_AGENT_PROMPT_CHARS } from '@shared/types';
 import { descriptorFor, modelForProvider, providerOptions, useProviders } from '../useProviders';
 import { api } from '../../../api';
@@ -11,6 +11,7 @@ import { Field, SelectBox, Spinner, Toggle } from '../../ui';
 const BLANK = {
   name: '', slug: '', description: '', systemPrompt: '',
   provider: 'claude-code' as Provider, model: 'claude-sonnet-5', effort: 'high' as Effort, enforceModel: false, enabled: true,
+  kind: 'builder' as AgentKind,
 };
 
 /**
@@ -53,6 +54,7 @@ export function AgentEditorPage() {
           setDraftLocal({
             name: found.name, slug: found.slug, description: found.description,
             systemPrompt: found.systemPrompt, provider: found.provider, model: found.model, effort: found.effort, enforceModel: found.enforceModel, enabled: found.enabled,
+            kind: found.kind ?? 'builder',
           });
         }
       })
@@ -88,7 +90,8 @@ export function AgentEditorPage() {
     setSaving(true);
     setError(null);
     try {
-      const payload = { ...draft, slug };
+      // a kind is fixed at creation; the server ignores it on update
+      const payload = isNew ? { ...draft, slug } : (({ kind: _k, ...rest }) => ({ ...rest, slug }))(draft);
       if (isNew) await api.createAgent(payload);
       else await api.updateAgent(agentId!, payload);
       toast(isNew ? `${draft.name} created` : `${draft.name} saved`);
@@ -126,7 +129,7 @@ export function AgentEditorPage() {
       <div className="mb-4 flex items-center gap-2">
         <button className="btn-ghost -ml-2 gap-1.5 px-2 text-[12.5px]" onClick={back}><ArrowLeft size={15} /> Builder Agents</button>
       </div>
-      <h1 className="mb-4 text-[16px] font-semibold">{isNew ? 'New Builder Agent' : agent?.name ?? 'Agent'}</h1>
+      <h1 className="mb-4 text-[16px] font-semibold">{isNew ? 'New agent' : agent?.name ?? 'Agent'}</h1>
 
       {error && <div className="card mb-3 border-err/40 px-4 py-3 text-[12.5px] text-err">{error}</div>}
 
@@ -144,6 +147,23 @@ export function AgentEditorPage() {
                 placeholder="database"
                 onChange={(e) => { setSlugTouched(true); set({ slug: e.target.value }); }}
               />
+            </Field>
+          </div>
+          <div className="mt-3">
+            <Field label="Kind" hint={isNew ? 'fixed once created' : undefined}>
+              {isNew ? (
+                <SelectBox
+                  ariaLabel="Agent kind"
+                  value={draft.kind}
+                  onChange={(v) => set({ kind: v as AgentKind })}
+                  options={[
+                    { value: 'builder', label: 'Builder Agent — does a session\'s work' },
+                    { value: 'reviewer', label: 'Reviewer Agent — specializes a session\'s independent review' },
+                  ]}
+                />
+              ) : (
+                <div className="text-[13px] text-mut">{draft.kind === 'reviewer' ? 'Reviewer Agent — its prompt specializes the independent Reviewer of the sessions it is assigned to; it never gains write access.' : 'Builder Agent'}</div>
+              )}
             </Field>
           </div>
           <div className="mt-3">

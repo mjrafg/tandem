@@ -1,4 +1,4 @@
-import { Boxes, Check, LogOut, MoreHorizontal, Pencil, Plus, Settings, Trash2, X } from 'lucide-react';
+import { Boxes, Check, Clapperboard, Library, LogOut, MoreHorizontal, Pencil, Plus, Settings, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Chat, Project } from '@shared/types';
@@ -11,6 +11,7 @@ export function Sidebar() {
   const projects = useStore((s) => s.projects);
   const chats = useStore((s) => s.chats);
   const setNewProjectOpen = useStore((s) => s.setNewProjectOpen);
+  const setNewVideoOpen = useStore((s) => s.setNewVideoOpen);
 
   const groups = projects
     .filter((p) => !p.hidden)
@@ -42,6 +43,18 @@ export function Sidebar() {
           <Boxes size={15} />
           New project
         </button>
+        <div className="flex gap-1.5">
+          <button
+            className="btn-outline flex-1 justify-start gap-2 border-dashed py-[7px] text-mut hover:text-ink"
+            onClick={() => setNewVideoOpen(true)}
+          >
+            <Clapperboard size={15} />
+            New video
+          </button>
+          <Link to="/channels" className="btn-outline justify-center border-dashed px-2.5 py-[7px] text-mut hover:text-ink" title="Channels" aria-label="Channels">
+            <Library size={15} />
+          </Link>
+        </div>
         <button
           className="btn-outline w-full justify-start gap-2 border-dashed py-[7px] text-mut hover:text-ink"
           onClick={() => setNewProjectOpen(true, 'chat')}

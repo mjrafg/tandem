@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
+import { getSettings } from '../settings';
+import { ENGINE_LIBRARY, PRODUCTION_DIR } from '../video/store';
 import type { Integration, McpIntegrationConfig } from '../../../shared/types';
 import { credentialSecret } from './store';
 import { OAuthRequiredError, oauthAccessToken, parseWwwAuthenticate } from './oauth';
@@ -235,6 +238,13 @@ function connect(integration: Integration): Conn {
     conn = new HttpConn(cfg.url, headers, auth);
   } else {
     const env: Record<string, string> = cred?.type === 'env_set' ? JSON.parse(cred.data.envJson) : {};
+    if (integration.slug === getSettings().video.engineIntegration) {
+      // the Video Engine reads Tandem's PRODUCTION assets as its read-only
+      // "tandem" library; reference assets live elsewhere and are never offered
+      fs.mkdirSync(PRODUCTION_DIR, { recursive: true });
+      const own = env.VIDEO_ENGINE_LIBRARIES ?? cfg.env?.VIDEO_ENGINE_LIBRARIES ?? '';
+      env.VIDEO_ENGINE_LIBRARIES = [own, `${ENGINE_LIBRARY}=${PRODUCTION_DIR}`].filter(Boolean).join(';');
+    }
     conn = new StdioConn(cfg, env);
   }
   pool.set(key, conn);

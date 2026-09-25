@@ -13,8 +13,9 @@ import { registerRepoBrowseRoutes } from './repoBrowse';
 import { registerBrowserLiveRoutes } from './engine/browserLive';
 import { registerIntegrationRoutes } from './integrationRoutes';
 import { registerAgentRoutes } from './agents/routes';
+import { registerVideoRoutes } from './video/routes';
 import { registerObservabilityRoutes } from './observability/routes';
-import { seedAgents } from './agents/store';
+import { seedAgents, seedVideoAgents } from './agents/store';
 import { getSettings, migrateContextDefaults, migrateReviewerSplit } from './settings';
 import { resolveDirectorRoleConfig } from './providers/resolve';
 import { getChat } from './db';
@@ -95,6 +96,7 @@ async function main(): Promise<void> {
   ensureUser();
   seedIfEmpty();
   seedAgents(); // once per installation; admin edits/deletions are never overwritten
+  seedVideoAgents(); // the video specialists, once — also for installations seeded earlier
   migrateContextDefaults();
   migrateReviewerSplit(); // once: the compaction trigger became reachable
   // repair chat rows first: this only touches the database, and everything
@@ -137,6 +139,7 @@ const app = Fastify({
 
   registerRoutes(app);
   registerIntegrationRoutes(app);
+  registerVideoRoutes(app);
   registerProjectRoutes(app);
   registerRepoBrowseRoutes(app);
   registerBrowserLiveRoutes(app);

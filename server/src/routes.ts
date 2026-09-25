@@ -440,8 +440,16 @@ export function registerRoutes(app: FastifyInstance): void {
       const r = await generateForChat({
         chatId, prompt: b.prompt, shape: b.shape, transparent: b.transparent, name: b.name,
         saveTo: b.save_to, note: b.note, workdir: b.workdir, settings: getSettings(),
+        referenceAssetIds: b.reference_asset_ids, register: b.register, variant: b.variant, role,
       });
       const d = r.deliverable;
+      const extra = {
+        ...(r.asset ? { assetId: r.asset.id, assetKind: r.asset.kind, assetScope: r.asset.scope } : {}),
+        ...(r.costUsd !== undefined ? { costUsd: r.costUsd } : {}),
+      };
+      if (r.reused) {
+        return { ok: true, reused: true, id: d.id, name: d.name, size: d.size, mime: d.mime, width: r.image.width, height: r.image.height, savedTo: r.savedTo, provider: r.image.provider, model: r.image.model, ...extra };
+      }
       addEvent(chatId, 'file_output', {
         id: d.id, name: d.name, size: d.size, mime: d.mime, note: d.note, path: d.sourcePath, sha256: d.sha256,
         by: role as FileOutputPayload['by'],
@@ -449,7 +457,7 @@ export function registerRoutes(app: FastifyInstance): void {
       }, { runId: activeCtx(chatId)?.runId });
       return {
         ok: true, id: d.id, name: d.name, size: d.size, mime: d.mime, width: r.image.width, height: r.image.height,
-        savedTo: r.savedTo, provider: r.image.provider, model: r.image.model,
+        savedTo: r.savedTo, provider: r.image.provider, model: r.image.model, ...extra,
       };
     } catch (err) {
       if (err instanceof DeliverableError) return reply.code(err.status).send({ ok: false, error: err.message });

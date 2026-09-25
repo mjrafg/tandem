@@ -2,7 +2,7 @@ import { Boxes, ChevronRight, Pause, Play, RotateCw, X } from 'lucide-react';
 import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { PdActivity, PdMilestone, PdSession, ProjectRunState } from '@shared/types';
+import type { PdActivity, PdMilestone, PdSession, ProjectRunState, VideoProject } from '@shared/types';
 import { api } from '../api';
 import { fmtDuration } from '../lib/format';
 import { useStore } from '../store';
@@ -112,6 +112,8 @@ export function ProjectDrawer({ runId, open, onClose }: { runId: string; open: b
                 )}
               </div>
             </div>
+
+            {run.video && <VideoPanel runId={runId} />}
 
             {run.providerWait && run.providerWait.retryAt > Date.now() && (
               // a project blocked on a provider limit used to look identical to
@@ -233,6 +235,48 @@ function ActivityList({ activity }: { activity: PdActivity[] }) {
           <span className="min-w-0 text-mut">{a.text}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+const PHASE_LABEL: Record<VideoProject['phase'], string> = {
+  planning: 'Planning — nothing paid yet',
+  awaiting_approval: 'Waiting for your approval',
+  approved: 'Approved — producing',
+  narration_locked: 'Narration locked — animating',
+};
+
+/** a video project: which channel version it is pinned to, and where the money went */
+function VideoPanel({ runId }: { runId: string }) {
+  const run = useStore((s) => s.projectRuns[runId]);
+  const [data, setData] = useState<{ video: VideoProject; costs: { category: string; count: number; usd: number }[] } | null>(null);
+  const updatedAt = run?.updatedAt;
+  useEffect(() => { api.videoProject(runId).then(setData).catch(() => setData(null)); }, [runId, updatedAt]);
+  const v = data?.video ?? run?.video;
+  if (!v) return null;
+  return (
+    <div className="border-b border-linesoft px-3.5 py-2.5 text-[12px]">
+      <div className="flex items-baseline justify-between gap-2">
+        <Link to={`/channels/${v.channelId}`} className="font-medium text-ink hover:underline">{v.channelName}</Link>
+        <span className="tabular-nums text-dim">
+          pinned to v{v.channelVersion}{v.newerVersion ? <span className="text-warn"> · v{v.newerVersion} available</span> : null}
+        </span>
+      </div>
+      <div className="mt-1 text-mut">{PHASE_LABEL[v.phase]}</div>
+      <div className="mt-1.5 flex items-baseline justify-between tabular-nums">
+        <span className="text-dim">Spent</span>
+        <span>${v.spentUsd.toFixed(2)}{v.budgetUsd != null ? <span className="text-dim"> of ${v.budgetUsd.toFixed(2)} approved</span> : <span className="text-dim"> · no budget yet</span>}</span>
+      </div>
+      {data && data.costs.length > 0 && (
+        <table className="mt-1 w-full tabular-nums">
+          <tbody>
+            {data.costs.map((c) => (
+              <tr key={c.category}><td className="text-dim">{c.category} ({c.count})</td><td className="text-right">${c.usd.toFixed(2)}</td></tr>
+            ))}
+            <tr><td className="text-dim">Local rendering</td><td className="text-right">$0.00</td></tr>
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

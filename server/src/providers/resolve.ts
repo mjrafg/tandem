@@ -9,6 +9,7 @@
  */
 import type { AppSettings, Difficulty, Effort, ModelSource, Provider } from '../../../shared/types';
 import { builderExecFor } from '../agents/exec';
+import { getReviewerSnapshot } from '../agents/store';
 import { DIFFICULTY_ROUTING_ENABLED } from '../../../shared/features';
 import { asDifficulty, db } from '../db';
 import { providerOfModel } from './catalog';
@@ -136,12 +137,17 @@ export function resolveBuilderRole(settings: AppSettings, chatId?: string): Reso
  */
 export function resolveBuilderReviewerRole(settings: AppSettings, chatId?: string): ResolvedRole {
   const difficulty = sessionDifficulty(chatId);
-  const tier = tierFor(settings, difficulty, 'reviewer');
+  // a session's Reviewer Agent: its prompt always, its model only when it pins one
+  const agent = chatId ? getReviewerSnapshot(chatId) : null;
+  const pinned = agent?.enforceModel ? agent : null;
+  const tier = pinned ? null : tierFor(settings, difficulty, 'reviewer');
   const r = settings.roles.builder_reviewer;
-  const base = tier
-    ? coerce('builder_reviewer', tier.provider, tier.model, tier.effort, 'difficulty')
-    : coerce('builder_reviewer', r.provider, r.model, r.effort, 'role');
-  return { ...base, ...(difficulty ? { difficulty } : {}) };
+  const base = pinned
+    ? coerce('builder_reviewer', pinned.provider, pinned.model, pinned.effort, 'agent')
+    : tier
+      ? coerce('builder_reviewer', tier.provider, tier.model, tier.effort, 'difficulty')
+      : coerce('builder_reviewer', r.provider, r.model, r.effort, 'role');
+  return { ...base, ...(agent ? { agentPrompt: agent.systemPrompt } : {}), ...(difficulty ? { difficulty } : {}) };
 }
 
 /**

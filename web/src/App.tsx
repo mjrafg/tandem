@@ -10,9 +10,12 @@ import { AgentEditorPage } from './components/settings/pages/AgentEditorPage';
 import { RolesPage } from './components/settings/pages/RolesPage';
 import { AccountPage, ContextPage, InstructionsPage, IntegrationsPage, ToolsPage } from './components/settings/pages/SimplePages';
 import { ImagePage } from './components/settings/pages/ImagePage';
+import { VideoPage } from './components/settings/pages/VideoPage';
 import { ObservabilityPage } from './components/settings/pages/ObservabilityPage';
 import { ProvidersPage } from './components/settings/pages/ProvidersPage';
 import { NewProjectDialog } from './components/NewProjectDialog';
+import { NewVideoDialog } from './components/NewVideoDialog';
+import { ChannelsPage } from './components/ChannelsPage';
 import { Logo, MenuButton, Spinner, ToastHost } from './components/ui';
 import { FolderOpen } from 'lucide-react';
 
@@ -41,6 +44,8 @@ export default function App() {
         <Route element={<Shell />}>
           <Route path="/" element={<Home />} />
           <Route path="/c/:chatId" element={<ChatView />} />
+          <Route path="/channels" element={<ChannelsPage />} />
+          <Route path="/channels/:channelId" element={<ChannelsPage />} />
           {/* Admin: one category at a time. /settings keeps working and lands
               on Roles; every category and the agent editor own a real URL. */}
           <Route path="/settings" element={<SettingsLayout />}>
@@ -52,6 +57,7 @@ export default function App() {
             <Route path="tools" element={<ToolsPage />} />
             <Route path="integrations" element={<IntegrationsPage />} />
             <Route path="images" element={<ImagePage />} />
+            <Route path="video" element={<VideoPage />} />
             <Route path="context" element={<ContextPage />} />
             <Route path="observability" element={<ObservabilityPage />} />
             <Route path="providers" element={<ProvidersPage />} />
@@ -96,6 +102,7 @@ function Shell() {
         <Outlet />
       </main>
       <NewProjectDialog />
+      <NewVideoDialog />
     </div>
   );
 }

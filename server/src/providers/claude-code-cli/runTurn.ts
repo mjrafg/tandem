@@ -172,6 +172,7 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   const directorScript = path.resolve(distDir, 'mcp-director.cjs');
   const shareScript = path.resolve(distDir, 'mcp-share.cjs');
   const imageScript = path.resolve(distDir, 'mcp-image.cjs');
+  const channelScript = path.resolve(distDir, 'mcp-channel.cjs');
   const mcpServers: Record<string, unknown> = {};
   // Tandem env (chat id, internal token, shots dir) is inherited from this
   // process's environment by the stdio servers.
@@ -187,12 +188,14 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   const withShare = opts.policy.shareFiles && fs.existsSync(shareScript);
   // image generation — writers only, and only while Admin has it switched on
   const withImage = opts.policy.imageTools && getSettings().imageGeneration.enabled && fs.existsSync(imageScript);
+  const withChannel = opts.policy.channelTools && fs.existsSync(channelScript);
   if (withWorkdir) mcpServers.tandem = { type: 'stdio', command: process.execPath, args: [workdirScript] };
   if (withBrowser) mcpServers.tandem_browser = { type: 'stdio', command: process.execPath, args: [browserScript] };
   if (withExt) mcpServers.tandem_ext = { type: 'stdio', command: process.execPath, args: [extScript] };
   if (withDirector) mcpServers.tandem_director = { type: 'stdio', command: process.execPath, args: [directorScript] };
   if (withShare) mcpServers.tandem_share = { type: 'stdio', command: process.execPath, args: [shareScript] };
   if (withImage) mcpServers.tandem_image = { type: 'stdio', command: process.execPath, args: [imageScript] };
+  if (withChannel) mcpServers.tandem_channel = { type: 'stdio', command: process.execPath, args: [channelScript] };
   if (Object.keys(mcpServers).length > 0) {
     mcpConfigFile = path.join(config.dataDir, 'tmp', `mcp-${randomUUID()}.json`);
     fs.writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers }));
@@ -208,12 +211,13 @@ export async function runClaudeTurn(h: RunHandle, opts: {
   }
   const startedAt = Date.now();
   const servedTools = [
-    ...(withWorkdir || withBrowser || withShare || withImage
+    ...(withWorkdir || withBrowser || withShare || withImage || withChannel
       ? await servedToolRecord([
         ...(withWorkdir ? ['tandem'] : []),
         ...(withBrowser ? ['tandem_browser'] : []),
         ...(withShare ? ['tandem_share'] : []),
         ...(withImage ? ['tandem_image'] : []),
+        ...(withChannel ? ['tandem_channel'] : []),
       ])
       : []),
     ...(withExt ? catalogForRole(family).map((t) => ({ name: t.name, description: t.description })) : []),

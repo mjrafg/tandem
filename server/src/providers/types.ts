@@ -74,6 +74,8 @@ export interface RoleExecutionPolicy {
   shareFiles: boolean;
   /** generate an image from a prompt (Admin → Image generation); it writes into the project, so writers only */
   imageTools: boolean;
+  /** channels and video projects (tandem_channel); what each role may do there is decided server-side */
+  channelTools: boolean;
 }
 
 /** One turn, expressed without a single provider-specific concept. */

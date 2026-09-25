@@ -7,6 +7,7 @@ import { db, getChat, getEvent, getProject } from '../db';
 import { addEvent, updateEvent } from '../events';
 import { getSettings } from '../settings';
 import { builderSystemText, getPrompt, renderPrompt, reviewerSystemText } from '../prompts';
+import { channelContextFor } from '../video/tools';
 import { executeRole, providerLabel, providerShortLabel } from '../providers/executor';
 import { resolveBuilderRole, resolveBuilderReviewerRole } from '../providers/resolve';
 import { rememberSession, resumableSession, storedSessionRef } from '../providers/sessions';
@@ -157,7 +158,7 @@ async function runWorkflow(h: RunHandle, userText: string, runOpts: { review: bo
     effort: builderCfg.effort,
     difficulty: builderCfg.difficulty,
     modelSource: builderCfg.source,
-    systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
+    systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt, [channelContextFor(h.chat.id)]),
     userPrompt: builderMessage(h, userText, resume),
     cwd: startDir,
     session: stored,
@@ -282,7 +283,7 @@ async function runReviewPhase(h: RunHandle, userText: string, opts: {
       effort: builderCfg.effort,
       difficulty: builderCfg.difficulty,
       modelSource: builderCfg.source,
-      systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt),
+      systemPrompt: builderSystemText(h.settings, 'builder', h.gitFlow ? summaryText(h.gitFlow) : undefined, builderCfg.agentPrompt, [channelContextFor(h.chat.id)]),
       userPrompt: message,
       cwd: h.project.rootPath,
       session: storedSessionRef(h.chat.id),
@@ -818,7 +819,7 @@ async function review(h: RunHandle, originalRequest: string, subject: ReviewSubj
       effort: cfg.effort,
       difficulty: cfg.difficulty,
       modelSource: cfg.source,
-      systemPrompt: reviewerSystemText(h.settings),
+      systemPrompt: reviewerSystemText(h.settings, 'builder_reviewer', cfg.agentPrompt, [channelContextFor(h.chat.id)]),
       userPrompt: prompt,
       cwd: h.project.rootPath,
       emitActivity: false,

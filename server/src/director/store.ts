@@ -10,6 +10,7 @@ import { getPendingWake } from './pendingWake';
 import { MAX_REVIEW_ROUNDS, getLedger } from '../engine/reviewLedger';
 import { DIFFICULTY_ROUTING_ENABLED } from '../../../shared/features';
 import { getSettings } from '../settings';
+import { getVideoProject } from '../video/store';
 
 /**
  * Persistence for the Project Director. Everything here is project-level
@@ -83,6 +84,8 @@ try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_wait_reason TEXT'); } c
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN review_retry_at INTEGER'); } catch { /* exists */ }
 // the Builder Agent profile the Director selected for this session (stable id)
 try { db.exec('ALTER TABLE pd_sessions ADD COLUMN agent_profile_id TEXT'); } catch { /* exists */ }
+// the Reviewer Agent the Director selected for this session's independent review (stable id)
+try { db.exec('ALTER TABLE pd_sessions ADD COLUMN reviewer_profile_id TEXT'); } catch { /* exists */ }
 // the authoritative final state of a completed session (JSON SessionFinalState):
 // final verdict, what the Reviewer verified, what stands open — composed from
 // the record at completion, never from the Builder's last message
@@ -107,6 +110,7 @@ function rowToSession(r: any): PdSession {
     key: r.key, name: r.name, purpose: r.purpose, prompt: r.prompt,
     chatId: r.chat_id ?? null, status: r.status,
     agentProfileId: r.agent_profile_id ?? null,
+    reviewerProfileId: r.reviewer_profile_id ?? null,
     // the truthful execution history: what this session ACTUALLY ran with
     agent: r.chat_id ? getAgentSnapshot(r.chat_id) : null,
     dependsOn: JSON.parse(r.depends_on || '[]'),
@@ -146,6 +150,8 @@ export function getRun(id: string): ProjectRun | null {
     milestones: db.prepare('SELECT * FROM pd_milestones WHERE run_id = ? ORDER BY order_idx').all(r.id).map(rowToMilestone),
     // surfaced so a stalled-looking project can say WHY it is waiting and until when
     providerWait: (() => { const w = getPendingWake(r.id); return w ? { reason: w.reason, retryAt: w.retryAt } : null; })(),
+    // a video project: the channel version it is pinned to, its phase and budget
+    video: getVideoProject(r.id),
   };
 }
 
@@ -257,6 +263,8 @@ export interface SessionInput {
   key: string; name: string; purpose: string; prompt: string; dependsOn: string[]; isolated: boolean;
   /** stable Builder Agent profile id chosen by the Director (never a slug) */
   agentProfileId?: string | null;
+  /** stable Reviewer Agent profile id for this session's review (null = no specialist) */
+  reviewerProfileId?: string | null;
   /** the Director's judgment of the work's difficulty (default medium) */
   difficulty?: Difficulty | null;
   /** the Director's decision on independent review (default required) */
@@ -290,12 +298,12 @@ export function planSessions(runId: string, milestoneKey: string, sessions: Sess
       if (old.status !== 'planned' && old.status !== 'abandoned') {
         throw new Error(`Session ${s.key} is ${old.status} and its definition can no longer be replaced — use recover_session instead.`);
       }
-      db.prepare('UPDATE pd_sessions SET name = ?, purpose = ?, prompt = ?, depends_on = ?, status = ?, agent_profile_id = ?, difficulty = ?, review_required = ? WHERE id = ?')
-        .run(s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), 'planned', s.agentProfileId ?? null, plannedDifficulty(s), s.reviewRequired === false ? 0 : 1, old.id);
+      db.prepare('UPDATE pd_sessions SET name = ?, purpose = ?, prompt = ?, depends_on = ?, status = ?, agent_profile_id = ?, reviewer_profile_id = ?, difficulty = ?, review_required = ? WHERE id = ?')
+        .run(s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), 'planned', s.agentProfileId ?? null, s.reviewerProfileId ?? null, plannedDifficulty(s), s.reviewRequired === false ? 0 : 1, old.id);
     } else {
-      db.prepare(`INSERT INTO pd_sessions (id, run_id, milestone_id, key, name, purpose, prompt, status, depends_on, branch, agent_profile_id, difficulty, review_required)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)`)
-        .run(randomUUID(), runId, ms.id, s.key, s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), s.isolated ? `pd/${s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : null, s.agentProfileId ?? null, plannedDifficulty(s), s.reviewRequired === false ? 0 : 1);
+      db.prepare(`INSERT INTO pd_sessions (id, run_id, milestone_id, key, name, purpose, prompt, status, depends_on, branch, agent_profile_id, reviewer_profile_id, difficulty, review_required)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?)`)
+        .run(randomUUID(), runId, ms.id, s.key, s.name, s.purpose, s.prompt, JSON.stringify(s.dependsOn), s.isolated ? `pd/${s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : null, s.agentProfileId ?? null, s.reviewerProfileId ?? null, plannedDifficulty(s), s.reviewRequired === false ? 0 : 1);
     }
   }
   broadcastRun(runId);

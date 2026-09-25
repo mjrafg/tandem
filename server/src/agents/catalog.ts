@@ -27,5 +27,19 @@ export function agentCatalogText(): string {
     lines.join('\n\n'),
     '',
     'Choose the most appropriate enabled Builder Agent Profile from this catalog for each session you plan, passing its ID as agent_profile_id. Use the default Agent when specialization provides no meaningful advantage. The same Agent may serve several sessions, different Agents may be mixed within one milestone, and there is no requirement to use every Agent in a project. This catalog is regenerated each turn from the current configuration — never assume agents you saw earlier still exist.',
+    ...reviewerCatalog(),
   ].join('\n');
+}
+
+function reviewerCatalog(): string[] {
+  const reviewers = selectableAgents('reviewer');
+  if (reviewers.length === 0) return [];
+  return [
+    '',
+    'AVAILABLE REVIEWER AGENTS',
+    '',
+    reviewers.map((a) => [`ID: ${a.id}`, `Name: ${a.name}`, `Description: ${a.description || '(no description)'}`].join('\n')).join('\n\n'),
+    '',
+    'A Reviewer Agent specializes a session\'s independent review; pass its ID as reviewer_profile_id where its expertise fits the work. It never changes who reviews (always the independent Reviewer) or what the Reviewer may do.',
+  ];
 }

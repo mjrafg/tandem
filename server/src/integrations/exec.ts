@@ -8,6 +8,8 @@ import type {
 import { config } from '../config';
 import { addEvent, updateEvent } from '../events';
 import { mcpCallTool } from './mcpClient';
+import { getSettings } from '../settings';
+import { beforeIntegrationCall } from '../video/gates';
 import { OAuthRequiredError } from './oauth';
 import { credentialSecret, credentialSecretValues, getToolByFullName, listIntegrations, setOAuthRequired } from './store';
 
@@ -40,7 +42,9 @@ function scrub(text: string, secrets: string[]): string {
 }
 
 function effectiveRole(role: string): 'builder' | 'reviewer' {
-  return role === 'reviewer' ? 'reviewer' : 'builder'; // final_repair acts with builder access
+  // only the writers act with Builder access (final_repair is a Builder turn);
+  // every other role — any reviewer, or a name nobody expected — gets the reviewer's
+  return role === 'builder' || role === 'final_repair' ? 'builder' : 'reviewer';
 }
 
 export async function executeIntegrationTool(input: {
@@ -57,7 +61,7 @@ export async function executeIntegrationTool(input: {
   if (!integration.enabled) return { ok: false, result: '', error: `The integration "${integration.name}" is disabled.` };
   if (!tool.enabled) return { ok: false, result: '', error: `The tool ${tool.fullName} is disabled.` };
   const role = effectiveRole(input.role);
-  if (!tool.roles.includes(role)) {
+  if (!engineRoleAllows(integration.slug, tool.name, role, tool.roles)) {
     return { ok: false, result: '', error: `The ${role} role is not permitted to use ${tool.fullName}.` };
   }
 
@@ -77,14 +81,27 @@ export async function executeIntegrationTool(input: {
     } satisfies ToolCallPayload).id
     : null;
 
+  // video-production invariants: paid calls before approval or over budget,
+  // timing before narration, reference assets into the engine — refused here;
+  // an identical paid call is answered from its earlier result
+  const gate = beforeIntegrationCall({
+    chatId: input.chatId, fullName: tool.fullName, toolName: tool.name, integrationSlug: integration.slug, args: input.args ?? {},
+  });
   let outcome: ExecOutcome;
-  try {
-    if (tool.spec.kind === 'http') outcome = await execHttp(integration, tool, input.args ?? {});
-    else if (tool.spec.kind === 'mcp') outcome = await execMcp(integration, tool, input.args ?? {});
-    else if (tool.spec.kind === 'ssh') outcome = await execSsh(integration, tool, input.args ?? {});
-    else outcome = { ok: false, result: '', error: `Unsupported tool kind: ${(tool.spec as any).kind}` };
-  } catch (err) {
-    outcome = { ok: false, result: '', error: err instanceof Error ? err.message : String(err) };
+  if (gate.deny) {
+    outcome = { ok: false, result: '', error: gate.deny };
+  } else if (gate.cached !== undefined) {
+    outcome = { ok: true, result: gate.cached };
+  } else {
+    try {
+      if (tool.spec.kind === 'http') outcome = await execHttp(integration, tool, input.args ?? {});
+      else if (tool.spec.kind === 'mcp') outcome = await execMcp(integration, tool, input.args ?? {});
+      else if (tool.spec.kind === 'ssh') outcome = await execSsh(integration, tool, input.args ?? {});
+      else outcome = { ok: false, result: '', error: `Unsupported tool kind: ${(tool.spec as any).kind}` };
+    } catch (err) {
+      outcome = { ok: false, result: '', error: err instanceof Error ? err.message : String(err) };
+    }
+    if (outcome.ok && gate.onSuccess) gate.onSuccess(outcome.result);
   }
 
   // sanitize everything that leaves this function
@@ -328,7 +345,7 @@ export function catalogForRole(role: string): { name: string; description: strin
   const r = effectiveRole(role);
   const rows: { name: string; description: string; inputSchema: Record<string, unknown> }[] = [];
   for (const found of allServableTools()) {
-    if (!found.tool.roles.includes(r)) continue;
+    if (!engineRoleAllows(found.integration.slug, found.tool.name, r, found.tool.roles)) continue;
     rows.push({
       name: found.tool.fullName,
       description: `[${found.integration.name}] ${found.tool.description}`.slice(0, 1_024),
@@ -336,6 +353,19 @@ export function catalogForRole(role: string): { name: string; description: strin
     });
   }
   return rows;
+}
+
+/**
+ * A Reviewer judges the video it did not make, so it may look at the Video
+ * Engine through the read-only tools named in Settings → Video production —
+ * never through one that changes a scene.
+ */
+function engineRoleAllows(integrationSlug: string, toolName: string, role: string, grantedRoles: string[]): boolean {
+  const v = getSettings().video;
+  // on the Video Engine a Reviewer gets exactly the read-only list — never a
+  // tool that changes a scene, whatever the tool's own role grants say
+  if (integrationSlug === v.engineIntegration && role === 'reviewer') return v.reviewerEngineTools.includes(toolName);
+  return grantedRoles.includes(role);
 }
 
 export function hasIntegrationTools(role: string): boolean {

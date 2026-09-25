@@ -27,6 +27,7 @@ function body(req: any): AgentInput {
     enabled: b.enabled as boolean | undefined,
     isDefault: (b.isDefault ?? b.is_default) as boolean | undefined,
     enforceModel: (b.enforceModel ?? b.enforce_model) as boolean | undefined,
+    kind: b.kind,
   };
 }
 

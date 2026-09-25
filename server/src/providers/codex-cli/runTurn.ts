@@ -153,6 +153,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const directorScript = path.resolve(distDir, 'mcp-director.cjs');
   const shareScript = path.resolve(distDir, 'mcp-share.cjs');
   const imageScript = path.resolve(distDir, 'mcp-image.cjs');
+  const channelScript = path.resolve(distDir, 'mcp-channel.cjs');
   const withWorkdir = opts.policy.workdirTools && fs.existsSync(workdirScript);
   const withBrowser = opts.policy.browserTools && fs.existsSync(browserScript);
   // integration tools the admin has allowed for this role (the gateway
@@ -165,6 +166,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const withShare = opts.policy.shareFiles && fs.existsSync(shareScript);
   // image generation — writers only, and only while Admin has it switched on
   const withImage = opts.policy.imageTools && getSettings().imageGeneration.enabled && fs.existsSync(imageScript);
+  const withChannel = opts.policy.channelTools && fs.existsSync(channelScript);
   // a Director session's first Builder turn names itself through a workdir tool
   const nameSession = opts.nameSession
     ?? (h.chat.kind === 'pd-session' && opts.role === 'builder' && !opts.resumeThreadId && withWorkdir);
@@ -194,6 +196,7 @@ export async function runCodexTurn(h: RunHandle, opts: {
   if (withShare) blocks.push(mcpBlock('tandem_share', process.execPath, [shareScript], serverEnv));
   // generating an image takes minutes, not seconds
   if (withImage) blocks.push(mcpBlock('tandem_image', process.execPath, [imageScript], serverEnv, 330));
+  if (withChannel) blocks.push(mcpBlock('tandem_channel', process.execPath, [channelScript], serverEnv));
   const writable = readOnly ? [] : [...new Set([h.project.rootPath, opts.cwd])];
   const profileName = writeRoleProfile(opts.role, h.ctx.runId, writable, blocks);
 
@@ -232,12 +235,13 @@ export async function runCodexTurn(h: RunHandle, opts: {
   const startedAt = Date.now();
   const servedTools = profileName
     ? [
-      ...(withWorkdir || withBrowser || withShare || withImage
+      ...(withWorkdir || withBrowser || withShare || withImage || withChannel
         ? await servedToolRecord([
           ...(withWorkdir ? ['tandem'] : []),
           ...(withBrowser ? ['tandem_browser'] : []),
           ...(withShare ? ['tandem_share'] : []),
           ...(withImage ? ['tandem_image'] : []),
+          ...(withChannel ? ['tandem_channel'] : []),
         ])
         : []),
       ...(withExt ? catalogForRole(family).map((t) => ({ name: t.name, description: t.description })) : []),

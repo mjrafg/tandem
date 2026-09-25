@@ -40,6 +40,22 @@ const TOOLS = [
         save_to: { type: 'string', description: 'Optional path, relative to your working directory, to also save the image at, e.g. "assets/hero.png". The extension follows the generated format.' },
         name: { type: 'string', description: 'Optional file name for the download, e.g. "hero.png".' },
         note: { type: 'string', description: 'Optional one line telling the user what the image is.' },
+        reference_asset_ids: { type: 'array', items: { type: 'string' }, description: 'Asset ids (from asset_search) of reference images to condition on — a character\'s canonical sheet to keep its identity, a location to place something in, a style reference. Name each one\'s role in the prompt ("image 1 is the character, image 2 the location").' },
+        register: {
+          type: 'object',
+          description: 'Also register the image as a searchable asset (in a video project it belongs to the project; elsewhere pass channel).',
+          properties: {
+            kind: { type: 'string', enum: ['reference', 'production'] },
+            name: { type: 'string' },
+            description: { type: 'string' },
+            entity_id: { type: 'string' },
+            tags: { type: 'array', items: { type: 'string' } },
+            attributes: { type: 'object', description: 'view, pose, expression, state, transparent, processed, engineReady…' },
+            channel: { type: 'string' },
+          },
+          required: ['kind'],
+        },
+        variant: { type: 'string', description: 'Set only to deliberately get a DIFFERENT image for an identical request (in a video project an identical request otherwise returns the earlier image, free).' },
       },
       required: ['prompt'],
     },
@@ -81,6 +97,9 @@ async function callTool(name, args) {
       chatId: CHAT_ID, token: TOKEN, role: ROLE, workdir: WORKDIR,
       prompt: str(args.prompt), shape: str(args.shape), transparent: args.transparent === true,
       save_to: str(args.save_to), name: str(args.name), note: str(args.note),
+      reference_asset_ids: Array.isArray(args.reference_asset_ids) ? args.reference_asset_ids : undefined,
+      register: args.register && typeof args.register === 'object' ? args.register : undefined,
+      variant: str(args.variant),
     }),
     // generation can take minutes; the server bounds it itself
     signal: AbortSignal.timeout(300_000),
@@ -91,12 +110,12 @@ async function callTool(name, args) {
   }
   const dims = body.width && body.height ? `${body.width}×${body.height} ` : '';
   const saved = body.savedTo ? ` Saved in the working directory at ${body.savedTo}.` : '';
-  return {
-    content: [{
-      type: 'text',
-      text: `Generated "${body.name}" (${dims}${String(body.mime).replace('image/', '').toUpperCase()}, ${sizeText(body.size)}) with ${body.provider}/${body.model}. The user can see it in the chat now.${saved}`,
-    }],
-  };
+  const asset = body.assetId ? ` Registered as ${body.assetKind} asset ${body.assetId} (${body.assetScope} scope).` : '';
+  const cost = typeof body.costUsd === 'number' ? ` Charged to the video budget: $${body.costUsd.toFixed(2)}.` : '';
+  const head = body.reused
+    ? `An identical request already produced "${body.name}" in this project — returned it again instead of generating (nothing charged).`
+    : `Generated "${body.name}" (${dims}${String(body.mime).replace('image/', '').toUpperCase()}, ${sizeText(body.size)}) with ${body.provider}/${body.model}. The user can see it in the chat now.`;
+  return { content: [{ type: 'text', text: `${head}${saved}${asset}${cost}` }] };
 }
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });

@@ -159,12 +159,20 @@ export interface AgentProfile {
    * the Agent contributes its instructions only.
    */
   enforceModel: boolean;
+  /**
+   * 'builder' (default): a session's Builder specialist. 'reviewer': a
+   * specialist for a session's independent Reviewer — its prompt is appended to
+   * the Reviewer's instructions, and it never gains write access.
+   */
+  kind: AgentKind;
   enabled: boolean;
   isDefault: boolean;
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
 }
+
+export type AgentKind = 'builder' | 'reviewer';
 
 /**
  * The immutable Agent configuration a session actually executed with, captured
@@ -247,6 +255,32 @@ export interface AppSettings {
   orchestration: OrchestrationConfig;
   /** how agents generate images from a prompt (the tandem_generate_image tool) */
   imageGeneration: ImageGenConfig;
+  /** video production: the engine, what counts as paid, and the rates estimates use */
+  video: VideoConfig;
+}
+
+export interface VideoConfig {
+  /** slug of the integration that is the Video Engine MCP */
+  engineIntegration: string;
+  /** engine tools that set visual timing — refused until the narration is locked */
+  timingTools: string[];
+  /** read-only engine tools a Reviewer may use to inspect the video it reviews */
+  reviewerEngineTools: string[];
+  /**
+   * integration tools that spend money (glob patterns on the tool's full name,
+   * e.g. "elevenlabs_*generate*"): refused before the production plan is
+   * approved, charged to the budget, and never repeated for identical input
+   */
+  paidToolPatterns: string[];
+  /** paid tools among those that turn text into speech — estimated per character */
+  ttsToolPatterns: string[];
+  rates: {
+    /** per generated image, by provider — Codex runs on the subscription */
+    imageUsd: { codex: number; openai: number };
+    ttsUsdPer1kChars: number;
+    /** any other paid tool call */
+    otherPaidUsd: number;
+  };
 }
 
 export type ImageProvider = 'codex' | 'openai';
@@ -398,7 +432,8 @@ export type EventKind =
   | 'checkpoint'
   | 'tool_call'
   | 'sessions'
-  | 'file_output';
+  | 'file_output'
+  | 'approval';
 
 export type StepStatus = 'running' | 'done' | 'failed' | 'stopped';
 
@@ -791,6 +826,7 @@ export type EventPayloadMap = {
   tool_call: ToolCallPayload;
   sessions: SessionsPayload;
   file_output: FileOutputPayload;
+  approval: ApprovalPayload;
 };
 
 /**
@@ -1233,6 +1269,8 @@ export interface PdSession {
   status: PdSessionStatus;
   /** Builder Agent profile the Director selected (stable id; null = default) */
   agentProfileId?: string | null;
+  /** the Reviewer Agent selected for this session's independent review, if any */
+  reviewerProfileId?: string | null;
   /** the Director's current judgment of the work's difficulty — changeable at any time */
   difficulty?: Difficulty | null;
   /**
@@ -1308,6 +1346,8 @@ export interface ProjectRun {
   milestones: PdMilestone[];
   /** set while a provider usage/session limit is blocking work; clears itself */
   providerWait?: { reason: string; retryAt: number } | null;
+  /** set when this project is a video: its channel pin, production phase and budget */
+  video?: VideoProject | null;
 }
 
 /** live project execution block in the Project Chat — ONE event, updated in place */
@@ -1402,3 +1442,128 @@ export type ServerMsg =
   | { type: 'context'; chatId: string; usage: ContextUsage }
   | { type: 'project'; project: Project }
   | { type: 'project_run'; run: ProjectRun };
+
+// ---------------------------------------------------------------- video production
+
+/** A reusable creative identity shared by many videos. Its content is versioned. */
+export interface Channel {
+  id: string;
+  slug: string;
+  name: string;
+  /** the latest version; every change to the content creates the next one */
+  headVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * The versioned content of a Channel — immutable once written. Free-form where
+ * the craft is (the Style Bible's sections, an entity's attributes), structured
+ * where agents need to find things (entity ids and types, asset ids).
+ */
+export interface ChannelContent {
+  name: string;
+  description: string;
+  styleBible: {
+    /** the short version every visual agent is handed */
+    summary: string;
+    /** named sections: palette, lighting, composition, proportions, prompt guidance… */
+    sections: Record<string, string>;
+  };
+  entities: ChannelEntity[];
+  /** channel-scoped assets in this version (promoted or added during channel development) */
+  assetIds: string[];
+  /** narration voice, pacing and other production defaults — free-form */
+  defaults: Record<string, unknown>;
+}
+
+export type EntityType = 'character' | 'location' | 'prop' | 'other';
+
+export interface ChannelEntity {
+  id: string;
+  type: EntityType;
+  name: string;
+  summary: string;
+  description: string;
+  attributes: Record<string, unknown>;
+}
+
+export interface ChannelVersion {
+  channelId: string;
+  version: number;
+  content: ChannelContent;
+  note: string;
+  createdAt: number;
+  createdBy: string;
+}
+
+/**
+ * A reference asset preserves identity or guides generation; a production asset
+ * is prepared for the engine. They are different things, and the engine is only
+ * ever handed production assets.
+ */
+export type AssetKind = 'reference' | 'production';
+
+export interface MediaAsset {
+  id: string;
+  kind: AssetKind;
+  /** 'channel' = reusable across the channel's videos; 'project' = one video only */
+  scope: 'channel' | 'project';
+  channelId: string | null;
+  /** the video project (its run id) that owns a project-scoped asset */
+  projectRunId: string | null;
+  entityId: string | null;
+  name: string;
+  description: string;
+  tags: string[];
+  /** view, pose, expression, state, transparent, processed, engineReady… */
+  attributes: Record<string, unknown>;
+  mime: string;
+  width: number | null;
+  height: number | null;
+  bytes: number;
+  sha256: string;
+  provenance: Record<string, unknown>;
+  createdAt: number;
+  /** set when a project asset was promoted into the channel */
+  promotedAt: number | null;
+}
+
+export type VideoPhase = 'planning' | 'awaiting_approval' | 'approved' | 'narration_locked';
+
+export interface VideoProject {
+  runId: string;
+  channelId: string;
+  channelName: string;
+  channelVersion: number;
+  /** the channel's newest version, when it is newer than the pinned one */
+  newerVersion: number | null;
+  phase: VideoPhase;
+  budgetUsd: number | null;
+  spentUsd: number;
+  estimate: Record<string, unknown> | null;
+  narration: Record<string, unknown> | null;
+  createdAt: number;
+}
+
+export type ApprovalKind = 'production' | 'promotion' | 'channel_upgrade';
+
+export interface ApprovalPayload {
+  id: string;
+  kind: ApprovalKind;
+  status: 'pending' | 'approved' | 'declined';
+  title: string;
+  /** what the user is deciding, in their terms */
+  summary: string;
+  detail: Record<string, unknown>;
+  decidedAt?: number;
+}
+
+/** a channel as the UI browses it: one version, its history, its assets and videos */
+export interface ChannelDetail {
+  channel: Channel;
+  version: ChannelVersion;
+  versions: { version: number; note: string; createdAt: number; createdBy: string }[];
+  assets: MediaAsset[];
+  projects: { runId: string; chatId: string; title: string; version: number }[];
+}

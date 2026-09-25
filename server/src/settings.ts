@@ -71,6 +71,23 @@ export const DEFAULT_SETTINGS: AppSettings = {
     credentialId: null,
     quality: 'auto',
   },
+  video: {
+    engineIntegration: 'animation_engine',
+    // animation keyframes and final renders follow the narration's real timing
+    timingTools: ['timeline_apply', 'render_video_start'],
+    reviewerEngineTools: [
+      'engine_capabilities', 'engine_version', 'workspace_list', 'workspace_info', 'scene_list', 'scene_get', 'layer_list',
+      'timeline_get', 'asset_list', 'asset_get', 'asset_inspect', 'measure_layout', 'render_preview', 'render_frame',
+      'artifact_list', 'render_video_status',
+    ],
+    paidToolPatterns: [
+      'elevenlabs_*generate*', 'elevenlabs_*design_voice*', 'elevenlabs_*transcribe*',
+      'elevenlabs_*run_flow*', 'elevenlabs_*edit_image*', '*text_to_speech*',
+    ],
+    ttsToolPatterns: ['*generate_speech*', '*text_to_speech*'],
+    // estimates, not bills: Codex images run on the subscription; the rest are typical list prices
+    rates: { imageUsd: { codex: 0, openai: 0.08 }, ttsUsdPer1kChars: 0.3, otherPaidUsd: 0.05 },
+  },
 };
 
 // All built-in instruction text lives in prompts.ts (Admin → AI Prompts).
@@ -200,6 +217,23 @@ function normalizeProviders(s: AppSettings): void {
   if (!['auto', 'low', 'medium', 'high'].includes(img.quality)) img.quality = 'auto';
   img.enabled = img.enabled !== false;
   if (typeof img.credentialId !== 'string' || !img.credentialId) img.credentialId = null;
+  const v = s.video;
+  v.engineIntegration = typeof v.engineIntegration === 'string' && v.engineIntegration.trim() ? v.engineIntegration.trim() : 'animation_engine';
+  const list = (x: unknown, fallback: string[]) => Array.isArray(x) ? x.map(String).map((t) => t.trim()).filter(Boolean).slice(0, 100) : fallback;
+  v.timingTools = list(v.timingTools, DEFAULT_SETTINGS.video.timingTools);
+  v.reviewerEngineTools = list(v.reviewerEngineTools, DEFAULT_SETTINGS.video.reviewerEngineTools);
+  v.paidToolPatterns = list(v.paidToolPatterns, DEFAULT_SETTINGS.video.paidToolPatterns);
+  v.ttsToolPatterns = list(v.ttsToolPatterns, DEFAULT_SETTINGS.video.ttsToolPatterns);
+  const money = (x: unknown, fallback: number) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? Math.min(x, 1000) : fallback);
+  const r = v.rates ?? structuredClone(DEFAULT_SETTINGS.video.rates);
+  v.rates = {
+    imageUsd: {
+      codex: money(r.imageUsd?.codex, DEFAULT_SETTINGS.video.rates.imageUsd.codex),
+      openai: money(r.imageUsd?.openai, DEFAULT_SETTINGS.video.rates.imageUsd.openai),
+    },
+    ttsUsdPer1kChars: money(r.ttsUsdPer1kChars, DEFAULT_SETTINGS.video.rates.ttsUsdPer1kChars),
+    otherPaidUsd: money(r.otherPaidUsd, DEFAULT_SETTINGS.video.rates.otherPaidUsd),
+  };
   const o = s.orchestration;
   o.stallAfterMinutes = clamp(o.stallAfterMinutes, 2, 24 * 60);
   o.stallMaxWakes = clamp(o.stallMaxWakes, 1, 50);

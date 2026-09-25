@@ -9,7 +9,9 @@ import { Composer } from './Composer';
 import { ContextBanner, ContextMeter } from './ContextMeter';
 import { BrowserPanel, type LiveRole } from './browser/BrowserPanel';
 import { ExportMenu } from './ExportMenu';
-import { FilesPanel, type FilesTab } from './files/FilesPanel';
+import { FilesPanel, type FileRequest, type FilesTab } from './files/FilesPanel';
+import { FileLinkContext } from './FileLink';
+import { api } from '../api';
 import { GitChip } from './GitChip';
 import { ProjectMemoryMenu } from './ProjectMemoryMenu';
 import { ProjectDrawer } from './ProjectDrawer';
@@ -90,6 +92,25 @@ export function ChatView() {
 
   const [filesTab, setFilesTab] = useState<FilesTab>('files');
   const openFiles = useCallback((tab: FilesTab) => { setFilesTab(tab); openDock('files'); }, [openDock]);
+
+  // a file mentioned anywhere in this chat opens in the Files dock
+  const toast = useStore((s) => s.toast);
+  const [fileRequest, setFileRequest] = useState<FileRequest | null>(null);
+  const projectId = project?.id;
+  const fileLinks = useMemo(() => ({
+    open: async (mention: string) => {
+      if (!projectId) return;
+      try {
+        const r = await api.repoResolve(projectId, mention);
+        if (r.matches.length === 0) { toast(`${mention} is not in this project`, 'error'); return; }
+        setFileRequest({ mention, matches: r.matches, ...(r.line ? { line: r.line } : {}), at: Date.now() });
+        setFilesTab('files');
+        openDock('files');
+      } catch (err) {
+        toast(err instanceof Error ? err.message : 'That file could not be opened', 'error');
+      }
+    },
+  }), [projectId, toast, openDock]);
   const [browserRole, setBrowserRole] = useState<LiveRole>('builder');
   // "Watch live" on a browser step in the timeline
   const browserRequest = useStore((s) => s.browserRequest);
@@ -160,6 +181,7 @@ export function ChatView() {
   }
 
   return (
+    <FileLinkContext.Provider value={fileLinks}>
     <div ref={rowRef} className="flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
       <TopBar chat={chat} project={project} onCompact={() => setCompactOpen(true)}
@@ -215,7 +237,7 @@ export function ChatView() {
         const body = id === 'project'
           ? (isProject && chat.projectRunId ? <ProjectDrawer runId={chat.projectRunId} open onClose={close} /> : null)
           : id === 'files'
-            ? <FilesPanel chat={chat} project={project} open tab={filesTab} onTab={setFilesTab} onClose={close} />
+            ? <FilesPanel chat={chat} project={project} open tab={filesTab} onTab={setFilesTab} onClose={close} request={fileRequest} />
             : <BrowserPanel chat={chat} open role={browserRole} onRole={setBrowserRole} onClose={close} />;
         if (!body) return null;
         return (
@@ -228,6 +250,7 @@ export function ChatView() {
         );
       })}
     </div>
+    </FileLinkContext.Provider>
   );
 }
 

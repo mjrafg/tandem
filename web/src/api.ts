@@ -1,7 +1,7 @@
 import type { Difficulty,
   AgentProfile, ObservabilityKey,
   AppSettings, AttachmentMeta, Chat, ChatEvent, CompactOutcome, ContextUsage, CredentialMeta, CredentialType,
-  BrowserInputAction, DirListing, GitStatus, Integration, RepoBranches, RepoChangeScope, RepoChanges, RepoFile, RepoLog, RepoTree, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
+  BrowserInputAction, DirListing, GitStatus, Integration, RepoBranches, RepoChangeScope, RepoChanges, RepoFile, RepoLog, RepoResolved, RepoTree, IntegrationTool, IntegrationType, Project, ProjectMemory, ProjectRun, PdActivity, PromptEntry, RoleName, Skill, ToolInfo,
   AuthProvider, LoginState, ProviderStatus, StoredTokenMeta,
   Effort, Provider, ProviderDescriptor, ProviderHealth,
 } from '@shared/types';
@@ -67,6 +67,8 @@ export const api = {
     j<RepoTree>(`/api/projects/${projectId}/repo/tree?${qs({ path, ref })}`),
   repoFile: (projectId: string, path: string, ref?: string | null) =>
     j<RepoFile>(`/api/projects/${projectId}/repo/file?${qs({ path, ref })}`),
+  repoResolve: (projectId: string, mention: string) =>
+    j<RepoResolved>(`/api/projects/${projectId}/repo/resolve?${qs({ q: mention })}`),
   repoBranches: (projectId: string) => j<RepoBranches>(`/api/projects/${projectId}/repo/branches`),
   repoLog: (projectId: string, ref: string, base?: string | null) =>
     j<RepoLog>(`/api/projects/${projectId}/repo/log?${qs({ ref, base })}`),

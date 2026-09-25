@@ -27,6 +27,7 @@ printf 'console.log(1)\n' > "$PROJ/src/app.js"
 printf 'export const a = 1\n' > "$PROJ/src/lib/util.js"
 printf 'gone soon\n' > "$PROJ/old.txt"
 printf 'bin\0ary' > "$PROJ/bin.dat"
+printf 'var/\n' > "$PROJ/.gitignore"                          # logs live in an ignored folder
 G add -A; G commit -q -m "first commit"
 G checkout -q -b feature
 printf 'console.log(2)\n' > "$PROJ/src/app.js"
@@ -41,6 +42,7 @@ printf 'staged\n' > "$PROJ/staged.txt"; G add staged.txt      # staged new file
 printf 'draft\nnotes\n' > "$PROJ/notes.txt"                  # untracked
 ln -s /etc "$PROJ/escape"                                      # link out of the project
 ln -s src "$PROJ/inside"                                       # link within it
+mkdir -p "$PROJ/var/review"; for n in v0 v1 v3-a v3-b v4a; do printf 'log %s\n' $n > "$PROJ/var/review/m13int-$n.log"; done
 printf 'plain\n' > "$PLAIN/a.txt"
 
 ENV=(DATA_DIR="$DD" PORT=$PORT HOST=127.0.0.1 TANDEM_INTERNAL_TOKEN=devtoken
@@ -140,6 +142,33 @@ check "one commit: exactly what it changed" "$(js "$K" 'r.files.length===4 && r.
 K=$(api "$R/changes?scope=commit&ref=$(git -C "$PROJ" rev-list --max-parents=0 HEAD)")
 check "the first commit diffs against nothing" "$(js "$K" 'r.base===null && r.files.every(f=>f.status==="added") && r.files.some(f=>f.path==="bin.dat" && f.binary)')" "$K"
 check "changes of an unknown branch is a 404" "$(( $(code "$R/changes?scope=branch&ref=nosuch") == 404 ))"
+
+echo "== resolving file mentions from the chat"
+rs(){ api "$R/resolve?q=$(enc "$1")"; }
+X=$(rs README.md)
+check "a plain path resolves to the file" "$(js "$X" 'r.matches.length===1 && r.matches[0].path==="README.md" && r.matches[0].type==="file" && r.line===undefined')" "$X"
+X=$(rs 'README.md:2')
+check "path:line carries the line" "$(js "$X" 'r.matches[0].path==="README.md" && r.line===2')" "$X"
+X=$(rs 'src/app.js:10:3')
+check "path:line:col carries both" "$(js "$X" 'r.matches[0].path==="src/app.js" && r.line===10 && r.col===3')" "$X"
+X=$(rs 'var/review/m13int-{v0,v1,v3-*,v4a,v4b}.log')
+check "braces and a wildcard expand to every file that exists" "$(js "$X" 'r.matches.map(m=>m.path).join()==="var/review/m13int-v0.log,var/review/m13int-v1.log,var/review/m13int-v3-a.log,var/review/m13int-v3-b.log,var/review/m13int-v4a.log"')" "$X"
+X=$(rs 'var/review/*.log')
+check "a wildcard lists the matching files, ignored ones included" "$(js "$X" 'r.matches.length===5')" "$X"
+X=$(rs "$PROJ/README.md")
+check "an absolute path inside the project resolves" "$(js "$X" 'r.matches[0]?.path==="README.md"')" "$X"
+X=$(rs 'lib/util.js')
+check "a path written from a subfolder is found by its suffix" "$(js "$X" 'r.matches.length===1 && r.matches[0].path==="src/lib/util.js"')" "$X"
+X=$(rs 'src/')
+check "a folder resolves as a folder" "$(js "$X" 'r.matches[0]?.path==="src" && r.matches[0].type==="dir"')" "$X"
+X=$(rs '(README.md),')
+check "punctuation around a mention is ignored" "$(js "$X" 'r.matches[0]?.path==="README.md"')" "$X"
+X=$(rs 'nothing/here.ts')
+check "a mention of a missing file resolves to nothing" "$(js "$X" 'r.matches.length===0')" "$X"
+for bad in '../../../../etc/passwd' '/etc/passwd' '.git/config' 'escape/passwd' 'escape/*'; do
+  X=$(rs "$bad")
+  check "never resolves outside the project: $bad" "$(js "$X" 'Array.isArray(r.matches) && r.matches.length===0')" "$X"
+done
 
 echo "== a project that is not a git repository"
 NR="$B/api/projects/$NID/repo"

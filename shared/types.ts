@@ -928,6 +928,13 @@ export interface RepoLog {
   truncated: boolean;
 }
 
+/** a file mention from the chat, resolved to what exists in the project */
+export interface RepoResolved {
+  matches: RepoEntry[];
+  line?: number;
+  col?: number;
+}
+
 export type RepoChangeScope = 'working' | 'branch' | 'commit';
 
 export interface RepoFileChange {

@@ -7,6 +7,7 @@ import { DIFFICULTY_ROUTING_ENABLED } from '@shared/features';
 import { Link } from 'react-router-dom';
 import { useState } from 'react';
 import { useStore } from '../../store';
+import { FileLink, LinkedText } from '../FileLink';
 import type {
   AiCallPayload, BrowserActionPayload, ChatEvent, CheckpointPayload, CommandPayload, CompactionPayload, ErrorPayload,
   FileChangePayload, FileReadPayload, FindingsPayload, RunPayload, SearchPayload, SessionsPayload, StatusPayload, ToolCallPayload, ArbitrationPayload, DispositionsPayload } from '@shared/types';
@@ -334,7 +335,7 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
         {(p.verified?.length || p.repairFailed?.length || p.folded?.length) ? (
           <div className="space-y-1 text-[12.5px]">
             {p.verified?.map((id) => <div key={id} className="text-ok"><CircleCheck size={12} className="mr-1 inline" />{id} — repair verified, resolved</div>)}
-            {p.repairFailed?.map((r) => <div key={r.id} className="text-err"><AlertTriangle size={12} className="mr-1 inline" />{r.id} — repair failed: <span className="text-mut">{r.evidence}</span></div>)}
+            {p.repairFailed?.map((r) => <div key={r.id} className="text-err"><AlertTriangle size={12} className="mr-1 inline" />{r.id} — repair failed: <span className="text-mut"><LinkedText text={r.evidence} /></span></div>)}
             {p.folded?.map((r) => <div key={r.id} className="text-dim">{r.id} — restated by the Reviewer, not a new finding</div>)}
           </div>
         ) : null}
@@ -347,13 +348,13 @@ export function FindingsRow({ ev }: { ev: ChatEvent }) {
               }`}>{f.severity}</span>
               <span dir="auto" className="font-medium text-ink">{f.title}</span>
               {f.file && (
-                <span className="mono text-[11.5px] text-accent/90">{f.file}{f.line ? `:${f.line}` : ''}</span>
+                <FileLink mention={`${f.file}${f.line ? `:${f.line}` : ''}`} className="mono text-[11.5px] text-accent/90">{f.file}{f.line ? `:${f.line}` : ''}</FileLink>
               )}
             </div>
-            <p dir="auto" className="mt-1 leading-relaxed text-mut">{f.detail}</p>
-            {f.evidence && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Evidence:</span> {f.evidence}</p>}
+            <p dir="auto" className="mt-1 leading-relaxed text-mut"><LinkedText text={f.detail} /></p>
+            {f.evidence && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Evidence:</span> <LinkedText text={f.evidence} /></p>}
             {f.category && <span className="mt-1 inline-block rounded-full border border-line px-2 py-[1px] text-[10.5px] text-dim">{f.category.replace('_', ' ')}</span>}
-            {f.recommendation && <p dir="auto" className="mt-0.5 text-[12.5px] italic text-dim">Recommendation: {f.recommendation}</p>}
+            {f.recommendation && <p dir="auto" className="mt-0.5 text-[12.5px] italic text-dim">Recommendation: <LinkedText text={f.recommendation} /></p>}
           </div>
         ))}
       </div>
@@ -654,7 +655,7 @@ export function ErrorRow({ ev }: { ev: ChatEvent }) {
         <span className="text-[13px] font-medium text-[#ffb3ae]">{p.message}</span>
         {p.source && <span className="ml-auto text-[11px] uppercase tracking-wide text-dim">{p.source}</span>}
       </div>
-      {p.detail && <p dir="auto" className="mt-1 pl-[22px] text-[12.5px] leading-relaxed text-mut">{p.detail}</p>}
+      {p.detail && <p dir="auto" className="mt-1 pl-[22px] text-[12.5px] leading-relaxed text-mut"><LinkedText text={p.detail} /></p>}
     </div>
   );
 }
@@ -716,8 +717,8 @@ export function DispositionsRow({ ev }: { ev: ChatEvent }) {
               <span dir="auto" className="font-medium text-ink">{r.id ?? `${r.index}.`} {r.title}</span>
               {r.source === 'assumed' && <span className="text-[11px] text-dim">(not answered — recorded as accepted)</span>}
             </div>
-            <p dir="auto" className="mt-0.5 leading-relaxed text-mut">{r.reason}</p>
-            {r.evidence && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Evidence:</span> {r.evidence}</p>}
+            <p dir="auto" className="mt-0.5 leading-relaxed text-mut"><LinkedText text={r.reason} /></p>
+            {r.evidence && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Evidence:</span> <LinkedText text={r.evidence} /></p>}
           </div>
         ))}
       </div>
@@ -758,8 +759,8 @@ export function ArbitrationRow({ ev }: { ev: ChatEvent }) {
                 {a.repairStatus && <span className="text-[11px] text-dim">repair {a.repairStatus}</span>}
                 <span className={`ml-auto text-[11px] ${a.blocking ? 'text-err' : 'text-dim'}`}>{a.blocking ? 'blocking' : 'not blocking'}</span>
               </div>
-              <p dir="auto" className="mt-0.5 leading-relaxed text-mut">{a.reason}</p>
-              {a.required && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Required:</span> {a.required}</p>}
+              <p dir="auto" className="mt-0.5 leading-relaxed text-mut"><LinkedText text={a.reason} /></p>
+              {a.required && <p dir="auto" className="mt-0.5 text-[12.5px] text-dim"><span className="text-mut">Required:</span> <LinkedText text={a.required} /></p>}
             </div>
           );
         })}

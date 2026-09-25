@@ -11,6 +11,7 @@ import xml from 'highlight.js/lib/languages/xml';
 import { memo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { FileLink, isPathLike } from './FileLink';
 
 hljs.registerLanguage('bash', bash);
 hljs.registerLanguage('sh', bash);
@@ -102,6 +103,9 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
             const { className, children } = props as { className?: string; children?: React.ReactNode };
             const isBlock = /language-/.test(className ?? '') || String(children ?? '').includes('\n');
             if (isBlock) return <CodeBlock className={className}>{children}</CodeBlock>;
+            const text = String(children ?? '');
+            // a file the agent mentions opens in the Files dock
+            if (isPathLike(text)) return <FileLink mention={text}><code>{children}</code></FileLink>;
             return <code>{children}</code>;
           },
           a: ({ href, children }) => (

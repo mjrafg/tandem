@@ -552,6 +552,120 @@ export function parseDiff(text: string): RepoFileChange[] {
   return files;
 }
 
+// ---------------------------------------------------------------- resolve a mention
+
+const MAX_EXPANSIONS = 64;
+const MAX_MATCHES = 200;
+
+/** `a/{x,y}.log` → `a/x.log`, `a/y.log` — every brace group, capped */
+function expandBraces(p: string): string[] {
+  let out = [p];
+  for (let guard = 0; guard < 8; guard++) {
+    const next: string[] = [];
+    let changed = false;
+    for (const s of out) {
+      const m = s.match(/\{([^{}]*)\}/);
+      if (!m || m.index == null) { next.push(s); continue; }
+      changed = true;
+      for (const alt of m[1].split(',')) next.push(s.slice(0, m.index) + alt + s.slice(m.index + m[0].length));
+      if (next.length > MAX_EXPANSIONS) break;
+    }
+    out = next.slice(0, MAX_EXPANSIONS);
+    if (!changed) break;
+  }
+  return out;
+}
+
+function globRe(seg: string): RegExp {
+  return new RegExp(`^${seg.replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
+}
+
+/** Paths under the root matching a relative pattern whose segments may hold * or ? */
+function globMatch(root: string, rel: string): RepoEntry[] {
+  let frontier = [''];
+  const segs = rel.split('/').filter(Boolean);
+  for (let i = 0; i < segs.length && frontier.length > 0; i++) {
+    const seg = segs[i];
+    const next: string[] = [];
+    for (const base of frontier) {
+      if (!/[*?]/.test(seg)) { next.push(base ? `${base}/${seg}` : seg); continue; }
+      let names: string[] = [];
+      try { names = fs.readdirSync(resolveInside(root, base)); } catch { continue; }
+      const re = globRe(seg);
+      for (const n of names) if (n !== '.git' && re.test(n)) next.push(base ? `${base}/${n}` : n);
+      if (next.length > MAX_MATCHES) break;
+    }
+    frontier = next.slice(0, MAX_MATCHES);
+  }
+  return frontier.flatMap((r) => { const e = entryAt(root, r); return e ? [e] : []; });
+}
+
+function entryAt(root: string, rel: string): RepoEntry | null {
+  try {
+    const clean = cleanRel(rel);
+    const st = fs.statSync(resolveInside(root, clean));
+    return { name: path.posix.basename(clean) || clean, path: clean, type: st.isDirectory() ? 'dir' : 'file', ...(st.isFile() ? { size: st.size } : {}) };
+  } catch { return null; }
+}
+
+/**
+ * Turn a file mention from the chat into files in this project. It accepts what
+ * agents write: `a/b.ts`, `a/b.ts:120`, `a/b.ts:120:4`, `./a`, an absolute path
+ * inside the project, brace lists `{x,y}` and `*`/`?` wildcards. A path that is
+ * not found from the root is looked up as a suffix of the project's files, so
+ * `src/app.ts` still finds `web/src/app.ts`. Nothing outside the project is
+ * ever returned.
+ */
+async function resolveMention(root: string, raw: unknown): Promise<{ matches: RepoEntry[]; line?: number; col?: number }> {
+  if (typeof raw !== 'string' || !raw.trim() || raw.length > 1000 || raw.includes('\0')) throw new BrowseError(400, 'Name a file.');
+  let q = raw.trim().replace(/^[`'"(]+|[`'")\].,;]+$/g, '');
+  let line: number | undefined;
+  let col: number | undefined;
+  const lc = q.match(/:(\d+)(?::(\d+))?$/);
+  if (lc) { line = Number(lc[1]); col = lc[2] ? Number(lc[2]) : undefined; q = q.slice(0, lc.index); }
+  q = q.replace(/#L(\d+).*$/, (_, n: string) => { line = Number(n); return ''; });
+  if (path.isAbsolute(q)) {
+    const rel = path.relative(root, path.resolve(q));
+    if (!rel || rel.startsWith('..')) {
+      // the project may be reached through a symlinked path; compare real paths too
+      let real = '';
+      try { real = fs.realpathSync(q); } catch { /* does not exist */ }
+      const relReal = real ? path.relative(root, real) : '..';
+      if (!relReal || relReal.startsWith('..')) return { matches: [] };
+      q = relReal;
+    } else q = rel;
+  }
+  q = q.replace(/\\/g, '/').replace(/^(\.\/)+/, '');
+  const seen = new Set<string>();
+  const matches: RepoEntry[] = [];
+  const add = (e: RepoEntry) => { if (!seen.has(e.path) && matches.length < MAX_MATCHES) { seen.add(e.path); matches.push(e); } };
+  const candidates = expandBraces(q);
+  for (const c of candidates) {
+    let clean: string;
+    try { clean = cleanRel(c); } catch { continue; } // '..' and .git are never resolved
+    if (/[*?]/.test(clean)) globMatch(root, clean).forEach(add);
+    else { const e = entryAt(root, clean); if (e) add(e); }
+  }
+  if (matches.length === 0 && (await isRepo(root))) {
+    // written relative to some subfolder: find it by suffix among the project's files
+    const listing = await git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']);
+    if (listing) {
+      const files = listing.split('\0').filter(Boolean);
+      for (const c of candidates) {
+        let clean: string;
+        try { clean = cleanRel(c); } catch { continue; }
+        if (!clean || /[*?]/.test(clean)) continue;
+        for (const f of files) {
+          if (f === clean || f.endsWith(`/${clean}`)) { const e = entryAt(root, f); if (e) add(e); }
+          if (matches.length >= 20) break;
+        }
+      }
+    }
+  }
+  matches.sort((a, b) => a.path.localeCompare(b.path));
+  return { matches, ...(line ? { line } : {}), ...(col ? { col } : {}) };
+}
+
 // ---------------------------------------------------------------- routes
 
 function fail(reply: FastifyReply, err: unknown) {
@@ -560,7 +674,7 @@ function fail(reply: FastifyReply, err: unknown) {
 }
 
 export function registerRepoBrowseRoutes(app: FastifyInstance): void {
-  type Q = { path?: string; ref?: string; base?: string; scope?: string };
+  type Q = { path?: string; ref?: string; base?: string; scope?: string; q?: string };
   const handler = (fn: (root: string, q: Q) => Promise<unknown>) => async (req: any, reply: FastifyReply) => {
     try {
       return await fn(projectRoot(req.params.id), (req.query ?? {}) as Q);
@@ -580,4 +694,5 @@ export function registerRepoBrowseRoutes(app: FastifyInstance): void {
   app.get('/api/projects/:id/repo/branches', handler((root, q) => branches(root, q.base)));
   app.get('/api/projects/:id/repo/log', handler((root, q) => log(root, q.ref, q.base)));
   app.get('/api/projects/:id/repo/changes', handler((root, q) => changes(root, q.scope, q.ref, q.base)));
+  app.get('/api/projects/:id/repo/resolve', handler((root, q) => resolveMention(root, q.q)));
 }

@@ -14,6 +14,17 @@ import { Spinner } from '../ui';
 
 export type FilesTab = 'files' | 'changes' | 'branches';
 
+/** a file mention clicked in the chat, already resolved against the project */
+export interface FileRequest {
+  mention: string;
+  matches: RepoEntry[];
+  line?: number;
+  /** when it was asked for: the same file twice is still two requests */
+  at: number;
+}
+
+const parentOf = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+
 /** what the Changes tab is showing */
 type ChangeSource =
   | { scope: 'working' }
@@ -44,8 +55,9 @@ function useLoad<T>(fn: (() => Promise<T>) | null, deps: unknown[]): Load<T> {
  * own directory, so inside a Director session it shows that session's worktree
  * and branch. It fills whatever dock holds it (./Dock.tsx).
  */
-export function FilesPanel({ chat, project, open, tab, onTab, onClose }: {
+export function FilesPanel({ chat, project, open, tab, onTab, onClose, request }: {
   chat: Chat; project: Project; open: boolean; tab: FilesTab; onTab: (t: FilesTab) => void; onClose: () => void;
+  request?: FileRequest | null;
 }) {
   const [reload, setReload] = useState(0);
   const [ref, setRef] = useState<string | null>(null);
@@ -53,11 +65,30 @@ export function FilesPanel({ chat, project, open, tab, onTab, onClose }: {
   const [file, setFile] = useState<string | null>(null);
   const [source, setSource] = useState<ChangeSource>({ scope: 'working' });
   const [branch, setBranch] = useState<string | null>(null);
+  /** the line a mention pointed at, highlighted in the open file */
+  const [line, setLine] = useState<number | null>(null);
+  /** a mention that matched several files: they are listed to pick from */
+  const [matches, setMatches] = useState<FileRequest | null>(null);
 
   // a different chat or directory starts from the top
   useEffect(() => {
-    setRef(null); setDir(''); setFile(null); setSource({ scope: 'working' }); setBranch(null);
+    setRef(null); setDir(''); setFile(null); setSource({ scope: 'working' }); setBranch(null); setLine(null); setMatches(null);
   }, [project.id]);
+
+  // a file mentioned in the chat: open it (at its line), or list what matched
+  useEffect(() => {
+    if (!request) return;
+    setRef(null);
+    onTab('files');
+    if (request.matches.length === 1) {
+      const m = request.matches[0];
+      setMatches(null);
+      if (m.type === 'dir') { setDir(m.path); setFile(null); setLine(null); }
+      else { setDir(parentOf(m.path)); setFile(m.path); setLine(request.line ?? null); }
+    } else {
+      setMatches(request); setFile(null); setLine(null);
+    }
+  }, [request?.at]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // a run that just finished has changed files: show the new state
   const wasRunning = useRef(chat.running);
@@ -69,7 +100,7 @@ export function FilesPanel({ chat, project, open, tab, onTab, onClose }: {
   const branches = useLoad<RepoBranches>(open ? () => api.repoBranches(project.id) : null, [open, project.id, reload]);
 
   const browse = useCallback((r: string | null, path = '', openFile: string | null = null) => {
-    setRef(r); setDir(path); setFile(openFile); onTab('files');
+    setRef(r); setDir(path); setFile(openFile); setLine(null); setMatches(null); onTab('files');
   }, [onTab]);
 
   if (!open) return null;
@@ -113,8 +144,10 @@ export function FilesPanel({ chat, project, open, tab, onTab, onClose }: {
           {tab === 'files' && (
             <FilesView
               projectId={project.id} projectName={project.name} reload={reload}
-              branches={branches.data} refName={ref} dir={dir} file={file}
-              onRef={(r) => browse(r)} onDir={(d) => { setDir(d); setFile(null); }} onFile={setFile}
+              branches={branches.data} refName={ref} dir={dir} file={file} line={line} matches={matches}
+              onRef={(r) => browse(r)} onDir={(d) => { setDir(d); setFile(null); setLine(null); setMatches(null); }}
+              onFile={(f) => { setFile(f); setLine(null); if (f) setDir(parentOf(f)); }}
+              onCloseMatches={() => setMatches(null)}
             />
           )}
           {tab === 'changes' && (
@@ -160,10 +193,10 @@ function NotARepo({ what }: { what: string }) {
 
 // ---------------------------------------------------------------- files
 
-function FilesView({ projectId, projectName, reload, branches, refName, dir, file, onRef, onDir, onFile }: {
+function FilesView({ projectId, projectName, reload, branches, refName, dir, file, line, matches, onRef, onDir, onFile, onCloseMatches }: {
   projectId: string; projectName: string; reload: number; branches?: RepoBranches;
-  refName: string | null; dir: string; file: string | null;
-  onRef: (r: string | null) => void; onDir: (d: string) => void; onFile: (f: string | null) => void;
+  refName: string | null; dir: string; file: string | null; line: number | null; matches: FileRequest | null;
+  onRef: (r: string | null) => void; onDir: (d: string) => void; onFile: (f: string | null) => void; onCloseMatches: () => void;
 }) {
   const tree = useLoad<RepoTree>(() => api.repoTree(projectId, dir, refName), [projectId, dir, refName, reload]);
   const crumbs = dir ? dir.split('/') : [];
@@ -205,7 +238,12 @@ function FilesView({ projectId, projectName, reload, branches, refName, dir, fil
       </div>
 
       {file ? (
-        <FileViewer projectId={projectId} path={file} refName={refName} reload={reload} onBack={() => onFile(null)} />
+        <FileViewer
+          projectId={projectId} path={file} refName={refName} reload={reload} line={line}
+          backLabel={matches ? 'Matches' : 'Folder'} onBack={() => onFile(null)}
+        />
+      ) : matches ? (
+        <MatchesView req={matches} onOpen={(e) => (e.type === 'dir' ? onDir(e.path) : onFile(e.path))} onClose={onCloseMatches} />
       ) : tree.loading && !tree.data ? <Loading /> : tree.error ? <Failed error={tree.error} /> : tree.data && (
         tree.data.entries.length === 0 ? <Empty>This folder is empty.</Empty> : (
           <ul className="py-1">
@@ -249,8 +287,32 @@ function EntryRow({ e, onDir, onFile }: { e: RepoEntry; onDir: (d: string) => vo
 /** lines rendered at first; a large file shows the rest on request */
 const FIRST_LINES = 3000;
 
-function FileViewer({ projectId, path, refName, reload, onBack }: {
-  projectId: string; path: string; refName: string | null; reload: number; onBack: () => void;
+function MatchesView({ req, onOpen, onClose }: { req: FileRequest; onOpen: (e: RepoEntry) => void; onClose: () => void }) {
+  return (
+    <div>
+      <div className="flex items-start gap-2 border-b border-linesoft px-3.5 py-2.5">
+        <p className="min-w-0 flex-1 text-[12.5px] text-mut">
+          {plural(req.matches.length, 'file')} match <span className="mono break-all text-ink">{req.mention}</span>
+        </p>
+        <button className="btn-ghost -mr-1 shrink-0 px-1.5 py-1" onClick={onClose} aria-label="Close the matches"><X size={13} /></button>
+      </div>
+      <ul className="py-1">
+        {req.matches.map((e) => (
+          <li key={e.path}>
+            <button className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left hover:bg-bg2" onClick={() => onOpen(e)}>
+              {e.type === 'dir' ? <Folder size={15} className="shrink-0 text-accent/80" /> : <File size={15} className="shrink-0 text-dim" />}
+              <span className="mono min-w-0 flex-1 truncate text-[12.5px] text-ink" title={e.path}>{e.path}</span>
+              {e.size != null && <span className="shrink-0 text-[11px] tabular-nums text-dim">{fmtBytes(e.size)}</span>}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function FileViewer({ projectId, path, refName, reload, line, backLabel, onBack }: {
+  projectId: string; path: string; refName: string | null; reload: number; line?: number | null; backLabel: string; onBack: () => void;
 }) {
   const f = useLoad<RepoFile>(() => api.repoFile(projectId, path, refName), [projectId, path, refName, reload]);
   const [wrap, setWrap] = useState(() => window.matchMedia('(max-width: 639px)').matches);
@@ -258,11 +320,18 @@ function FileViewer({ projectId, path, refName, reload, onBack }: {
   const [copied, setCopied] = useState(false);
   const lines = useMemo(() => (f.data?.content ?? '').replace(/\n$/, '').split('\n'), [f.data?.content]);
   const shown = all ? lines : lines.slice(0, FIRST_LINES);
+  // a mention with a line: bring that line into view, even past the first chunk
+  const target = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    if (!line || !f.data?.content) return;
+    if (line > FIRST_LINES && !all) { setAll(true); return; }
+    target.current?.scrollIntoView({ block: 'center' });
+  }, [line, f.data?.content, all]);
 
   return (
     <div>
       <div className="flex items-center gap-1.5 border-b border-linesoft px-2 py-1.5">
-        <button className="btn-ghost px-2 py-1 text-[12.5px]" onClick={onBack}><ArrowLeft size={13} /> Folder</button>
+        <button className="btn-ghost px-2 py-1 text-[12.5px]" onClick={onBack}><ArrowLeft size={13} /> {backLabel}</button>
         <span className="min-w-0 flex-1 truncate text-right text-[11.5px] text-dim">
           {f.data && <>{fmtBytes(f.data.size)}{!f.data.binary && <> · {plural(lines.length, 'line')}</>}{refName ? <> · {refName.length > 20 ? refName.slice(0, 12) : refName}</> : null}</>}
         </span>
@@ -292,7 +361,7 @@ function FileViewer({ projectId, path, refName, reload, onBack }: {
               <table className="mono w-full border-collapse text-[12px] leading-[1.6]">
                 <tbody>
                   {shown.map((l, i) => (
-                    <tr key={i}>
+                    <tr key={i} ref={i + 1 === line ? target : undefined} className={i + 1 === line ? 'bg-accent/15' : undefined}>
                       <td className="w-px select-none whitespace-nowrap border-r border-linesoft px-2.5 text-right align-top tabular-nums text-dim/70">{i + 1}</td>
                       <td className={`px-3 align-top text-[#c3c9d4] ${wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'}`}>{l || ' '}</td>
                     </tr>

@@ -1,6 +1,14 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { Integration, McpIntegrationConfig } from '../../../shared/types';
 import { credentialSecret } from './store';
+import { OAuthRequiredError, oauthAccessToken, parseWwwAuthenticate } from './oauth';
+
+/** An OAuth sign-in behind a connection: a token for each request, and a way to renew it. */
+interface ConnAuth {
+  token(): Promise<string>;
+  /** the server just refused `rejected` — make a better one current (throws when the sign-in is gone) */
+  renew(rejected: string): Promise<void>;
+}
 
 /**
  * Minimal real MCP client used by the execution layer to talk to EXTERNAL
@@ -113,9 +121,10 @@ class HttpConn {
   lastUsed = Date.now();
   dead = false;
 
-  constructor(private url: string, private headers: Record<string, string>) {}
+  constructor(private url: string, private headers: Record<string, string>, private auth?: ConnAuth) {}
 
-  private async post(body: unknown): Promise<{ json: any; sessionId: string | null }> {
+  private async post(body: unknown, retried = false): Promise<{ json: any; sessionId: string | null }> {
+    const token = this.auth ? await this.auth.token() : null;
     const res = await fetch(this.url, {
       method: 'POST',
       headers: {
@@ -123,10 +132,24 @@ class HttpConn {
         Accept: 'application/json, text/event-stream',
         ...(this.sessionId ? { 'Mcp-Session-Id': this.sessionId } : {}),
         ...this.headers,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     });
+    if (res.status === 401) {
+      const challenge = parseWwwAuthenticate(res.headers.get('www-authenticate'));
+      const said = (await res.text().catch(() => '')).slice(0, 300);
+      if (this.auth) {
+        // a token the server rejected: renew once, then give up on it
+        if (!retried && token) { await this.auth.renew(token); return this.post(body, true); }
+        this.dead = true;
+        throw new OAuthRequiredError('The MCP server rejected the sign-in even after it was renewed. Sign in again.');
+      }
+      // an OAuth challenge where Tandem has no sign-in: say so, rather than a bare 401
+      if (challenge.resourceMetadata) { this.dead = true; throw new OAuthRequiredError(); }
+      throw new Error(`MCP server returned HTTP 401${said ? `: ${said}` : ': the credential was not accepted.'}`);
+    }
     const sessionId = res.headers.get('mcp-session-id');
     const text = await res.text();
     if (!res.ok) throw new Error(`MCP server returned HTTP ${res.status}${text ? `: ${text.slice(0, 300)}` : ''}`);
@@ -159,7 +182,7 @@ class HttpConn {
         protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'tandem', version: '1' },
       }).then(async () => {
         await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }).catch(() => undefined);
-      });
+      }).catch((err) => { this.initDone = null; throw err; });
     }
     await this.initDone;
     this.lastUsed = Date.now();
@@ -199,16 +222,30 @@ function connect(integration: Integration): Conn {
   if (cfg.transport === 'http') {
     if (!cfg.url?.trim()) throw new Error('MCP http integration has no URL configured.');
     const headers: Record<string, string> = { ...(cfg.headers ?? {}) };
-    if (cred?.type === 'bearer_token') headers.Authorization = `Bearer ${cred.data.token}`;
+    let auth: ConnAuth | undefined;
+    if (cred?.type === 'oauth' && integration.credentialId) {
+      const credentialId = integration.credentialId;
+      auth = {
+        token: () => oauthAccessToken(credentialId),
+        renew: async (rejected) => { await oauthAccessToken(credentialId, rejected); },
+      };
+    } else if (cred?.type === 'bearer_token') headers.Authorization = `Bearer ${cred.data.token}`;
     else if (cred?.type === 'api_key_header') headers[cred.data.header] = cred.data.value;
     else if (cred?.type === 'header_set') Object.assign(headers, JSON.parse(cred.data.headersJson));
-    conn = new HttpConn(cfg.url, headers);
+    conn = new HttpConn(cfg.url, headers, auth);
   } else {
     const env: Record<string, string> = cred?.type === 'env_set' ? JSON.parse(cred.data.envJson) : {};
     conn = new StdioConn(cfg, env);
   }
   pool.set(key, conn);
   return conn;
+}
+
+/** Drop every pooled connection of an integration; the next call connects afresh. */
+export function resetMcpConnections(integrationId: string): void {
+  for (const [k, c] of pool) {
+    if (k.startsWith(`${integrationId}:`)) { c.close(); pool.delete(k); }
+  }
 }
 
 export async function mcpListTools(integration: Integration): Promise<McpToolDef[]> {

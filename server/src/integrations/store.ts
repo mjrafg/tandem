@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type {
+import type { IntegrationOAuthStatus,
   CredentialMeta, CredentialType, Integration, IntegrationTool, IntegrationToolSpec, IntegrationType, RoleName,
 } from '../../../shared/types';
 import { config } from '../config';
@@ -85,6 +85,7 @@ const CRED_FIELDS: Record<CredentialType, string[]> = {
   header_set: ['headersJson'],
   env_set: ['envJson'],
   ssh_private_key: ['privateKey'],
+  oauth: [],
 };
 
 export function credentialFields(type: CredentialType): string[] {
@@ -128,6 +129,18 @@ export function updateCredential(id: string, patch: { name?: string; data?: Reco
   return rowToCredMeta(db.prepare('SELECT * FROM credentials WHERE id = ?').get(id));
 }
 
+/**
+ * Replace a credential's secret material exactly. updateCredential merges and
+ * ignores blank fields — right for the form, where blank means "unchanged" —
+ * but a sign-in that signs out, or refreshes to a token with no expiry, has
+ * to be able to clear a field. Server-internal: the OAuth flow writes through
+ * this, never the API.
+ */
+export function replaceCredentialData(id: string, data: Record<string, string>): void {
+  const res = db.prepare('UPDATE credentials SET data = ?, updated_at = ? WHERE id = ?').run(encryptSecret(data), Date.now(), id);
+  if (res.changes === 0) throw new Error('Credential not found.');
+}
+
 export function deleteCredential(id: string): void {
   const used = db.prepare('SELECT name FROM integrations WHERE credential_id = ?').all(id) as any[];
   if (used.length > 0) throw new Error(`In use by: ${used.map((u) => u.name).join(', ')} — detach it there first.`);
@@ -142,11 +155,18 @@ export function credentialSecret(id: string | null): { type: CredentialType; dat
   return { type: row.type, data: decryptSecret(row.data) };
 }
 
+/** the parts of an OAuth credential that are secret; the rest is public metadata */
+const OAUTH_SECRET_KEYS = ['accessToken', 'refreshToken', 'clientSecret'] as const;
+
 /** every secret string of a credential — used to scrub outputs/errors */
 export function credentialSecretValues(id: string | null): string[] {
   const c = credentialSecret(id);
   if (!c) return [];
   const values: string[] = [];
+  if (c.type === 'oauth') {
+    for (const k of OAUTH_SECRET_KEYS) if (c.data[k]) values.push(c.data[k]);
+    return values.filter((v) => v.length >= 4);
+  }
   for (const [k, v] of Object.entries(c.data)) {
     if (k === 'headersJson' || k === 'envJson') {
       try { values.push(...Object.values(JSON.parse(v)).map(String)); } catch { values.push(v); }
@@ -158,6 +178,30 @@ export function credentialSecretValues(id: string | null): string[] {
 }
 
 // ---------------------------------------------------------------- integrations
+
+// set when a server answers with an OAuth challenge and no sign-in exists yet
+try { db.exec('ALTER TABLE integrations ADD COLUMN oauth_required INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+
+export function setOAuthRequired(id: string, required: boolean): void {
+  db.prepare('UPDATE integrations SET oauth_required = ? WHERE id = ?').run(required ? 1 : 0, id);
+}
+
+/** Sign-in status for the UI, read from the encrypted credential without exposing it. */
+function oauthStatus(row: any): IntegrationOAuthStatus | undefined {
+  const cred = row.credential_id ? credentialSecret(row.credential_id) : null;
+  if (cred?.type === 'oauth') {
+    const exp = Number(cred.data.expiresAt);
+    return {
+      required: !cred.data.accessToken,
+      signedIn: !!cred.data.accessToken,
+      issuer: cred.data.issuer || undefined,
+      expiresAt: Number.isFinite(exp) && exp > 0 ? exp : null,
+      scope: cred.data.scope || undefined,
+      clientSource: (cred.data.clientSource || undefined) as IntegrationOAuthStatus['clientSource'],
+    };
+  }
+  return row.oauth_required ? { required: true, signedIn: false } : undefined;
+}
 
 function rowToTool(row: any): IntegrationTool {
   return {
@@ -179,6 +223,7 @@ function rowToIntegration(row: any, withTools = true): Integration {
   const cred = row.credential_id
     ? (db.prepare('SELECT name FROM credentials WHERE id = ?').get(row.credential_id) as any)?.name ?? null
     : null;
+  const oauth = oauthStatus(row);
   return {
     id: row.id,
     slug: row.slug,
@@ -193,6 +238,7 @@ function rowToIntegration(row: any, withTools = true): Integration {
     lastTestAt: row.last_test_at,
     lastTestOk: row.last_test_ok == null ? null : !!row.last_test_ok,
     lastTestError: row.last_test_error,
+    ...(oauth ? { oauth } : {}),
     tools: withTools
       ? db.prepare('SELECT * FROM integration_tools WHERE integration_id = ? ORDER BY name').all(row.id).map(rowToTool)
       : [],

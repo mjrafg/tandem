@@ -1,12 +1,13 @@
 import {
-  ChevronRight, Download, Globe, Network, Plus, RefreshCw, Server, Terminal, Trash2, Upload, Wrench,
+  ChevronRight, Copy, Download, Globe, KeyRound, LogOut, Network, Plus, RefreshCw, Server, ShieldCheck, Terminal, Trash2, Upload, Wrench,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import type {
   CredentialMeta, HttpIntegrationConfig, HttpToolParam, Integration, IntegrationTool, IntegrationType,
   McpIntegrationConfig, OpenApiIntegrationConfig, RoleName, SshIntegrationConfig,
 } from '@shared/types';
-import { api } from '../../api';
+import { ApiError, api } from '../../api';
 import { timeAgo } from '../../lib/format';
 import { useStore } from '../../store';
 import { Field, Modal, SelectBox, Spinner, Toggle } from '../ui';
@@ -26,6 +27,18 @@ export function IntegrationsSection() {
 
   const load = () => api.integrations().then(setItems).catch(() => setItems([]));
   useEffect(() => { void load(); }, []);
+
+  // back from a provider's sign-in page: say how it went, open that card, and
+  // clear the query so a reload does not announce it again
+  const [params, setParams] = useSearchParams();
+  const [returnedTo] = useState(() => params.get('integration'));
+  useEffect(() => {
+    const done = params.get('oauth'); const failed = params.get('oauth_error'); const tools = params.get('tools');
+    if (!done && !failed) return;
+    if (failed) toast(failed, 'error');
+    else toast(`Signed in${tools ? ` — ${tools} tool${tools === '1' ? '' : 's'} loaded` : ''}`);
+    setParams({}, { replace: true });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function doImport(file: File) {
     try {
@@ -65,7 +78,7 @@ export function IntegrationsSection() {
         {items.length === 0 && <p className="mb-1 text-[12.5px] text-dim">No integrations yet.</p>}
         <div className="space-y-2">
           {items.map((it) => (
-            <IntegrationCard key={it.id} integration={it} onChanged={(next) => {
+            <IntegrationCard key={it.id} integration={it} initiallyOpen={it.id === returnedTo} onChanged={(next) => {
               if (next) setItems((l) => (l ?? []).map((x) => (x.id === next.id ? next : x)));
               else void load();
             }} />
@@ -80,9 +93,156 @@ export function IntegrationsSection() {
 
 // ---------------------------------------------------------------- card
 
-function IntegrationCard({ integration: it, onChanged }: { integration: Integration; onChanged: (next?: Integration) => void }) {
+function isOAuthCapable(it: Integration): boolean {
+  return it.type === 'mcp' && (it.config as McpIntegrationConfig).transport === 'http';
+}
+
+/** time left until ts, for a token's expiry — timeAgo only counts backwards */
+function timeUntil(ts: number): string {
+  const m = Math.round((ts - Date.now()) / 60_000);
+  if (m < 1) return 'in under a minute';
+  if (m < 60) return `in ${m}m`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `in ${h}h` : `in ${Math.round(h / 24)}d`;
+}
+
+const hostOf = (url?: string) => { try { return url ? new URL(url).host : ''; } catch { return url ?? ''; } };
+
+/**
+ * Sign-in for an HTTP MCP server that uses OAuth. The browser goes to the
+ * provider and comes back to Tandem; nothing secret is ever shown here, only
+ * whether a sign-in exists and when its token runs out.
+ */
+function OAuthPanel({ integration: it, onChanged }: { integration: Integration; onChanged: (next?: Integration) => void }) {
   const toast = useStore((s) => s.toast);
-  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // what the last attempt said the operator has to do
+  const [issue, setIssue] = useState<{ message: string; canonicalUrl?: string; needsClient?: boolean; redirectUri?: string } | null>(null);
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const o = it.oauth;
+
+  async function signIn(client?: { clientId: string; clientSecret?: string }) {
+    setBusy(true);
+    try {
+      const { authorizeUrl } = await api.startIntegrationOAuth(it.id, client);
+      window.location.assign(authorizeUrl); // the provider sends the browser back to Tandem
+    } catch (err) {
+      const d = err instanceof ApiError ? err.data : undefined;
+      setIssue({
+        message: err instanceof Error ? err.message : 'Signing in failed.',
+        canonicalUrl: typeof d?.canonicalUrl === 'string' ? d.canonicalUrl : undefined,
+        needsClient: d?.needsClient === true,
+        redirectUri: typeof d?.redirectUri === 'string' ? d.redirectUri : undefined,
+      });
+      setBusy(false);
+    }
+  }
+
+  async function switchToCanonical(url: string) {
+    setBusy(true);
+    try {
+      const next = await api.updateIntegration(it.id, { config: { ...(it.config as McpIntegrationConfig), url } });
+      onChanged(next);
+      setIssue(null);
+      await signIn();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Could not change the address', 'error');
+      setBusy(false);
+    }
+  }
+
+  async function signOut() {
+    setBusy(true);
+    try {
+      onChanged(await api.disconnectIntegrationOAuth(it.id));
+      toast('Signed out');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Signing out failed', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (o?.signedIn) {
+    const renew = o.expiresAt
+      ? o.expiresAt > Date.now() ? `token renews ${timeUntil(o.expiresAt)}` : 'token renews on the next call'
+      : 'no expiry set by the provider';
+    return (
+      <div className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-ok/25 bg-ok/[0.06] px-2.5 py-2 text-[12px]">
+        <ShieldCheck size={13} className="shrink-0 text-ok" />
+        <span className="text-ink">Signed in{o.issuer ? ` with ${hostOf(o.issuer)}` : ''}</span>
+        <span className="text-dim">{renew}</span>
+        {o.scope && <span className="mono min-w-0 truncate text-[11px] text-dim" title={o.scope}>{o.scope}</span>}
+        <span className="ml-auto flex gap-1.5">
+          <button className="btn-outline px-2 py-0.5 text-[11.5px]" disabled={busy} onClick={() => void signIn()}>Sign in again</button>
+          <button className="btn-ghost px-2 py-0.5 text-[11.5px] text-dim hover:text-err" disabled={busy} onClick={() => void signOut()}>
+            <LogOut size={11} /> Sign out
+          </button>
+        </span>
+      </div>
+    );
+  }
+
+  const cfgUrl = (it.config as McpIntegrationConfig).url;
+  return (
+    <div className="mb-2.5 space-y-2 rounded-md border border-linesoft bg-bg1 px-2.5 py-2.5 text-[12px]">
+      <div className="flex flex-wrap items-center gap-2">
+        <KeyRound size={13} className="shrink-0 text-accent" />
+        <span className="text-ink">
+          {o?.required ? 'This server needs you to sign in.' : 'If this server uses OAuth, sign in to it.'}
+        </span>
+        {!issue?.needsClient && (
+          <button className="btn-primary ml-auto px-2.5 py-1 text-[12px]" disabled={busy} onClick={() => void signIn()}>
+            {busy ? <Spinner size={12} /> : <>Sign in with {hostOf(cfgUrl)}</>}
+          </button>
+        )}
+      </div>
+
+      {issue && (
+        <p className="rounded bg-err/10 px-2 py-1.5 text-[12px] leading-relaxed text-[#ffb3ae]">{issue.message}</p>
+      )}
+
+      {issue?.canonicalUrl && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-mut">Its own address is <span className="mono text-ink">{issue.canonicalUrl}</span>.</span>
+          <button className="btn-outline px-2.5 py-1 text-[12px]" disabled={busy} onClick={() => void switchToCanonical(issue.canonicalUrl!)}>
+            Use that address and sign in
+          </button>
+        </div>
+      )}
+
+      {issue?.needsClient && (
+        <div className="space-y-2">
+          {issue.redirectUri && (
+            <div className="text-mut">
+              Register Tandem with the provider using this redirect address:
+              <div className="mt-1 flex items-center gap-1.5">
+                <code className="mono min-w-0 flex-1 truncate rounded bg-bg0 px-2 py-1 text-[11.5px] text-ink">{issue.redirectUri}</code>
+                <button className="btn-ghost px-1.5 py-1" title="Copy" onClick={() => { void navigator.clipboard.writeText(issue.redirectUri!); toast('Copied'); }}>
+                  <Copy size={12} />
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input className="input mono text-[12px]" placeholder="Client ID" value={clientId} onChange={(e) => setClientId(e.target.value)} autoComplete="off" />
+            <input className="input mono text-[12px]" type="password" placeholder="Client secret, if it gave you one" value={clientSecret}
+              onChange={(e) => setClientSecret(e.target.value)} autoComplete="off" />
+          </div>
+          <button className="btn-primary px-2.5 py-1 text-[12px]" disabled={busy || !clientId.trim()}
+            onClick={() => void signIn({ clientId: clientId.trim(), clientSecret: clientSecret.trim() })}>
+            {busy ? <Spinner size={12} /> : 'Sign in'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IntegrationCard({ integration: it, onChanged, initiallyOpen = false }: { integration: Integration; onChanged: (next?: Integration) => void; initiallyOpen?: boolean }) {
+  const toast = useStore((s) => s.toast);
+  const [open, setOpen] = useState(initiallyOpen);
   const [busy, setBusy] = useState<string | null>(null);
   const [toolEditor, setToolEditor] = useState<IntegrationTool | 'new' | null>(null);
   const Icon = TYPE_META[it.type].icon;
@@ -128,7 +288,10 @@ function IntegrationCard({ integration: it, onChanged }: { integration: Integrat
             <span>credential: {it.credentialName ?? 'none'}</span>
             {it.lastTestAt && <span>tested {timeAgo(it.lastTestAt)}{it.lastTestOk ? ' · OK' : ''}</span>}
           </div>
-          {it.lastTestOk === false && it.lastTestError && (
+          {isOAuthCapable(it) && (it.oauth || it.lastTestOk === false) ? (
+            <OAuthPanel integration={it} onChanged={onChanged} />
+          ) : null}
+          {it.lastTestOk === false && it.lastTestError && !(it.oauth?.required) && (
             <p className="mb-2.5 rounded-md bg-err/10 px-2.5 py-1.5 text-[12px] text-[#ffb3ae]">{it.lastTestError}</p>
           )}
           <div className="mb-2.5 flex flex-wrap items-center gap-1.5">

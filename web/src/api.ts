@@ -120,7 +120,11 @@ export const api = {
   updateIntegration: (id: string, patch: Record<string, unknown>) =>
     j<Integration>(`/api/integrations/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteIntegration: (id: string) => j<{ ok: true }>(`/api/integrations/${id}`, { method: 'DELETE' }),
-  testIntegration: (id: string) => j<{ ok: boolean; detail: string; integration: Integration }>(`/api/integrations/${id}/test`, { method: 'POST' }),
+  testIntegration: (id: string) => j<{ ok: boolean; detail: string; oauthRequired?: boolean; integration: Integration }>(`/api/integrations/${id}/test`, { method: 'POST' }),
+  /** returns where to send the browser; a 409 carries canonicalUrl / needsClient / redirectUri */
+  startIntegrationOAuth: (id: string, client?: { clientId: string; clientSecret?: string }) =>
+    j<{ authorizeUrl: string }>(`/api/integrations/${id}/oauth/start`, { method: 'POST', body: JSON.stringify(client ?? {}) }),
+  disconnectIntegrationOAuth: (id: string) => j<Integration>(`/api/integrations/${id}/oauth/disconnect`, { method: 'POST' }),
   refreshIntegrationTools: (id: string) =>
     j<{ ok: boolean; discovered: number; integration: Integration }>(`/api/integrations/${id}/refresh-tools`, { method: 'POST' }),
   updateIntegrationTool: (id: string, toolId: string, patch: { description?: string; enabled?: boolean; roles?: RoleName[] }) =>

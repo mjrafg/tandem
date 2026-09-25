@@ -7,6 +7,13 @@ const dataDir = process.env.DATA_DIR || path.join(cwd, 'data');
 
 export const config = {
   port: Number(process.env.PORT || 7810),
+  /**
+   * The address people and OAuth providers reach Tandem at, e.g.
+   * https://ai.agent24.io. Behind a TLS-terminating proxy the request itself
+   * says http, so this cannot be inferred reliably; unset, it is derived from
+   * the forwarded headers (good enough for local development).
+   */
+  publicUrl: (process.env.TANDEM_PUBLIC_URL || '').replace(/\/+$/, '') || null,
   host: process.env.HOST || '127.0.0.1',
   dataDir,
   projectsDir: process.env.PROJECTS_DIR || path.join(dataDir, 'projects'),

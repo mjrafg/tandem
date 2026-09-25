@@ -16,6 +16,8 @@ const TYPE_INFO: Record<CredentialType, { label: string; fields: { key: string; 
   header_set: { label: 'Header set', fields: [{ key: 'headersJson', label: 'Headers (JSON object)', multiline: true, hint: '{"X-Auth": "…"}' }] },
   env_set: { label: 'Environment variables', fields: [{ key: 'envJson', label: 'Env vars (JSON object)', multiline: true, hint: 'for stdio MCP servers' }] },
   ssh_private_key: { label: 'SSH private key', fields: [{ key: 'privateKey', label: 'Private key (PEM/OpenSSH)', multiline: true }] },
+  // written only by an integration's Sign in — there is nothing here to type
+  oauth: { label: 'OAuth sign-in', fields: [] },
 };
 
 export function CredentialsSection() {
@@ -135,12 +137,18 @@ function CredentialModal({ editing, onClose, onSaved }: {
             <SelectBox
               value={type}
               onChange={(v) => { setType(v as CredentialType); setData({}); }}
-              options={Object.entries(TYPE_INFO).map(([value, t]) => ({ value, label: t.label }))}
+              options={Object.entries(TYPE_INFO).filter(([value]) => value !== 'oauth').map(([value, t]) => ({ value, label: t.label }))}
             />
           ) : (
             <div className="input flex items-center bg-bg0 text-mut">{info.label}</div>
           )}
         </Field>
+        {type === 'oauth' && (
+          <p className="rounded-md border border-linesoft bg-bg0 px-3 py-2.5 text-[12.5px] leading-relaxed text-mut">
+            This holds the tokens from an OAuth sign-in. Tandem renews them itself. To sign in again or sign out, use
+            the integration that uses it, under Integrations.
+          </p>
+        )}
         {info.fields.map((f) => (
           <Field key={f.key} label={f.label} hint={f.hint}>
             {f.multiline ? (

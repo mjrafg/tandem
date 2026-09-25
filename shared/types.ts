@@ -1031,7 +1031,8 @@ export type CredentialType =
   | 'basic_auth'      // Authorization: Basic base64(user:pass)
   | 'header_set'      // arbitrary secret headers
   | 'env_set'         // secret env vars for stdio MCP servers
-  | 'ssh_private_key';
+  | 'ssh_private_key'
+  | 'oauth';          // tokens from an OAuth sign-in; created by the sign-in flow, never typed in
 
 /** credential metadata — secret material never leaves the server */
 export interface CredentialMeta {
@@ -1133,7 +1134,26 @@ export interface Integration {
   lastTestAt?: number | null;
   lastTestOk?: boolean | null;
   lastTestError?: string | null;
+  /** present for an HTTP MCP server that uses, or has asked for, OAuth sign-in */
+  oauth?: IntegrationOAuthStatus;
   tools: IntegrationTool[];
+}
+
+/**
+ * What the UI may know about an integration's OAuth sign-in. Tokens never
+ * leave the server; this is only whether one exists and when it runs out.
+ */
+export interface IntegrationOAuthStatus {
+  /** the server answered with an OAuth challenge and there is no sign-in yet */
+  required: boolean;
+  signedIn: boolean;
+  /** the authorization server that issued the sign-in */
+  issuer?: string;
+  /** epoch ms the current access token expires; null when the server set no expiry */
+  expiresAt?: number | null;
+  scope?: string;
+  /** how Tandem identified itself to that server */
+  clientSource?: 'manual' | 'metadata_document' | 'dynamic';
 }
 
 // ---------------------------------------------------------------- project director

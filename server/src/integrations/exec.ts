@@ -8,7 +8,8 @@ import type {
 import { config } from '../config';
 import { addEvent, updateEvent } from '../events';
 import { mcpCallTool } from './mcpClient';
-import { credentialSecret, credentialSecretValues, getToolByFullName, listIntegrations } from './store';
+import { OAuthRequiredError } from './oauth';
+import { credentialSecret, credentialSecretValues, getToolByFullName, listIntegrations, setOAuthRequired } from './store';
 
 /**
  * The integration execution layer. The AI never talks to external services
@@ -191,7 +192,14 @@ async function execHttp(integration: Integration, tool: IntegrationTool, args: R
 
 async function execMcp(integration: Integration, tool: IntegrationTool, args: Record<string, unknown>): Promise<ExecOutcome> {
   const remote = tool.spec.remoteName ?? tool.name;
-  const { ok, text } = await mcpCallTool(integration, remote, args);
+  let res: { ok: boolean; text: string };
+  try {
+    res = await mcpCallTool(integration, remote, args);
+  } catch (err) {
+    if (err instanceof OAuthRequiredError) setOAuthRequired(integration.id, true);
+    throw err;
+  }
+  const { ok, text } = res;
   return ok ? { ok: true, result: text } : { ok: false, result: text, error: text.slice(0, 500) || 'The MCP tool reported an error.' };
 }
 

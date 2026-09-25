@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type {
   CredentialType, HttpToolParam, Integration, IntegrationType, McpIntegrationConfig, OpenApiIntegrationConfig,
   RoleName, Skill, SshIntegrationConfig,
@@ -7,11 +7,14 @@ import type {
 import { config } from './config';
 import { kvGet, kvSet } from './db';
 import { catalogForRole, executeIntegrationTool, runSsh, sshToolDefinitions } from './integrations/exec';
-import { mcpDisconnect, mcpListTools } from './integrations/mcpClient';
+import { mcpDisconnect, mcpListTools, resetMcpConnections } from './integrations/mcpClient';
+import {
+  CLIENT_METADATA_PATH, OAuthError, OAuthRequiredError, clientMetadataDocument, completeOAuth, disconnectOAuth, startOAuth,
+} from './integrations/oauth';
 import { paramsToSchema, parseOpenApi } from './integrations/openapi';
 import {
   createCredential, createIntegration, credentialFields, deleteCredential, deleteIntegration, deleteTool,
-  getIntegration, listCredentials, listIntegrations, markMissingExcept, recordTest, replaceHttpTool, updateCredential,
+  getIntegration, listCredentials, listIntegrations, markMissingExcept, recordTest, replaceHttpTool, setOAuthRequired, updateCredential,
   updateIntegration, updateTool, upsertTool,
 } from './integrations/store';
 
@@ -100,6 +103,7 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
     if (!integration) return reply.code(404).send({ error: 'Integration not found.' });
     const result = await testIntegration(integration);
     recordTest(integration.id, result.ok, result.ok ? undefined : result.detail);
+    if (result.oauthRequired) setOAuthRequired(integration.id, true);
     return { ...result, integration: getIntegration(integration.id) };
   });
 
@@ -113,8 +117,68 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       recordTest(integration.id, false, detail);
+      if (err instanceof OAuthRequiredError) setOAuthRequired(integration.id, true);
       return reply.code(502).send({ error: detail, integration: getIntegration(integration.id) });
     }
+  });
+
+  // ---------------------------------------------------------------- OAuth sign-in
+
+  // Who Tandem is, for an authorization server that accepts a Client ID
+  // Metadata Document: the URL of this document IS the client id. It must be
+  // public — the provider fetches it, not the user — and it holds nothing secret.
+  app.get(CLIENT_METADATA_PATH, async (req, reply) => {
+    reply.header('Cache-Control', 'public, max-age=300');
+    return reply.type('application/json').send(clientMetadataDocument(publicOrigin(req)));
+  });
+
+  app.post('/api/integrations/:id/oauth/start', async (req, reply) => {
+    const integration = getIntegration((req.params as any).id);
+    if (!integration) return reply.code(404).send({ error: 'Integration not found.' });
+    const b = (req.body ?? {}) as { clientId?: unknown; clientSecret?: unknown };
+    const manual = typeof b.clientId === 'string' && b.clientId.trim()
+      ? { clientId: b.clientId, clientSecret: typeof b.clientSecret === 'string' ? b.clientSecret : '' }
+      : undefined;
+    try {
+      return await startOAuth(integration, publicOrigin(req), manual);
+    } catch (err) {
+      if (err instanceof OAuthError) return reply.code(409).send({ error: err.message, ...err.extra });
+      throw err;
+    }
+  });
+
+  // The provider sends the user's browser back here. It stays behind sign-in:
+  // the redirect is a top-level GET, so the session cookie comes with it, and
+  // only the signed-in user can complete a flow they started.
+  app.get('/api/integrations/oauth/callback', async (req, reply) => {
+    const back = (params: Record<string, string>) => reply.redirect(`/settings/integrations?${new URLSearchParams(params)}`);
+    let integrationId = '';
+    try {
+      ({ integrationId } = await completeOAuth((req.query ?? {}) as Record<string, unknown>));
+    } catch (err) {
+      return back({ oauth_error: err instanceof Error ? err.message : String(err) });
+    }
+    resetMcpConnections(integrationId);
+    // pick the tools up straight away, so the card is useful the moment you land back
+    const integration = getIntegration(integrationId)!;
+    try {
+      const { discovered } = await discoverTools(integration);
+      recordTest(integrationId, true);
+      return back({ oauth: 'connected', integration: integrationId, tools: String(discovered) });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      recordTest(integrationId, false, detail);
+      return back({ oauth: 'connected', integration: integrationId, oauth_error: `Signed in, but loading the tools failed: ${detail}` });
+    }
+  });
+
+  app.post('/api/integrations/:id/oauth/disconnect', async (req, reply) => {
+    const integration = getIntegration((req.params as any).id);
+    if (!integration) return reply.code(404).send({ error: 'Integration not found.' });
+    await disconnectOAuth(integration);
+    resetMcpConnections(integration.id);
+    setOAuthRequired(integration.id, true);
+    return getIntegration(integration.id);
   });
 
   // ---------------------------------------------------------------- tools
@@ -309,7 +373,20 @@ function afterConfigSave(integration: Integration): void {
   }
 }
 
-async function testIntegration(integration: Integration): Promise<{ ok: boolean; detail: string }> {
+/**
+ * The address a provider reaches Tandem at. Behind a TLS-terminating proxy the
+ * request says http, so production sets TANDEM_PUBLIC_URL; without it the
+ * forwarded headers are the next best thing.
+ */
+function publicOrigin(req: FastifyRequest): string {
+  if (config.publicUrl) return config.publicUrl;
+  const first = (v: unknown) => String(Array.isArray(v) ? v[0] : v ?? '').split(',')[0].trim();
+  const proto = first(req.headers['x-forwarded-proto']) || req.protocol;
+  const host = first(req.headers['x-forwarded-host']) || first(req.headers.host);
+  return `${proto}://${host}`;
+}
+
+async function testIntegration(integration: Integration): Promise<{ ok: boolean; detail: string; oauthRequired?: boolean }> {
   try {
     if (integration.type === 'mcp') {
       const tools = await mcpListTools(integration);
@@ -332,7 +409,7 @@ async function testIntegration(integration: Integration): Promise<{ ok: boolean;
       .catch(() => fetch(cfg.baseUrl, { method: 'GET', signal: AbortSignal.timeout(15_000), redirect: 'manual' }));
     return { ok: true, detail: `Base URL reachable — responded HTTP ${res.status}.` };
   } catch (err) {
-    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    return { ok: false, detail: err instanceof Error ? err.message : String(err), ...(err instanceof OAuthRequiredError ? { oauthRequired: true } : {}) };
   }
 }
 

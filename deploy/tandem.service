@@ -15,6 +15,9 @@ Environment=DATA_DIR=/srv/tandem/data
 Environment=PROJECTS_DIR=/srv/tandem/projects
 Environment=WEB_DIST=/srv/tandem/app/web/dist
 Environment=TANDEM_EMAIL=mjrafg2@gmail.com
+# where people and OAuth providers reach Tandem; TLS ends at the proxy, so
+# the requests themselves say http and cannot be trusted for this
+Environment=TANDEM_PUBLIC_URL=https://ai.agent24.io
 # agent CLIs (claude, codex + the node18 that codex's shebang needs) live here
 Environment=HOME=/home/aiaccounting
 Environment=PATH=/home/aiaccounting/.local/bin:/home/aiaccounting/.nvm/versions/node/v18.16.1/bin:/opt/node22/bin:/usr/local/bin:/usr/bin:/bin

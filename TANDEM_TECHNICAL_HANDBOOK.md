@@ -2046,3 +2046,5 @@ The estimate is computed by Tandem from counts the Director supplies (reused ass
 
 **Tests.** `server/test/video/run.sh` (real server, fake Codex, stand-in engine and TTS MCP servers) covers versioning and pinning, role authority, approvals, every gate above, idempotency, promotion, the reviewer's engine scope and Reviewer Agent planning.
 
+**Verified with real models** (isolated instance on the production host, real Director/agents, Codex images, the real Video Engine): a channel created from one chat request (Director → a Visual Director session reviewed by the Video Reviewer: Style Bible, a canonical character, a hero reference and three identity-conditioned references); version pinning and an explicit, approved upgrade; a New Video that the Director planned, priced (5 shots from 2 new images), had approved, then produced and rendered locally (12.75 s, 1920×1080) with every engine import a production asset; promotion of exactly one project asset while ten one-offs stayed project-only; and a second video that found the promoted asset, imported it, generated no images and spent nothing.
+

@@ -117,7 +117,7 @@ export function NewVideoDialog() {
                   <span className="text-[13.5px] font-medium">{c.name}</span>
                   <span className="shrink-0 text-[11.5px] tabular-nums text-dim">v{c.headVersion} · {c.entityCount} entities · {c.assetCount} assets</span>
                 </span>
-                {c.description && <span className="mt-0.5 line-clamp-2 block text-[12px] text-dim">{c.description}</span>}
+                {c.description && <span className="mt-0.5 line-clamp-2 text-[12px] text-dim">{c.description}</span>}
               </span>
             </label>
           ))}

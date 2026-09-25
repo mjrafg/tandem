@@ -448,12 +448,16 @@ export function registerRoutes(app: FastifyInstance): void {
         ...(r.costUsd !== undefined ? { costUsd: r.costUsd } : {}),
       };
       if (r.reused) {
+        addEvent(chatId, 'status', { text: `Image request identical to an earlier one in this video project — returned "${d.name}" again instead of generating (nothing charged).` }, { runId: activeCtx(chatId)?.runId });
         return { ok: true, reused: true, id: d.id, name: d.name, size: d.size, mime: d.mime, width: r.image.width, height: r.image.height, savedTo: r.savedTo, provider: r.image.provider, model: r.image.model, ...extra };
       }
       addEvent(chatId, 'file_output', {
         id: d.id, name: d.name, size: d.size, mime: d.mime, note: d.note, path: d.sourcePath, sha256: d.sha256,
         by: role as FileOutputPayload['by'],
-        generated: { provider: r.image.provider, model: r.image.model, prompt: String(b.prompt).trim().slice(0, 2000) },
+        generated: {
+          provider: r.image.provider, model: r.image.model, prompt: String(b.prompt).trim().slice(0, 2000),
+          ...(Array.isArray(b.reference_asset_ids) && b.reference_asset_ids.length ? { references: b.reference_asset_ids.map(String).slice(0, 8) } : {}),
+        },
       }, { runId: activeCtx(chatId)?.runId });
       return {
         ok: true, id: d.id, name: d.name, size: d.size, mime: d.mime, width: r.image.width, height: r.image.height,

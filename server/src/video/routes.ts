@@ -6,7 +6,9 @@
 import fs from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { config } from '../config';
-import { db } from '../db';
+import { db, getChat } from '../db';
+import { addEvent } from '../events';
+import { activeCtx } from '../engine/run';
 import { createProjectRun, queueObservation } from '../director/engine';
 import { getRun } from '../director/store';
 import {
@@ -22,7 +24,20 @@ export function registerVideoRoutes(app: FastifyInstance): void {
   app.post('/api/internal/channel', { bodyLimit: 4 * 1024 * 1024 }, async (req, reply) => {
     const b = (req.body ?? {}) as { token?: string; chatId?: string; role?: string; op?: string; args?: Record<string, unknown>; workdir?: string };
     if (b.token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
-    const r = await handleChannelTool(String(b.chatId ?? ''), String(b.role ?? 'builder'), String(b.op ?? ''), (b.args ?? {}) as Record<string, any>, b.workdir);
+    const chatId = String(b.chatId ?? '');
+    const role = String(b.role ?? 'builder');
+    const op = String(b.op ?? '');
+    const startedAt = Date.now();
+    const r = await handleChannelTool(chatId, role, op, (b.args ?? {}) as Record<string, any>, b.workdir);
+    // every channel call is on the chat's record — which is how reuse (or a
+    // refused write) can be verified afterwards from the timeline alone
+    if (getChat(chatId)) {
+      addEvent(chatId, 'tool_call', {
+        tool: op, integration: 'Channels', role, args: compactArgs(b.args ?? {}),
+        status: r.ok ? 'done' : 'failed', startedAt, durationMs: Date.now() - startedAt,
+        ...(r.ok ? { resultPreview: r.text.slice(0, 1_500), resultBytes: r.text.length } : { error: r.error }),
+      }, { runId: activeCtx(chatId)?.runId });
+    }
     if (!r.ok) return reply.code(r.status).send({ ok: false, error: r.error });
     return { ok: true, text: r.text };
   });
@@ -111,4 +126,9 @@ export function registerVideoRoutes(app: FastifyInstance): void {
     if (!r.ok) return reply.code(r.status).send({ error: r.error });
     return { ok: true };
   });
+}
+
+/** long texts (a Style Bible, a script) are shortened for the timeline; the call itself had them in full */
+function compactArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(args, (_k, v) => (typeof v === 'string' && v.length > 400 ? `${v.slice(0, 400)}… (${v.length} chars)` : v)));
 }

@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS paid_ops (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_paid_ops_key ON paid_ops(run_id, op_key);
 `);
+// how many new images the approved plan covers — binding even when a provider's rate is $0
+try { db.exec('ALTER TABLE video_projects ADD COLUMN approved_images INTEGER'); } catch { /* exists */ }
 
 export class VideoError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -451,6 +453,7 @@ function rowToVideo(r: any): VideoProject {
     runId: r.run_id, channelId: r.channel_id, channelName: ch?.name ?? '(deleted channel)', channelVersion: r.channel_version,
     newerVersion: ch && ch.head_version > r.channel_version ? ch.head_version : null,
     phase: r.phase as VideoPhase, budgetUsd: r.budget_usd ?? null, spentUsd: spentUsd(r.run_id),
+    approvedImages: r.approved_images ?? null, imagesGenerated: countPaidOps(r.run_id, 'images'),
     estimate: r.estimate ? JSON.parse(r.estimate) : null, narration: r.narration ? JSON.parse(r.narration) : null,
     createdAt: r.created_at,
   };
@@ -485,9 +488,10 @@ export function insertVideoProject(runId: string, channelId: string, version: nu
   return getVideoProject(runId)!;
 }
 
-export function patchVideoProject(runId: string, patch: { phase?: VideoPhase; budgetUsd?: number | null; estimate?: unknown; narration?: unknown; channelVersion?: number }): VideoProject {
+export function patchVideoProject(runId: string, patch: { phase?: VideoPhase; budgetUsd?: number | null; approvedImages?: number | null; estimate?: unknown; narration?: unknown; channelVersion?: number }): VideoProject {
   const sets: string[] = [];
   const vals: unknown[] = [];
+  if (patch.approvedImages !== undefined) { sets.push('approved_images = ?'); vals.push(patch.approvedImages); }
   if (patch.phase) { sets.push('phase = ?'); vals.push(patch.phase); }
   if (patch.budgetUsd !== undefined) { sets.push('budget_usd = ?'); vals.push(patch.budgetUsd); }
   if (patch.estimate !== undefined) { sets.push('estimate = ?'); vals.push(JSON.stringify(patch.estimate)); }
@@ -564,6 +568,10 @@ export function findPaidOp(runId: string, key: string): { result: string; costUs
 export function recordPaidOp(input: { runId: string; chatId: string; key: string; category: string; label: string; costUsd: number; result: string }): void {
   db.prepare(`INSERT OR IGNORE INTO paid_ops (id, run_id, chat_id, op_key, category, label, cost_usd, result, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), input.runId, input.chatId, input.key, input.category, input.label.slice(0, 200), input.costUsd, input.result.slice(0, 200_000), Date.now());
+}
+
+export function countPaidOps(runId: string, category: string): number {
+  return (db.prepare('SELECT COUNT(*) AS n FROM paid_ops WHERE run_id = ? AND category = ?').get(runId, category) as any).n;
 }
 
 export function spentUsd(runId: string): number {

@@ -137,7 +137,13 @@ export function imageSpendGate(chatId: string, costUsd: number, keyParts: unknow
   if (!video) return null;
   const key = opKey(['image', keyParts]);
   const earlier = findPaidOp(video.runId, key);
-  return { video, key, cached: earlier ? earlier.result : null, refusal: earlier ? null : spendRefusal(video, costUsd) };
+  if (earlier) return { video, key, cached: earlier.result, refusal: null };
+  let refusal = spendRefusal(video, costUsd);
+  // the approved COUNT binds too: a $0 provider still spends quota, and the plan said how many
+  if (!refusal && video.approvedImages != null && video.imagesGenerated >= video.approvedImages) {
+    refusal = `The approved plan covers ${video.approvedImages} new image${video.approvedImages === 1 ? '' : 's'}, and ${video.imagesGenerated} ha${video.imagesGenerated === 1 ? 's' : 've'} been generated. Reuse what exists, or have the Director ask the user for more (video_request_production_approval with the new count).`;
+  }
+  return { video, key, cached: null, refusal };
 }
 
 export { recordPaidOp };

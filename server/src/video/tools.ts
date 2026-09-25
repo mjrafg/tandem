@@ -10,6 +10,7 @@
  *   - only the Director asks for production approval or a channel upgrade;
  *   - nobody but the user, through the UI, can approve anything.
  */
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ChannelContent, MediaAsset, VideoProject } from '../../../shared/types';
@@ -110,7 +111,7 @@ export function directorVideoText(runId: string): string {
   return [
     channelSummaryText(video.channelId, video.channelVersion, runId),
     `Pinned channel version: ${video.channelVersion}${video.newerVersion ? ` (the channel is now at version ${video.newerVersion}; this project stays on ${video.channelVersion} unless you request video_upgrade_channel and the user approves)` : ''}.`,
-    `Production phase: ${video.phase}. Budget: ${video.budgetUsd != null ? `$${video.budgetUsd.toFixed(2)} approved` : 'none approved yet'} · spent $${video.spentUsd.toFixed(2)}.`,
+    `Production phase: ${video.phase}. Budget: ${video.budgetUsd != null ? `$${video.budgetUsd.toFixed(2)} approved` : 'none approved yet'} · spent $${video.spentUsd.toFixed(2)}${video.approvedImages != null ? ` · images ${video.imagesGenerated} of ${video.approvedImages} approved` : ''}.`,
     pending.length ? `Waiting for the user: ${pending.map((p) => `${p.kind} — ${p.title}`).join('; ')}.` : '',
   ].filter(Boolean).join('\n');
 }
@@ -167,6 +168,21 @@ function entityCheck(channelId: string | null, version: number | null, entityId:
 }
 
 /**
+ * When a file being registered is exactly an image generated in this chat,
+ * the provenance says so — provider, model, prompt and the reference assets
+ * it was conditioned on — from Tandem's own record, not the agent's memory.
+ */
+function generationRecord(chatId: string, bytes: Buffer): Record<string, unknown> {
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  const d = db.prepare('SELECT id FROM deliverables WHERE sha256 = ? AND chat_id = ? ORDER BY created_at DESC').get(sha, chatId) as any;
+  if (!d) return {};
+  const ev = db.prepare("SELECT payload FROM events WHERE chat_id = ? AND kind = 'file_output' AND json_extract(payload, '$.id') = ?").get(chatId, d.id) as any;
+  const g = ev ? JSON.parse(ev.payload).generated : null;
+  if (!g) return {};
+  return { source: 'generated', provider: g.provider, model: g.model, prompt: g.prompt, deliverableId: d.id, ...(g.references ? { references: g.references } : {}) };
+}
+
+/**
  * Register new assets. In a video project they belong to the project; outside
  * one (channel development) they join the channel, all in one new version.
  */
@@ -191,7 +207,7 @@ export function addAssets(chatId: string, role: string, items: Record<string, un
       description: typeof it.description === 'string' ? it.description : '',
       tags: Array.isArray(it.tags) ? it.tags.map(String) : [],
       attributes,
-      provenance: { source: 'added', from: src.from, by: role, ...(opts.defaultProvenance ?? {}), ...((it.provenance as object) ?? {}) },
+      provenance: { source: 'added', from: src.from, by: role, ...generationRecord(chatId, src.bytes), ...(opts.defaultProvenance ?? {}), ...((it.provenance as object) ?? {}) },
     }));
   }
   if (inProject) return { assets: created, version: null, channelId: view.channelId };
@@ -382,6 +398,7 @@ function estimateFrom(video: VideoProject, args: Record<string, any>): Record<st
       { label: 'Local rendering (Video Engine)', usd: 0 },
     ],
     totalUsd,
+    approvedImages: newImages.length + variants,
     exact: false,
     note: 'Estimated from the rates in Settings → Video production; provider bills may differ.',
   };
@@ -412,8 +429,9 @@ export function decideApproval(id: string, decision: 'approve' | 'decline', onDe
     if (decision === 'approve') {
       if (a.kind === 'production') {
         const total = Number(a.detail.totalUsd) || 0;
-        patchVideoProject(a.runId, { budgetUsd: total, ...(video.phase === 'planning' || video.phase === 'awaiting_approval' ? { phase: 'approved' } : {}) });
-        outcome = `The user APPROVED production with a budget of $${total.toFixed(2)}. Paid generation is now allowed within that budget; narration first, then visual timing.`;
+        const images = Number(a.detail.approvedImages) || 0;
+        patchVideoProject(a.runId, { budgetUsd: total, approvedImages: images, ...(video.phase === 'planning' || video.phase === 'awaiting_approval' ? { phase: 'approved' } : {}) });
+        outcome = `The user APPROVED production with a budget of $${total.toFixed(2)} and ${images} new image${images === 1 ? '' : 's'}. Paid generation is now allowed within that; narration first, then visual timing.`;
       } else if (a.kind === 'promotion') {
         const assetId = String(a.detail.assetId);
         const { version } = updateChannel(video.channelId, { addAssetIds: [assetId] }, { by: 'user', note: `Promoted ${assetId} from a video project` });

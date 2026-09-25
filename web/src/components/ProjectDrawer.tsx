@@ -267,6 +267,12 @@ function VideoPanel({ runId }: { runId: string }) {
         <span className="text-dim">Spent</span>
         <span>${v.spentUsd.toFixed(2)}{v.budgetUsd != null ? <span className="text-dim"> of ${v.budgetUsd.toFixed(2)} approved</span> : <span className="text-dim"> · no budget yet</span>}</span>
       </div>
+      {v.approvedImages != null && (
+        <div className="mt-0.5 flex items-baseline justify-between tabular-nums">
+          <span className="text-dim">New images</span>
+          <span>{v.imagesGenerated} <span className="text-dim">of {v.approvedImages} approved</span></span>
+        </div>
+      )}
       {data && data.costs.length > 0 && (
         <table className="mt-1 w-full tabular-nums">
           <tbody>

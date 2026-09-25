@@ -847,7 +847,7 @@ export interface FileOutputPayload {
   /** the role that shared it; absent on files shared before roles were recorded (the Builder) */
   by?: 'builder' | 'final_repair' | 'builder_reviewer' | 'director_reviewer' | 'reviewer' | 'director';
   /** set when the image was generated from a prompt rather than shared from a file */
-  generated?: { provider: ImageProvider; model: string; prompt: string };
+  generated?: { provider: ImageProvider; model: string; prompt: string; references?: string[] };
 }
 
 export interface ChatEvent<K extends EventKind = EventKind> {
@@ -1541,6 +1541,9 @@ export interface VideoProject {
   phase: VideoPhase;
   budgetUsd: number | null;
   spentUsd: number;
+  /** new images the approved plan covers; generating more needs another approval */
+  approvedImages: number | null;
+  imagesGenerated: number;
   estimate: Record<string, unknown> | null;
   narration: Record<string, unknown> | null;
   createdAt: number;

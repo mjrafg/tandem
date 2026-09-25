@@ -62,6 +62,7 @@ Conventions used throughout:
 48. [Critical invariants](#48-critical-invariants)
 49. [Implemented vs legacy vs dead code](#49-implemented-vs-legacy-vs-dead-code)
 50. [Existing documentation audit](#50-existing-documentation-audit)
+51. [Video production: Channels and video projects](#51-video-production-channels-and-video-projects)
 
 ---
 
@@ -2004,3 +2005,44 @@ Documentation files in the repository: `README.md` (root), `server/test/review-r
 **Code comments** — the module headers in `procGroups.ts`, `sandbox.ts`, `settings.ts`, `providerContext.ts`, `reviewRetrySweeper.ts`, `director/engine.ts` and `run.ts` are current and were used as sources here after checking them against the code they describe. One inaccuracy worth flagging: `sandbox.ts`'s header calls the jail "the OS-enforced read-only boundary", which is true for the bound trees but can be read as whole-filesystem read-only; §21 states the precise semantics.
 
 **Where this handbook itself may drift.** Anything quoting a constant (timeouts, backoff, caps), a prompt key, a route, a state name or a `FAIL_MESSAGES` string is exact as of commit `aca04b0`; the reverse index (§47) and the route table (§26) are the places to re-verify after a refactor. This edition was checked mechanically against the working tree: every referenced path exists, every symbol attributed to a file is defined in the source, every route literal, table name, prompt key, state/status string and environment variable named here occurs in the code, and the table of contents matches the fifty headings.
+
+---
+
+## 51. Video production: Channels and video projects
+
+Video production is a kind of Tandem work, not a second application. A **video project** is an ordinary Director project run; the Director plans its own milestones and sessions for each video (there is no template), the sessions are ordinary chats run by ordinary Agent profiles, and the Builder/Reviewer loop reviews scripts and scenes the way it reviews code. What video adds lives in `server/src/video/` and one tool server, `mcp-channel.cjs`.
+
+**Channel** (`channels`, `channel_versions`). A reusable creative identity: description, Style Bible (`summary` + free-form named `sections`), entities (`character | location | prop | other`, each with id, summary, description, free-form attributes), the ids of the channel's reusable assets, and free-form production defaults. The content is stored as **immutable versions**: every change (`updateChannel`) reads the head, applies the patch and writes version N+1 inside one SQLite transaction, so concurrent writers serialize instead of losing updates; `expected_version` refuses a write on top of a version the caller has not seen. Changes can come from agents (`channel_update`) or the UI (`PATCH /api/channels/:id`) — both create versions.
+
+**Media assets** (`media_assets`, files under `DATA_DIR/media/`). Immutable files with `kind` = `reference` (preserves identity or guides generation — never an engine layer) or `production` (prepared for the engine), `scope` = `channel` or `project` (a project-scoped asset records `project_run_id`), an optional entity, tags, searchable attributes (view, pose, expression, state, transparent, processed, engineReady…) and provenance (generated/added, provider, model, prompt, references). Production files live in `media/production/`, references in `media/reference/`; every image also gets a ≤640 px JPEG preview in `media/previews/` (ffmpeg, or `sips` on macOS) because the Read guard refuses large images to agents. A channel version lists its assets by id, so a version keeps meaning exactly the images it named.
+
+**Video project** (`video_projects`, keyed by the run id). Pins `channel_id` + `channel_version` and carries the production `phase` (`planning → awaiting_approval → approved → narration_locked`), the approved `budget_usd`, the last estimate and the locked narration. `POST /api/video-projects` (the New Video dialog) makes a git-initialised directory under `PROJECTS_DIR/videos/`, calls `createProjectRun`, and pins the channel's head (or a chosen) version. A project never moves version on its own: `video_upgrade_channel` creates an approval, and only the user's decision changes the pin. `runIdForChat` maps any chat to its run (the Project Chat by `project_run_id`, a session by `pd_sessions.chat_id`), which is how every check below knows a call belongs to a video project.
+
+**What a chat can see.** `visibleAssetIds` = the pinned version's asset ids + the project's own assets. Asset search, reference ids passed to image generation, and engine imports are all filtered through it, so a video pinned to v3 never sees an asset promoted in v4 and never sees another video's project-only assets.
+
+**Tools** (`tandem_channel`, served to Builder, final repair, both Reviewers and the Director; authority decided in `video/tools.ts`, not by which tools were served): `channel_list`, `channel_get`, `asset_search`, `video_status` (everyone); `channel_update`, `asset_add`, `asset_promote`, `video_lock_narration` (writers: Builder, final repair, Director); `video_request_production_approval`, `video_upgrade_channel` (Director only). Every call is recorded as a `tool_call` event (`integration: 'Channels'`) on the chat, so reuse — or a refused write — is verifiable from the timeline. `tandem_generate_image` gained `reference_asset_ids` (Codex: `-i <file>… --` — `-i` is variadic and swallows a following prompt without `--`; OpenAI: `/images/edits` with `image[]`), `register` (store the result as an asset — project scope inside a video project, the named channel otherwise) and `variant`.
+
+**Invariants, enforced where the calls happen** (`video/gates.ts`, called from `executeIntegrationTool` and the image route):
+
+| Invariant | Enforcement |
+|---|---|
+| No paid generation before the user approves the production plan and cost | image route and every integration tool matching `settings.video.paidToolPatterns` refuse while `phase` is `planning`/`awaiting_approval` |
+| No spending beyond the approved budget | each paid call is priced from `settings.video.rates` (TTS per character); a call that would pass `budget_usd` is refused with a pointer to a new approval |
+| A retry, resume or duplicate never pays twice | `paid_ops` (unique `run_id + op_key`, key = hash of the request); an identical request returns the stored result and records nothing new |
+| Narration before visual timing | engine tools in `settings.video.timingTools` (`timeline_apply`, `render_video_start`) refused until `video_lock_narration` (real duration and segment timings, or `none: true`) |
+| The engine never gets a reference asset | the engine integration (`settings.video.engineIntegration`) is spawned with `VIDEO_ENGINE_LIBRARIES` + `tandem=<media/production>` (`mcpClient.connect`); `asset_import` from library `tandem` must name a visible production asset; `base64` and `inbox` imports are hashed and refused when the bytes are a reference asset's |
+| A Reviewer inspects, never edits, the video | on the engine integration a reviewer-family role gets exactly `settings.video.reviewerEngineTools`, whatever the tools' own role grants |
+| Only the user approves | `approvals` + an `approval` chat event; decided only through the signed-in `POST /api/approvals/:id/decide`, which applies the effect (phase + budget, channel version with the promoted asset, new pin) and wakes the Director with `queueObservation` |
+
+The estimate is computed by Tandem from counts the Director supplies (reused asset ids — validated as visible — new images, variants, narration characters, other paid calls) and the configured rates; the card shows the breakdown and is labelled an estimate. Spending is visible per category in the project drawer (`GET /api/video-projects/:runId`) with local rendering at $0.
+
+**Promotion.** Assets made in a video project stay in it. `asset_promote` creates a promotion approval; approving writes the next channel version with the asset added (`promoted_at` is set); only videos pinned to that version or later see it.
+
+**Context.** A session in a video project gets a compact channel block appended to its Builder or Reviewer instructions (`channelContextFor`: channel/version, Style Bible summary, entities with ids and asset counts, asset totals, the reuse rules). The Director gets `director.video_guidance` plus `directorVideoText` (pin, newer version, phase, budget, pending approvals) every turn. Images and long documents are never injected; agents fetch them with `channel_get detail=true` and `asset_search`.
+
+**Agents.** Profiles gained `kind`: `builder` (as before) or `reviewer`. A Reviewer Agent's prompt is appended to the session Reviewer's instructions (`reviewerSystemText`); like Builder Agents it is frozen at launch (`chat_reviewer_snapshots`), follows the Builder Reviewer role's model unless it pins its own (`resolveBuilderReviewerRole`), can never be the default, and never gains write access. The Director chooses one per session with `reviewer_profile_id` from the `AVAILABLE REVIEWER AGENTS` catalog. Seeded once (`seedVideoAgents`, kv `agents.video_seeded`): Storyteller, Visual Director, Video Producer (Builder) and Video Reviewer (Reviewer).
+
+**Reference images — what was measured (Codex CLI 0.155.1, built-in `image_gen`).** Codex accepts one or several `-i` reference images. With the character sheet attached, a new pose kept the design — head, eye, scarf, antenna, body, boots, palette and rendering — where the same detailed prompt without the reference drifted in framing, rendering, body colour and details. Two references (character + location) produced a faithful edit of the location with the same character placed in it. Limits: conditioning, not a guarantee — small details (hands) drift at small scale; no masks; ~60–90 s per image; every image counts against the Codex quota. The OpenAI Images API path sends references to `/images/edits` but was not exercised against the live API (no key is configured). The provider is a setting (Admin → Image generation), so a stronger identity-preserving provider can be added behind the same `reference_asset_ids` contract.
+
+**Tests.** `server/test/video/run.sh` (real server, fake Codex, stand-in engine and TTS MCP servers) covers versioning and pinning, role authority, approvals, every gate above, idempotency, promotion, the reviewer's engine scope and Reviewer Agent planning.
+

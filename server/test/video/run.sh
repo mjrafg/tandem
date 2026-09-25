@@ -68,6 +68,7 @@ check "only the Director asks for approval or a channel upgrade" "$(has "$(tools
 echo "== a channel, created in chat"
 R=$(ch $C0 builder channel_update '{"create":{"name":"What If","description":"Mysterious cinematic what-if videos."},"style_bible":{"summary":"Painterly 2D, dark teal and amber, fog, low-key light.","sections":{"Palette":"teal #0e3b43, amber #e0a458","Lighting":"low-key, one warm practical"}},"entities":[{"type":"character","name":"Pip","summary":"a small copper robot explorer","description":"Round copper head, one teal eye, red scarf."}],"note":"founding identity"}')
 check "created at version 1 with its Style Bible and first character" "$(has "$R" 'at version 1') $(has "$R" 'char-pip')" "$R"
+check "   the call is on the chat's record, as a Channels tool call" "$(is "$(api "$B/api/chats/$C0/events")" "r.events.some(e=>e.kind==='tool_call'&&e.payload.integration==='Channels'&&e.payload.tool==='channel_update'&&e.payload.status==='done')")"
 CHID=$(api "$B/api/channels" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)[0].id))')
 R=$(ch $C0 builder_reviewer channel_update '{"channel":"What If","description":"x"}')
 check "a Reviewer cannot change a channel, even by calling the tool" "$(has "$R" 'ERROR')" "$R"
@@ -80,21 +81,26 @@ S=$(ch $C0 builder asset_search '{"channel":"What If","entity_id":"char-pip"}')
 check "asset_search finds it, with a small preview and no engine path (it is a reference)" "$(has "$S" "$REF") $(has "$S" 'preview') $(not "$(has "$S" 'engine_import')")" "$S"
 check "   and the channel is now at version 2" "$(is "$(api "$B/api/channels/$CHID")" "r.channel.headVersion===2 && r.version.content.assetIds.includes('$REF')")"
 
+img C0 "{\"token\":\"devtoken\",\"chatId\":\"$C0\",\"role\":\"builder\",\"prompt\":\"Pip, side view\",\"reference_asset_ids\":[\"$REF\"],\"save_to\":\"art/pip-side.png\"}" >/dev/null
+R=$(ch $C0 builder asset_add '{"channel":"What If","assets":[{"path":"art/pip-side.png","kind":"reference","name":"Pip side","entity_id":"char-pip","attributes":{"view":"side"}}]}')
+PS=$(printf '%s' "$R" | grep -o 'ast_[0-9a-f]*' | head -1)
+check "registering a generated file by path links Tandem's own generation record (prompt, references)" "$(is "$(api "$B/api/channels/$CHID")" "(a=>a&&a.provenance.source==='generated'&&a.provenance.prompt==='Pip, side view'&&a.provenance.references.includes('$REF'))(r.assets.find(a=>a.id==='$PS'))")" "$R"
+
 echo "== video projects are pinned"
 VA=$(api -d "{\"channelId\":\"$CHID\"}" "$B/api/video-projects"); RA=$(jget "$VA" 'r.run.id'); CA=$(jget "$VA" 'r.chat.id')
-check "New Video opens a normal Project Chat pinned to the latest version" "$(is "$VA" "r.chat.kind==='project' && r.video.channelVersion===2 && r.run.video.channelVersion===2")" "$VA"
+check "New Video opens a normal Project Chat pinned to the latest version" "$(is "$VA" "r.chat.kind==='project' && r.video.channelVersion===3 && r.run.video.channelVersion===3")" "$VA"
 ch $C0 builder channel_update '{"channel":"What If","style_bible":{"summary":"Painterly 2D, now with rain."}}' >/dev/null
 VB=$(api -d "{\"channelId\":\"$CHID\"}" "$B/api/video-projects"); RB=$(jget "$VB" 'r.run.id'); CB=$(jget "$VB" 'r.chat.id')
-check "after the channel changes, a new video is pinned to version 3" "$(is "$VB" "r.video.channelVersion===3")" "$(jget "$VB" 'r.video')"
+check "after the channel changes, a new video is pinned to version 4" "$(is "$VB" "r.video.channelVersion===4")" "$(jget "$VB" 'r.video')"
 G=$(ch $CA director channel_get '{}')
-check "video A still reads version 2 — the old Style Bible, and knows 3 exists" "$(has "$G" '"version": 2') $(not "$(has "$G" 'now with rain')") $(has "$G" '"latest_version": 3')" "$G"
+check "video A still reads version 3 — the old Style Bible, and knows 4 exists" "$(has "$G" '"version": 3') $(not "$(has "$G" 'now with rain')") $(has "$G" '"latest_version": 4')" "$G"
 R=$(ch $CA director video_upgrade_channel '{"reason":"use the rain look"}')
-check "upgrading asks the user; nothing moves yet" "$(has "$R" 'Asked the user') $(is "$(api "$B/api/video-projects/$RA")" 'r.video.channelVersion===2')" "$R"
+check "upgrading asks the user; nothing moves yet" "$(has "$R" 'Asked the user') $(is "$(api "$B/api/video-projects/$RA")" 'r.video.channelVersion===3')" "$R"
 UP=$(jget "$(api "$B/api/video-projects/$RA")" "r.approvals.find(a=>a.kind==='channel_upgrade').id")
 R=$(curl -s -H 'content-type: application/json' -d '{"decision":"approve"}' "$B/api/approvals/$UP/decide")
 check "an approval cannot be decided without signing in" "$(has "$R" 'error')" "$R"
 api -d '{"decision":"approve"}' "$B/api/approvals/$UP/decide" >/dev/null
-check "   the user approves → video A is on version 3" "$(is "$(api "$B/api/video-projects/$RA")" 'r.video.channelVersion===3')"
+check "   the user approves → video A is on version 4" "$(is "$(api "$B/api/video-projects/$RA")" 'r.video.channelVersion===4')"
 
 echo "== nothing paid before the user approves"
 N=$(lines "$FAKE_CODEX_LOG")
@@ -131,6 +137,11 @@ check "   Codex got the reference image, with -- ending the image list" "$(is "$
 N=$(lines "$FAKE_CODEX_LOG")
 R=$(img A "{\"token\":\"devtoken\",\"chatId\":\"$CA\",\"role\":\"builder\",\"prompt\":\"Pip walking\",\"reference_asset_ids\":[\"$REF\"],\"register\":{\"kind\":\"production\",\"entity_id\":\"char-pip\",\"name\":\"Pip walking\",\"attributes\":{\"engineReady\":true,\"transparent\":true}}}")
 check "the identical request is answered from the earlier result — Codex not called again" "$(is "${R#A }" "r.reused===true && r.assetId==='$PROD'") $(( $(lines "$FAKE_CODEX_LOG") == N ))" "$R"
+R=$(img A "{\"token\":\"devtoken\",\"chatId\":\"$CA\",\"role\":\"builder\",\"prompt\":\"The observatory at night\"}")
+check "the second approved image is generated" "$(is "${R#A }" 'r.ok===true && !r.reused')" "$R"
+N=$(lines "$FAKE_CODEX_LOG")
+R=$(img A "{\"token\":\"devtoken\",\"chatId\":\"$CA\",\"role\":\"builder\",\"prompt\":\"One more, not in the plan\"}")
+check "a third is refused: the plan approved 2 new images, even though Codex costs \$0" "$(has "$R" 'approved plan covers 2') $(( $(lines "$FAKE_CODEX_LOG") == N ))" "$R"
 R=$(call $CA builder elevenlabs_creative_generate_speech '{"text":"Hello there, explorer."}')
 check "narration is generated after approval" "$(is "$R" 'r.ok===true') $( [ "$(lines "$LABSLOG")" = 1 ] && echo 1 || echo 0)" "$R"
 R=$(call $CA builder elevenlabs_creative_generate_speech '{"text":"Hello there, explorer."}')

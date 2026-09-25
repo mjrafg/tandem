@@ -31,15 +31,17 @@ export function Composer({ chat, prefill, onUsedPrefill }: { chat: Chat; prefill
   const [text, setText] = useState('');
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
-  const [reviewOn, setReviewOn] = useState(true);
+  // a standalone chat starts with the Reviewer off; a project's chats keep it on
+  const reviewDefault = !!chat.kind && chat.kind !== 'chat';
+  const [reviewOn, setReviewOn] = useState(reviewDefault);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // each chat starts at the default (Reviewer on); the choice then sticks
-  // until changed and applies to whatever message is sent next
+  // each chat starts at its default; the choice then sticks until changed
+  // and applies to whatever message is sent next
   useEffect(() => {
-    setReviewOn(true);
-  }, [chat.id]);
+    setReviewOn(reviewDefault);
+  }, [chat.id, reviewDefault]);
 
   useEffect(() => {
     if (prefill) {

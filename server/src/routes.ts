@@ -9,6 +9,7 @@ import {
   setPassword, setSessionCookie, verifyPassword,
 } from './auth';
 import { computeUsage } from './context';
+import { DeliverableError, INLINE_SAFE, deleteDeliverables, deliverablePath, downloadType, getDeliverable, shareFile } from './deliverables';
 import { config, shotsDir } from './config';
 import { db, getChat, getProject, rowToChat } from './db';
 import {
@@ -161,6 +162,7 @@ export function registerRoutes(app: FastifyInstance): void {
     deleteAgentSnapshot(chat.id);
     deleteLedger(chat.id); // the task's review budget goes with it
     deleteFindings(chat.id); // and its findings
+    deleteDeliverables(chat.id); // and the files it was given
     db.prepare('DELETE FROM events WHERE chat_id = ?').run(chat.id);
     db.prepare('DELETE FROM chats WHERE id = ?').run(chat.id);
     broadcast({ type: 'chat_deleted', chatId: chat.id });
@@ -382,6 +384,61 @@ export function registerRoutes(app: FastifyInstance): void {
     const title = canonicalSessionTitle(session, String(name));
     setChatTitle(chatId!, title);
     return { ok: true, applied: true, title };
+  });
+
+  /**
+   * A Builder hands the user a file it produced. The chat is resolved from the
+   * token-authenticated call, never from the model, and the file must be inside
+   * that chat's own directory. What the user gets is a copy (see deliverables.ts).
+   */
+  app.post('/api/internal/share-file', async (req, reply) => {
+    const { chatId, token, path: filePath, name, note } = (req.body ?? {}) as Record<string, unknown>;
+    if (token !== config.internalToken) return reply.code(403).send({ ok: false, error: 'Bad internal token.' });
+    try {
+      const d = await shareFile(String(chatId ?? ''), filePath, { name, note });
+      addEvent(d.chatId, 'file_output', {
+        id: d.id, name: d.name, size: d.size, mime: d.mime, note: d.note, path: d.sourcePath, sha256: d.sha256,
+      }, { runId: activeCtx(d.chatId)?.runId });
+      return { ok: true, id: d.id, name: d.name, size: d.size, mime: d.mime };
+    } catch (err) {
+      if (err instanceof DeliverableError) return reply.code(err.status).send({ ok: false, error: err.message });
+      throw err;
+    }
+  });
+
+  /**
+   * Download a shared file. Behind the normal sign-in. An attachment unless the
+   * page asks for an inline preview of a type that is safe to show in it;
+   * active content (HTML, SVG, XML, script) is only ever opaque bytes. Range
+   * requests are honoured, because Safari will not play audio or video without them.
+   */
+  app.get('/api/deliverables/:id', async (req, reply) => {
+    const d = getDeliverable((req.params as any).id);
+    if (!d) return reply.code(404).send({ error: 'That file is no longer available.' });
+    const file = deliverablePath(d);
+    let size: number;
+    try { size = fs.statSync(file).size; } catch { return reply.code(404).send({ error: 'That file is no longer available.' }); }
+    const inline = (req.query as any)?.inline === '1' && INLINE_SAFE.has(d.mime);
+    const ascii = d.name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+    reply.header('Content-Type', inline ? d.mime : downloadType(d.mime));
+    reply.header('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(d.name)}`);
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('Content-Security-Policy', "default-src 'none'; sandbox");
+    reply.header('Cache-Control', 'private, max-age=86400, immutable');
+    reply.header('Accept-Ranges', 'bytes');
+    const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
+    if (m && (m[1] || m[2])) {
+      // bytes=a-b, bytes=a- (to the end), bytes=-n (the last n)
+      let start = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2]));
+      let end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
+      if (start >= size || end < start) {
+        return reply.code(416).header('Content-Range', `bytes */${size}`).send();
+      }
+      reply.code(206).header('Content-Range', `bytes ${start}-${end}/${size}`).header('Content-Length', end - start + 1);
+      return reply.send(fs.createReadStream(file, { start, end }));
+    }
+    reply.header('Content-Length', size);
+    return reply.send(fs.createReadStream(file));
   });
 
   app.post('/api/internal/git-workflow', async (req, reply) => {

@@ -97,6 +97,10 @@ function eventToMarkdown(e: ChatEvent, chatId: string): string[] {
       return [`### 🤖 Assistant · ${t}`, ``, (e.payload as any).text];
     case 'status':
       return [`> _${(e.payload as any).text}_`];
+    case 'file_output': {
+      const f = e.payload as any;
+      return [`- 📎 **Shared file:** ${f.name} (${bytesText(f.size)})${f.note ? ` — ${f.note}` : ''}`];
+    }
     case 'run': {
       const p = e.payload as any;
       const review = p.phase === 'started' && p.review !== undefined
@@ -336,6 +340,10 @@ function eventToHtml(e: ChatEvent, chatId: string): string {
       return `<div class="ev assistant"><div class="who">Assistant · ${t}</div>${mdLite((e.payload as any).text)}</div>`;
     case 'status':
       return `<div class="ev status">${escapeHtml((e.payload as any).text)}</div>`;
+    case 'file_output': {
+      const f = e.payload as any;
+      return `<div class="ev status">📎 Shared file: <b>${escapeHtml(f.name)}</b> (${bytesText(f.size)})${f.note ? ` — ${escapeHtml(f.note)}` : ''}</div>`;
+    }
     case 'run': {
       const p = e.payload as any;
       const review = p.phase === 'started' && p.review !== undefined ? ` · Reviewer: ${p.review ? 'on' : 'skipped by user'}` : '';
@@ -470,4 +478,8 @@ function mdLite(text: string): string {
     return `<p>${blk.replace(/\n/g, '<br>')}</p>`;
   });
   return blocks.join('');
+}
+
+function bytesText(n: number): string {
+  return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 }

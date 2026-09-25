@@ -34,7 +34,7 @@ const MAX_ENTRIES = 2000;
 const MAX_COMMITS = 100;
 const MAX_BRANCH_COUNTS = 60;
 
-class BrowseError extends Error {
+export class BrowseError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
@@ -121,7 +121,7 @@ async function resolveCommit(root: string, ref: unknown): Promise<string> {
  * A caller-supplied path, normalized to a '/'-separated path relative to the
  * project root ('' for the root itself), or refused.
  */
-function cleanRel(input: unknown): string {
+export function cleanRel(input: unknown): string {
   if (input == null || input === '') return '';
   if (typeof input !== 'string' || input.length > 4096 || input.includes('\0')) {
     throw new BrowseError(400, 'Invalid path.');
@@ -136,7 +136,7 @@ function cleanRel(input: unknown): string {
 }
 
 /** The real on-disk location of `rel`, refused unless it is inside the root. */
-function resolveInside(root: string, rel: string): string {
+export function resolveInside(root: string, rel: string): string {
   let real: string;
   try { real = fs.realpathSync(path.join(root, rel)); } catch {
     throw new BrowseError(404, 'That file or folder does not exist.');
@@ -150,7 +150,7 @@ function resolveInside(root: string, rel: string): string {
   return real;
 }
 
-function projectRoot(id: string): string {
+export function projectRoot(id: string): string {
   const project = getProject(id);
   if (!project) throw new BrowseError(404, 'Project not found.');
   try { return fs.realpathSync(project.rootPath); } catch {

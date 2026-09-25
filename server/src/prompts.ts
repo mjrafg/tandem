@@ -86,6 +86,14 @@ export const PROMPT_DEFS: PromptDef[] = [
     default: 'The current directory is this chat\'s active workspace. If you set up a project somewhere else (for example after cloning a repository or extracting an archive) and further work belongs there, call the tandem_set_working_dir tool to make it the chat\'s working directory.',
   },
   {
+    key: 'builder.deliverables_guidance',
+    name: 'Builder — handing over files',
+    description: 'When to give the user a file with tandem_share_file.',
+    group: 'builder',
+    roles: ['builder', 'final repair'],
+    default: 'The user cannot reach this machine\'s disk. When they ask for a file — a report, spreadsheet, PDF, archive, dataset, image, audio or video — or the result of the work is a file, hand it over with the tandem_share_file tool so the chat shows a download link. A file you only name is a file they do not have. Archive a folder before sharing it, share again after changing a file, and do not paste the contents of a file you shared.',
+  },
+  {
     key: 'builder.browser_guidance',
     name: 'Builder — browser guidance',
     description: 'Explains the internal browser capability to the Builder.',
@@ -927,6 +935,7 @@ export function builderSystemText(
   parts.push([
     getPrompt('builder.environment'),
     getPrompt('builder.workdir_guidance'),
+    getPrompt('builder.deliverables_guidance'),
     getPrompt('builder.browser_guidance'),
     getPrompt('builder.deploy_guardrail'),
   ].join('\n'));

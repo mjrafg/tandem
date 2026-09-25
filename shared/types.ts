@@ -374,7 +374,8 @@ export type EventKind =
   | 'browser'
   | 'checkpoint'
   | 'tool_call'
-  | 'sessions';
+  | 'sessions'
+  | 'file_output';
 
 export type StepStatus = 'running' | 'done' | 'failed' | 'stopped';
 
@@ -766,7 +767,25 @@ export type EventPayloadMap = {
   checkpoint: CheckpointPayload;
   tool_call: ToolCallPayload;
   sessions: SessionsPayload;
+  file_output: FileOutputPayload;
 };
+
+/**
+ * A file an agent handed to the user. It is a copy taken when shared, served
+ * from /api/deliverables/:id, so it outlives the worktree it came from and does
+ * not change if the agent edits the original afterwards.
+ */
+export interface FileOutputPayload {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+  /** one line from the agent about what the file is */
+  note: string;
+  /** where it was shared from, relative to the chat's directory */
+  path: string;
+  sha256: string;
+}
 
 export interface ChatEvent<K extends EventKind = EventKind> {
   id: string;

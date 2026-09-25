@@ -1,0 +1,74 @@
+import { Download } from 'lucide-react';
+import type { ChatEvent, FileOutputPayload } from '@shared/types';
+import { fmtBytes } from '../../lib/format';
+import { attachmentIcon } from '../Composer';
+
+/**
+ * A file the agent handed over. Always open, never collapsed: it is the
+ * result, not a step towards it. Images, audio and video preview in place;
+ * the server decides what is safe to show inline and serves everything else
+ * as a download, whatever this component asks for.
+ */
+export function FileOutputRow({ ev }: { ev: ChatEvent }) {
+  const p = ev.payload as FileOutputPayload;
+  const href = `/api/deliverables/${p.id}`;
+  const inline = `${href}?inline=1`;
+  const kind = previewKind(p.mime);
+  const type = friendlyType(p.name, p.mime);
+
+  return (
+    <div className="my-1.5 overflow-hidden rounded-xl border border-linesoft bg-bg1">
+      <div className="flex items-center gap-3 px-3.5 py-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-bg3 text-mut">
+          {attachmentIcon(p.name, 17)}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div dir="auto" className="truncate text-[13.5px] font-medium text-ink" title={p.name}>{p.name}</div>
+          <div className="mt-0.5 flex flex-wrap gap-x-2 text-[11.5px] text-dim">
+            <span>{fmtBytes(p.size)}</span>
+            {type && <span>{type}</span>}
+            {p.path && p.path !== p.name && <span className="mono min-w-0 truncate" title={p.path}>{p.path}</span>}
+          </div>
+        </div>
+        <a
+          href={href}
+          download={p.name}
+          className="btn-primary shrink-0 gap-1.5 px-3 py-1.5 text-[12.5px]"
+          title={`Download ${p.name}`}
+        >
+          <Download size={14} /> Download
+        </a>
+      </div>
+      {p.note && <p dir="auto" className="border-t border-linesoft px-3.5 py-2 text-[12.5px] leading-relaxed text-mut">{p.note}</p>}
+      {kind === 'image' && (
+        <a href={inline} target="_blank" rel="noreferrer" className="block border-t border-linesoft bg-bg0">
+          <img src={inline} alt={p.name} loading="lazy" className="mx-auto max-h-[420px] w-auto max-w-full object-contain" />
+        </a>
+      )}
+      {kind === 'audio' && (
+        <div className="border-t border-linesoft px-3.5 py-2.5">
+          <audio controls preload="metadata" src={inline} className="w-full" />
+        </div>
+      )}
+      {kind === 'video' && (
+        <div className="border-t border-linesoft bg-bg0">
+          <video controls preload="metadata" src={inline} className="mx-auto max-h-[420px] w-full" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** mirrors the server's inline-safe list; the server is the one that enforces it */
+function previewKind(mime: string): 'image' | 'audio' | 'video' | null {
+  if (/^image\/(png|jpeg|gif|webp)$/.test(mime)) return 'image';
+  if (/^audio\/(mpeg|wav|ogg|mp4|aac|flac|opus)$/.test(mime)) return 'audio';
+  if (/^video\/(mp4|webm)$/.test(mime)) return 'video';
+  return null;
+}
+
+function friendlyType(name: string, mime: string): string {
+  const ext = name.includes('.') ? name.split('.').pop()!.toUpperCase() : '';
+  if (ext && ext.length <= 5) return ext;
+  return mime === 'application/octet-stream' ? '' : mime;
+}
